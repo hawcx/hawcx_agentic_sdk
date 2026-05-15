@@ -62,17 +62,17 @@ jobs:
         run: |
           if [[ "${{ matrix.cross }}" == "true" ]]; then
             cross build --release --target ${{ matrix.target }} \
-              --bin haap-auth-bin \
-              --bin haap-tqs-precompute-bin \
-              --bin haap-tqs-jit-bin \
-              --bin haap-assembler-bin \
+              --bin haap-authenticator \
+              --bin haap-tqs-precompute \
+              --bin haap-tqs-jit \
+              --bin haap-assembler \
               --bin haap-supervisor
           else
             cargo build --release --target ${{ matrix.target }} \
-              --bin haap-auth-bin \
-              --bin haap-tqs-precompute-bin \
-              --bin haap-tqs-jit-bin \
-              --bin haap-assembler-bin \
+              --bin haap-authenticator \
+              --bin haap-tqs-precompute \
+              --bin haap-tqs-jit \
+              --bin haap-assembler \
               --bin haap-supervisor
           fi
         shell: bash
@@ -96,7 +96,7 @@ jobs:
           OUT="hx-agent-sdk-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir -p "$OUT/bin"
           # hx_labs binaries
-          for b in haap-auth-bin haap-tqs-precompute-bin haap-tqs-jit-bin haap-assembler-bin haap-supervisor; do
+          for b in haap-authenticator haap-tqs-precompute haap-tqs-jit haap-assembler haap-supervisor; do
             cp "hx_labs/target/${{ matrix.target }}/release/$b" "$OUT/bin/" || \
               cp "hx_labs/target/${{ matrix.target }}/release/$b.exe" "$OUT/bin/"
           done
