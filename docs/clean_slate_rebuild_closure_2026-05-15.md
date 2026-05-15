@@ -1,7 +1,7 @@
 # Clean-slate rebuild — closure report
 
-**Date:** 2026-06-01
-**Branch:** `feature/initial-option-x-population-2026-06-01`
+**Date:** 2026-05-15
+**Branch:** `feature/initial-option-x-population-2026-05-15`
 **New `main`** (orphan, no shared history with the legacy branch).
 **Legacy preserved at:** `main-legacy-pre-option-x`.
 
