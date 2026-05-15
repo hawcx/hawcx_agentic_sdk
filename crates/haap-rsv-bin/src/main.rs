@@ -2,16 +2,21 @@
 //!
 //! Endpoints:
 //!
-//! - `POST /verify` accepts `{ "token_b64": "..." }` and returns either 200
+//! - `POST /verify` accepts `{ "token_b64": "..." }` plus optional
+//!   `encrypted_request_b64` + `request_aad_b64` fields. Returns 200
 //!   `{ "plaintext_b64": "...", "session_id": <u64>, "jti_hex": "...", "verification_handle": "uuid" }`
-//!   or 401 `{ "error": "..." }`.
+//!   or a 4xx/5xx error JSON.
 //! - `POST /encrypt-response` accepts `{ "verification_handle": "uuid", "plaintext_b64": "..." }`
 //!   and returns 200 `{ "ciphertext_b64": "..." }` or 404 if the handle expired (30s TTL).
 //! - `GET /healthz` returns 200 `"ok"`.
+//!
+//! See `crates/haap-rsv-bin/src/lib.rs` for the request/response schema
+//! definitions and pure helpers that this binary wires up.
 
 use anyhow::Result;
 use axum::{routing::{get, post}, Json, Router};
 use haap_rsv::Rsv;
+use haap_rsv_bin::{decode_request, should_warn_non_loopback, ErrorResp, VerifyReq, VerifyResp};
 use haap_sdk_types::RsvConfig;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -60,28 +65,24 @@ async fn main() -> Result<()> {
     let listen = std::env::var("HAAP_RSV_LISTEN").unwrap_or_else(|_| "127.0.0.1:8443".into());
     let addr: SocketAddr = listen.parse()?;
 
+    warn_if_non_loopback(&addr);
+
     tracing::info!(%addr, "haap-rsv HTTP API listening");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
 }
 
-#[derive(Deserialize)]
-struct VerifyReq {
-    token_b64: String,
-}
-
-#[derive(Serialize)]
-struct VerifyResp {
-    plaintext_b64: String,
-    session_id: u64,
-    jti_hex: String,
-    verification_handle: String,
-}
-
-#[derive(Serialize)]
-struct ErrorResp {
-    error: String,
+fn warn_if_non_loopback(addr: &SocketAddr) {
+    if should_warn_non_loopback(addr) {
+        tracing::warn!(
+            ip = %addr.ip(),
+            "haap-rsv listening on non-loopback address without TLS. \
+             This is appropriate for sidecar deployments behind a TLS-terminating \
+             reverse proxy. Direct network exposure of this endpoint without TLS \
+             is not supported. See docs/RSV_HTTP_API.md for the threat model."
+        );
+    }
 }
 
 async fn verify_handler(
@@ -89,26 +90,38 @@ async fn verify_handler(
     Json(req): Json<VerifyReq>,
 ) -> Result<Json<VerifyResp>, (axum::http::StatusCode, Json<ErrorResp>)> {
     use base64::Engine;
-    let token_bytes = base64::engine::general_purpose::STANDARD
-        .decode(&req.token_b64)
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::BAD_REQUEST,
-                Json(ErrorResp {
-                    error: format!("invalid base64 token: {e}"),
-                }),
-            )
-        })?;
 
-    let mut rsv = state.rsv.lock().await;
-    let verified = rsv.verify_and_decrypt(&token_bytes).await.map_err(|e| {
+    let decoded = decode_request(&req).map_err(|e| {
         (
-            axum::http::StatusCode::UNAUTHORIZED,
+            axum::http::StatusCode::BAD_REQUEST,
             Json(ErrorResp {
-                error: e.to_string(),
+                error: e.message(),
             }),
         )
     })?;
+
+    let mut rsv = state.rsv.lock().await;
+    let verified = match decoded.body.as_ref() {
+        Some((body, aad)) => rsv
+            .verify_and_decrypt_with_body(&decoded.token, Some(body), aad)
+            .await
+            .map_err(|e| {
+                (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    Json(ErrorResp {
+                        error: e.to_string(),
+                    }),
+                )
+            })?,
+        None => rsv.verify_and_decrypt(&decoded.token).await.map_err(|e| {
+            (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(ErrorResp {
+                    error: e.to_string(),
+                }),
+            )
+        })?,
+    };
 
     let handle = Uuid::new_v4();
     let now = std::time::SystemTime::now()
@@ -193,4 +206,3 @@ async fn encrypt_response_handler(
 async fn healthz() -> &'static str {
     "ok"
 }
-

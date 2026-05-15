@@ -25,10 +25,16 @@ haap-supervisor
 # Sidecar deployment (cross-language MCP servers):
 export HAAP_CUSTOMER_REDIS_URL=redis://customer-redis:6379
 export HAAP_AUDIENCE_HASH=<sha256 hex of audience URL>
-haap-sdk run-rsv --listen 0.0.0.0:8443
+haap-sdk run-rsv  # listens on 127.0.0.1:8443 by default (loopback)
 
 # Or run haap-rsv directly with the same env vars.
 ```
+
+For cross-host deployments, place a TLS-terminating reverse proxy
+(nginx, Caddy, Envoy) in front of `haap-rsv` and keep `haap-rsv` itself
+bound to loopback. See
+[`RSV_HTTP_API.md`](RSV_HTTP_API.md#threat-model-and-transport-security)
+for the supported deployment patterns.
 
 For Rust MCP servers, embed the `haap-rsv` library instead — see
 [`INTEGRATION.md`](INTEGRATION.md).
