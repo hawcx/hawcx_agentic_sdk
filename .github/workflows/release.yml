@@ -62,7 +62,12 @@ jobs:
       - name: Install cross (Linux aarch64)
         if: matrix.cross
         run: cargo install cross --locked
-
+        
+      - name: Copy Cross.toml to hx_labs working directory
+        if: matrix.cross
+        run: cp hx_agentic_sdk/Cross.toml hx_labs/Cross.toml
+        shell: bash
+        
       - name: Build hx_labs binaries
         working-directory: hx_labs
         run: |
