@@ -30,6 +30,10 @@ zeroize = { workspace = true }
 hex = { workspace = true }
 async-trait = { workspace = true }
 
+[features]
+default = []
+integration-tests = []
+
 [dev-dependencies]
 anyhow = { workspace = true }
 tokio = { workspace = true }
