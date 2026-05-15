@@ -1,0 +1,18 @@
+# Cross-rs configuration for the release workflow's aarch64-linux build.
+#
+# The aarch64-unknown-linux-gnu matrix job runs `cross build`, which
+# executes the actual compilation inside a Docker container based on
+# rust-cross's standard images. The host's protoc (installed via
+# arduino/setup-protoc@v3 in the workflow) is NOT visible inside the
+# container, so the container needs its own apt-get install of
+# protobuf-compiler.
+#
+# haap-supervisor's build.rs (from hx_labs) invokes tonic-build to
+# compile proto/supervisor_control.proto; this requires protoc to be on
+# the container's PATH.
+
+[target.aarch64-unknown-linux-gnu]
+pre-build = [
+    "apt-get update",
+    "apt-get install -y protobuf-compiler",
+]
