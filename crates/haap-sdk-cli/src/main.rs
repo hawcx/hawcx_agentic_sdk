@@ -115,7 +115,16 @@ mod commands {
             .map_err(|_| anyhow!("HAAP_CUSTOMER_REDIS_URL not set"))?;
         let mut reader = CustomerSubstrateReader::connect(&url).await?;
         match reader.fetch_session(session_id).await? {
-            Some(m) => println!("{m:?}"),
+            Some(m) => {
+                println!("session_id: {}", m.current_epoch);
+                println!("current_epoch: {}", m.current_epoch);
+                println!("status: {:?}", m.status);
+                println!("audience: {:?}", m.audience);
+                println!("scope_ceiling: {:?}", m.scope_ceiling);
+                println!("k_session_root: [REDACTED 32 bytes]");
+                println!("verifier_secret: [REDACTED 32 bytes]");
+                println!("sek_valid_from..until: {}..{}", m.sek_valid_from, m.sek_valid_until);
+            }
             None => println!("no session found for {session_id}"),
         }
         Ok(())

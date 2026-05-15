@@ -1,14 +1,20 @@
 //! Customer Redis SessionMaterial reader.
 //!
-//! The CAA writes `SubstrateMaterial` to customer-deployed Redis under
-//! `haap:session:<u64_decimal>`. RSV reads at verify time. Only the
-//! reader lives here — the writer is in `hx_agent_client_admin_service`.
+//! The CAA writes `RawSessionRecord` to customer-deployed Redis as
+//! a hash under `hawcx:session:{session_id}` via
+//! `haap_redis::set_session`. The RSV reads via this crate, which
+//! delegates to `haap_redis::get_session` for byte-identical schema
+//! handling.
 
-use haap_sdk_types::{SubstrateMaterial, SubstrateReaderError};
+use haap_redis::{get_session, RawSessionRecord};
+use haap_sdk_types::SubstrateReaderError;
 use redis::aio::ConnectionManager;
-use redis::AsyncCommands;
 
 fn map_redis(e: redis::RedisError) -> SubstrateReaderError {
+    SubstrateReaderError::Redis(e.to_string())
+}
+
+fn map_redis_store(e: haap_redis::RedisStoreError) -> SubstrateReaderError {
     SubstrateReaderError::Redis(e.to_string())
 }
 
@@ -23,17 +29,17 @@ impl CustomerSubstrateReader {
         Ok(Self { conn })
     }
 
-    /// Fetch SubstrateMaterial keyed by `haap:session:<session_id_decimal>`.
+    /// Fetch `RawSessionRecord` from `hawcx:session:{session_id}` via
+    /// `haap_redis::get_session`. Returns `None` if the session key
+    /// is absent.
     pub async fn fetch_session(
         &mut self,
         session_id: u64,
-    ) -> Result<Option<SubstrateMaterial>, SubstrateReaderError> {
-        let key = format!("haap:session:{}", session_id);
-        let bytes: Option<Vec<u8>> = self.conn.get(&key).await.map_err(map_redis)?;
-        match bytes {
-            Some(b) => Ok(Some(bincode::deserialize(&b)?)),
-            None => Ok(None),
-        }
+    ) -> Result<Option<RawSessionRecord>, SubstrateReaderError> {
+        let mut conn = self.conn.clone();
+        get_session(&mut conn, session_id)
+            .await
+            .map_err(map_redis_store)
     }
 
     pub fn connection(&self) -> ConnectionManager {

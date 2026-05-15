@@ -1,25 +1,18 @@
-//! `SubstrateMaterial` — what the CAA writes to customer Redis under
-//! `haap:session:<u64_decimal>`, what RSV reads at verify time.
+//! Substrate material — what the CAA writes to customer Redis and
+//! RSV reads at verify time.
+//!
+//! Per Phase 0.4 of the RSV cascade adapter PR
+//! (docs/rsv_adapter_helper_signatures.md), the SDK's previous
+//! `SubstrateMaterial` shape was substantially incomplete vs what
+//! `haap_core::cascade::verify_and_decrypt_request` requires. This
+//! module now re-exports `haap_redis::RawSessionRecord` as the
+//! canonical substrate format. The CAA already writes records in
+//! this shape via `haap_redis::set_session`; the SDK reads via
+//! `haap_redis::get_session`.
+//!
+//! `RawSessionRecord` is the byte-level (un-decompressed Ristretto)
+//! form. The cascade consumes `SessionRecord` (with decompressed
+//! points), produced via the `TryFrom<RawSessionRecord> for
+//! SessionRecord` impl gated on `haap-core/redis-backend`.
 
-use serde::{Deserialize, Serialize};
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct SubstrateMaterial {
-    pub session_id: u64,
-    pub k_session_root: [u8; 32],
-    pub verifier_secret: [u8; 32],
-    pub scope: String,
-    pub policy_epoch: u64,
-}
-
-impl std::fmt::Debug for SubstrateMaterial {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SubstrateMaterial")
-            .field("session_id", &self.session_id)
-            .field("k_session_root", &"[REDACTED]")
-            .field("verifier_secret", &"[REDACTED]")
-            .field("scope", &self.scope)
-            .field("policy_epoch", &self.policy_epoch)
-            .finish()
-    }
-}
+pub use haap_redis::RawSessionRecord as SubstrateMaterial;
