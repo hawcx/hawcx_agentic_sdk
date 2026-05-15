@@ -1,0 +1,30 @@
+[package]
+name = "haap-rsv"
+version = "0.1.0-alpha.1"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Hawcx HAAP Verifier — embeddable §9 16-step verification cascade for MCP server operators"
+keywords = ["hawcx", "haap", "agent", "auth", "mcp"]
+categories = ["authentication", "cryptography"]
+readme = "README.md"
+publish = true
+
+[dependencies]
+haap-sdk-types = { workspace = true }
+haap-substrate-reader = { workspace = true }
+haap-core = { workspace = true }
+haap-wire = { workspace = true }
+haap-crypto = { workspace = true }
+tokio = { workspace = true }
+redis = { workspace = true }
+lru = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+zeroize = { workspace = true }
+hex = { workspace = true }
+async-trait = { workspace = true }
