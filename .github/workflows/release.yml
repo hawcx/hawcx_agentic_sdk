@@ -125,7 +125,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: hx-agent-sdk-${{ matrix.target }}
-          path: hx_agentic_sdk/dist/*
+          path: dist/*
 
   docker:
     name: docker multi-arch

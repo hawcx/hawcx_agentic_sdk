@@ -1,18 +1,23 @@
 # Cross-rs configuration for the release workflow's aarch64-linux build.
 #
 # The aarch64-unknown-linux-gnu matrix job runs `cross build`, which
-# executes the actual compilation inside a Docker container based on
-# rust-cross's standard images. The host's protoc (installed via
-# arduino/setup-protoc@v3 in the workflow) is NOT visible inside the
-# container, so the container needs its own apt-get install of
-# protobuf-compiler.
+# executes the actual compilation inside a Docker container. The host's
+# protoc is NOT visible inside the container, AND the container's
+# default apt-get protobuf-compiler is too old (proto2-only).
 #
-# haap-supervisor's build.rs (from hx_labs) invokes tonic-build to
-# compile proto/supervisor_control.proto; this requires protoc to be on
-# the container's PATH.
+# So we download a recent protoc release inside the container. Version
+# pinned to v25.1 to match the host (arduino/setup-protoc@v3).
+#
+# Note: the cross container is x86_64 even when targeting aarch64.
+# protoc is a build tool that generates target-independent code, so
+# we use the x86_64 protoc binary.
 
 [target.aarch64-unknown-linux-gnu]
 pre-build = [
-    "apt-get update",
-    "apt-get install -y protobuf-compiler",
+    "apt-get update && apt-get install -y unzip curl ca-certificates",
+    "curl -fsSL -o /tmp/protoc.zip https://github.com/protocolbuffers/protobuf/releases/download/v25.1/protoc-25.1-linux-x86_64.zip",
+    "unzip -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'",
+    "chmod +x /usr/local/bin/protoc",
+    "rm /tmp/protoc.zip",
+    "protoc --version",
 ]
