@@ -15,10 +15,10 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             archive_ext: tar.gz
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
+            os: ubuntu-22.04-arm
             archive_ext: tar.gz
           - target: aarch64-apple-darwin
             os: macos-14
@@ -146,11 +146,11 @@ jobs:
           - platform: linux/amd64
             arch_suffix: amd64
             target: x86_64-unknown-linux-gnu
-            runner: ubuntu-latest
+            runner: ubuntu-22.04
           - platform: linux/arm64
             arch_suffix: arm64
             target: aarch64-unknown-linux-gnu
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-22.04-arm
     steps:
       - name: Checkout hx_agentic_sdk
         uses: actions/checkout@v4
