@@ -128,12 +128,12 @@ jobs:
          cp hx_agentic_sdk/target/${{ matrix.target }}/release/haap-sdk docker-staging/
          ls -la docker-staging/
 
-- name: Upload Linux binaries for Docker (linux only)
-  if: contains(matrix.target, 'linux-gnu')
-  uses: actions/upload-artifact@v4
-  with:
-    name: docker-bins-${{ matrix.target }}
-    path: docker-staging/
+    - name: Upload Linux binaries for Docker (linux only)
+      if: contains(matrix.target, 'linux-gnu')
+      uses: actions/upload-artifact@v4
+      with:
+        name: docker-bins-${{ matrix.target }}
+        path: docker-staging/
 
   docker:
     name: docker ${{ matrix.platform }}
