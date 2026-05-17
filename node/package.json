@@ -1,0 +1,55 @@
+{
+  "name": "@hawcx/hawcx-haap",
+  "version": "0.1.0-alpha.1",
+  "description": "Customer SDK for the Hawcx Agent Authentication Protocol (HAAP). Connects to a customer-deployed haap-supervisor and proxies tool calls through the Assembler per CS v6.7.4 Profile E.",
+  "keywords": [
+    "haap",
+    "hawcx",
+    "agent",
+    "authentication",
+    "mcp",
+    "tbac"
+  ],
+  "homepage": "https://github.com/hawcx/hx_agentic_sdk",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hawcx/hx_agentic_sdk.git",
+    "directory": "node"
+  },
+  "bugs": "https://github.com/hawcx/hx_agentic_sdk/issues",
+  "license": "Apache-2.0",
+  "author": "Hawcx Inc.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "tsc --noEmit -p tsconfig.json",
+    "clean": "rm -rf dist coverage"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

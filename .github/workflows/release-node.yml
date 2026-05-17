@@ -1,0 +1,57 @@
+name: release-node
+
+on:
+  push:
+    tags:
+      - "node-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (without leading node-v)"
+        required: true
+
+jobs:
+  test-matrix:
+    name: test node ${{ matrix.node }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+        node: ["18", "20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Install + typecheck + test
+        working-directory: node
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+
+  publish:
+    name: publish to npm
+    needs: test-matrix
+    runs-on: ubuntu-latest
+    environment: npm-production
+    permissions:
+      id-token: write   # required for npm provenance
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org/"
+      - name: Install + build
+        working-directory: node
+        run: |
+          npm ci
+          npm run build
+      - name: Publish with provenance
+        working-directory: node
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public
