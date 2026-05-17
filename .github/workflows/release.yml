@@ -18,8 +18,7 @@ jobs:
             os: ubuntu-latest
             archive_ext: tar.gz
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            cross: true
+            os: ubuntu-24.04-arm
             archive_ext: tar.gz
           - target: aarch64-apple-darwin
             os: macos-14
@@ -56,85 +55,22 @@ jobs:
           version: '25.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install cross (Linux aarch64)
-        if: matrix.cross
-        run: cargo install cross --locked
-
-      - name: Copy Cross.toml to hx_labs working directory
-        if: matrix.cross
-        run: cp hx_agentic_sdk/Cross.toml hx_labs/Cross.toml
-        shell: bash
-
       - name: Build hx_labs binaries
         working-directory: hx_labs
         run: |
-          if [[ "${{ matrix.cross }}" == "true" ]]; then
-            cross build --release --target ${{ matrix.target }} \
-              --bin haap-authenticator \
-              --bin haap-tqs-precompute \
-              --bin haap-tqs-jit \
-              --bin haap-assembler \
-              --bin haap-supervisor
-          else
-            cargo build --release --target ${{ matrix.target }} \
-              --bin haap-authenticator \
-              --bin haap-tqs-precompute \
-              --bin haap-tqs-jit \
-              --bin haap-assembler \
-              --bin haap-supervisor
-          fi
+          cargo build --release --target ${{ matrix.target }} \
+            --bin haap-authenticator \
+            --bin haap-tqs-precompute \
+            --bin haap-tqs-jit \
+            --bin haap-assembler \
+            --bin haap-supervisor
         shell: bash
-
-      - name: Stage hx_labs inside SDK workspace for cross visibility
-        if: matrix.cross
-        shell: bash
-        run: |
-          set -e
-          cd "$GITHUB_WORKSPACE"
-          
-          echo "=== Filesystem layout ==="
-          pwd
-          ls -la
-          
-          echo "=== Existing path-deps in SDK (before staging) ==="
-          grep -rn 'path.*hx_labs' hx_agentic_sdk/Cargo.toml \
-              hx_agentic_sdk/crates/*/Cargo.toml 2>/dev/null || \
-              echo "(no path-deps to hx_labs found)"
-          
-          echo "=== Copying hx_labs into SDK workspace ==="
-          cp -r hx_labs hx_agentic_sdk/_hx_labs_vendored
-          
-          echo "=== Rewriting path-deps with sed ==="
-          find hx_agentic_sdk -name 'Cargo.toml' \
-              -not -path '*/_hx_labs_vendored/*' -exec \
-              sed -i.bak -E 's|path[[:space:]]*=[[:space:]]*"(\.\./)+hx_labs/|path = "_hx_labs_vendored/|g' {} \;
-          
-          echo "=== Path-deps after rewriting (expect _hx_labs_vendored references) ==="
-          grep -rn 'path.*_hx_labs_vendored' hx_agentic_sdk/Cargo.toml \
-              hx_agentic_sdk/crates/*/Cargo.toml 2>/dev/null || \
-              echo "(no rewritten path-deps found; investigate)"
-          
-          echo "=== Remaining ../hx_labs references (should be none) ==="
-          if grep -rn 'path.*\.\./hx_labs' hx_agentic_sdk/Cargo.toml \
-              hx_agentic_sdk/crates/*/Cargo.toml 2>/dev/null; then
-              echo "WARNING: residual ../hx_labs references found above"
-              exit 1
-          else
-              echo "(no remaining ../hx_labs references; good)"
-          fi
-          
-          echo "=== Staging complete ==="
 
       - name: Build SDK binaries
         working-directory: hx_agentic_sdk
         run: |
-          if [[ "${{ matrix.cross }}" == "true" ]]; then
-            cross build --release --target ${{ matrix.target }} \
-              --bin haap-rsv --bin haap-sdk
-          else
-            cargo build --release --target ${{ matrix.target }} \
-              --bin haap-rsv --bin haap-sdk
-          fi
+          cargo build --release --target ${{ matrix.target }} \
+            --bin haap-rsv --bin haap-sdk
         shell: bash
 
       - name: Package distribution tarball
@@ -143,18 +79,16 @@ jobs:
           mkdir -p dist
           OUT="hx-agent-sdk-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir -p "$OUT/bin"
-          # hx_labs binaries
           for b in haap-authenticator haap-tqs-precompute haap-tqs-jit haap-assembler haap-supervisor; do
             cp "hx_labs/target/${{ matrix.target }}/release/$b" "$OUT/bin/" || \
               cp "hx_labs/target/${{ matrix.target }}/release/$b.exe" "$OUT/bin/"
           done
-          # SDK binaries
           for b in haap-rsv haap-sdk; do
             cp "hx_agentic_sdk/target/${{ matrix.target }}/release/$b" "$OUT/bin/" || \
               cp "hx_agentic_sdk/target/${{ matrix.target }}/release/$b.exe" "$OUT/bin/"
           done
-          cp hx_agentic_sdk/README.md "$OUT/"
-          cp -r hx_agentic_sdk/docs "$OUT/"
+          cp hx_agentic_sdk/README.md "$OUT/" 2>/dev/null || true
+          cp -r hx_agentic_sdk/docs "$OUT/" 2>/dev/null || true
           if [[ "${{ matrix.archive_ext }}" == "zip" ]]; then
             7z a "dist/$OUT.zip" "$OUT"
           else
