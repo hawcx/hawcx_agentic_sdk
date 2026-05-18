@@ -38,3 +38,7 @@ integration-tests = []
 anyhow = { workspace = true }
 tokio = { workspace = true }
 tracing-subscriber = { workspace = true }
+# v6.8.0 (W4): RegistrationScopeAuthorizer tests build a fake
+# SessionRecord, which references RistrettoPoint + Scalar. Pinned to
+# the same major version haap-core uses.
+curve25519-dalek = { version = "4", features = ["serde", "rand_core"] }
