@@ -10,6 +10,6 @@ pub mod authorizer;
 pub mod replay;
 pub mod rsv;
 
-pub use authorizer::PermissiveAuthorizer;
+pub use authorizer::{PermissiveAuthorizer, RegistrationScopeAuthorizer};
 pub use replay::{InMemReplayCheck, RedisReplayCheck, ReplayError};
 pub use rsv::Rsv;

@@ -1,60 +1,134 @@
-//! Authorizer impl for the RSV cascade.
+//! Authorizer adapters for the RSV cascade.
 //!
-//! Per Phase 0.4 of docs/rsv_adapter_helper_signatures.md, the
-//! `RegistrationScopeAuthorizer` design the prompt described cannot
-//! be implemented today: the cascade's `Authorizer` trait signature
-//! `authorize(scope, operation, resource) -> bool` has no access to
-//! `SessionRecord`, and no `registered_scope` field exists in the
-//! substrate.
+//! v6.8.0 (W4 2026-05-18) closes the two prerequisites that previously
+//! made `RegistrationScopeAuthorizer` impossible to ship from the SDK
+//! (see commit history + docs/rsv_adapter_helper_signatures.md Phase 0.4):
 //!
-//! For alpha, we ship `PermissiveAuthorizer` that always returns true.
-//! This defers ALL scope/operation/resource authorization to the
-//! cascade's existing internal checks:
+//! 1. The substrate now carries `registered_scope_json` on
+//!    `RawSessionRecord` / `SessionRecord` (hx_labs W4 / haap-core).
+//! 2. The `Authorizer` trait signature accepts `&SessionRecord`, so
+//!    impls can inspect the registration-time field at decision time
+//!    (hx_labs W4 / haap-core).
 //!
-//! - Step 13 enforces `scope_ceiling` (token's claimed scope must be
-//!   within the session's policy-set ceiling)
-//! - Step 13 enforces confirmation requirements, PoP, intent
-//!   verification, HAAPI billing
-//! - Step 14 enforces PoP signature
+//! This module exposes:
 //!
-//! Production deployments may swap in a Cedar-backed Authorizer that
-//! evaluates operation+resource against organization policy. That's
-//! a separate workstream.
+//! - [`PermissiveAuthorizer`] — alpha default; always returns true and
+//!   defers to the cascade's Step 10 ceiling check.
+//! - [`RegistrationScopeAuthorizer`] — strict-equality reference impl
+//!   that mirrors the haap-core impl byte-for-byte. The RSV operator
+//!   selects it via [`crate::Rsv::builder`].
 //!
-//! Registration-scope semantics (compare token's scope to the agent's
-//! registration-time scope strictly) becomes feasible once:
-//!
-//! 1. The substrate schema (RawSessionRecord) carries a
-//!    `registered_scope` field (CAA write-path change).
-//! 2. The Authorizer trait is extended to receive `&SessionRecord` or
-//!    the SDK uses a stateful Authorizer constructed per-request
-//!    after substrate lookup.
+//! Strict-equality semantics (not subset) is v6.8.0's default per memo
+//! §2.4 + CS §9.1.X. Subset semantics is a future enhancement that
+//! requires no further trait shape changes — only the comparison logic.
 
-use haap_core::Authorizer;
+use haap_core::types::{Authorizer, SessionRecord};
 
-/// Permissive Authorizer: always returns true.
+/// Permissive authorizer: always returns `true`.
 ///
-/// Cascade-internal checks (scope_ceiling at step 13, PoP at step 14,
-/// confirmation requirements, etc.) remain active. This Authorizer
+/// Cascade-internal checks (scope_ceiling at step 10, PoP at step 14,
+/// confirmation requirements, etc.) remain active. This authorizer
 /// only short-circuits the operation+resource policy evaluation that
 /// belongs to a future Cedar layer.
 pub struct PermissiveAuthorizer;
 
 impl Authorizer for PermissiveAuthorizer {
-    fn authorize(&self, _scope: &[u8], _operation: &str, _resource: &str) -> bool {
+    fn authorize(
+        &self,
+        _claimed_scope: &[u8],
+        _operation: &str,
+        _resource: &str,
+        _session: &SessionRecord,
+    ) -> bool {
         true
+    }
+}
+
+/// Strict-equality registration-scope authorizer per CS v6.8.0 §9.1.X.
+///
+/// The token's `claimed_scope` MUST equal
+/// `session.registered_scope_json` byte-for-byte (CanonicalJSON). When
+/// `registered_scope_json` is `None` (legacy substrates that did not
+/// opt in to registration-scope binding), this authorizer defers
+/// permissive — the cascade's Step 10 ceiling check remains the
+/// protection floor.
+///
+/// Mirrors `haap_core::authorizer::RegistrationScopeAuthorizer`. The
+/// SDK ships an independent type so RSV operators do not need to take
+/// a direct `haap-core::authorizer` import.
+pub struct RegistrationScopeAuthorizer;
+
+impl Authorizer for RegistrationScopeAuthorizer {
+    fn authorize(
+        &self,
+        claimed_scope: &[u8],
+        _operation: &str,
+        _resource: &str,
+        session: &SessionRecord,
+    ) -> bool {
+        match &session.registered_scope_json {
+            Some(registered) => claimed_scope == registered.as_slice(),
+            None => true,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use curve25519_dalek::{ristretto::RistrettoPoint, scalar::Scalar};
+    use haap_core::types::SessionStatus;
+
+    fn fake_session(registered_scope_json: Option<Vec<u8>>) -> SessionRecord {
+        SessionRecord {
+            tqs_public: RistrettoPoint::default(),
+            sek_secret: Scalar::ZERO,
+            sek_public: RistrettoPoint::default(),
+            sek_valid_from: 0,
+            sek_valid_until: 0,
+            verifier_secret: [0u8; 32],
+            k_session_root: [0u8; 32],
+            current_epoch: 0,
+            scope_ceiling: None,
+            pop_pub: None,
+            status: SessionStatus::Active,
+            org_id: None,
+            audience: None,
+            profile: None,
+            registered_scope_json,
+        }
+    }
 
     #[test]
     fn permissive_authorizer_allows_anything() {
         let auth = PermissiveAuthorizer;
-        assert!(auth.authorize(b"any:scope", "read", "any:resource"));
-        assert!(auth.authorize(b"", "", ""));
-        assert!(auth.authorize(b"write", "DELETE", "/admin"));
+        let session = fake_session(None);
+        assert!(auth.authorize(b"any:scope", "read", "any:resource", &session));
+        assert!(auth.authorize(b"", "", "", &session));
+        assert!(auth.authorize(b"write", "DELETE", "/admin", &session));
+    }
+
+    #[test]
+    fn registration_scope_match_accepts() {
+        let auth = RegistrationScopeAuthorizer;
+        let scope = br#"["read:notes"]"#.to_vec();
+        let session = fake_session(Some(scope.clone()));
+        assert!(auth.authorize(&scope, "read", "notes", &session));
+    }
+
+    #[test]
+    fn registration_scope_mismatch_rejects() {
+        let auth = RegistrationScopeAuthorizer;
+        let session = fake_session(Some(br#"["read:notes"]"#.to_vec()));
+        assert!(!auth.authorize(br#"["write:notes"]"#, "write", "notes", &session));
+    }
+
+    #[test]
+    fn registration_scope_absent_defers_permissive() {
+        // Legacy substrate (None) defers to permissive; the cascade's
+        // Step 10 ceiling check is the protection floor.
+        let auth = RegistrationScopeAuthorizer;
+        let session = fake_session(None);
+        assert!(auth.authorize(br#"["any:thing"]"#, "any", "any", &session));
     }
 }

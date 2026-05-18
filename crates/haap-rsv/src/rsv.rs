@@ -8,7 +8,7 @@ use std::convert::TryFrom;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use haap_core::cascade::verify_and_decrypt_request;
-use haap_core::types::{CascadeContext, SessionRecord};
+use haap_core::types::{Authorizer, CascadeContext, SessionRecord};
 use haap_core::error::CascadeRejectReason;
 use haap_sdk_types::{RsvConfig, RsvError, VerifiedRequest, VerifyError};
 use haap_substrate_reader::CustomerSubstrateReader;
@@ -17,6 +17,28 @@ use zeroize::Zeroizing;
 
 use crate::authorizer::PermissiveAuthorizer;
 use crate::replay::{InMemReplayCheck, RedisReplayCheck};
+
+/// Trait-object wrapper for the runtime-chosen [`Authorizer`].
+///
+/// The cascade accepts `&impl Authorizer`, and a blanket
+/// `impl<A: Authorizer> Authorizer for &A` lives in haap-core, but
+/// `Box<dyn Authorizer + Send + Sync>` doesn't gain an `Authorizer` impl
+/// for free (no orphan-rule-compliant way to add one from outside
+/// haap-core). This newtype wraps the boxed trait object and forwards
+/// the trait method so the cascade can consume it via `&self.authorizer`.
+pub(crate) struct DynAuthorizer(pub Box<dyn Authorizer + Send + Sync>);
+
+impl Authorizer for DynAuthorizer {
+    fn authorize(
+        &self,
+        claimed_scope: &[u8],
+        operation: &str,
+        resource: &str,
+        session: &SessionRecord,
+    ) -> bool {
+        self.0.authorize(claimed_scope, operation, resource, session)
+    }
+}
 
 /// Hawcx HAAP Verifier.
 ///
@@ -27,14 +49,37 @@ use crate::replay::{InMemReplayCheck, RedisReplayCheck};
 /// The dual-client setup is required because the cascade's
 /// `ReplayCheck` trait is synchronous (it runs inside a sync cascade
 /// function), while substrate fetch is async around it.
+///
+/// v6.8.0 (W4 2026-05-18): also holds an operator-chosen
+/// [`Authorizer`] (defaults to [`PermissiveAuthorizer`]). Operators
+/// that want registration-scope binding construct the verifier with
+/// [`Rsv::new_with_authorizer`] and [`RegistrationScopeAuthorizer`]
+/// (or any custom impl).
 pub struct Rsv {
     substrate: CustomerSubstrateReader,
     redis_client: redis::Client,
     config: RsvConfig,
+    authorizer: DynAuthorizer,
 }
 
 impl Rsv {
+    /// Construct an `Rsv` with [`PermissiveAuthorizer`]. Suitable for
+    /// alpha deployments that do not yet enforce registration-scope
+    /// binding; the cascade's Step 10 ceiling check remains the floor.
     pub async fn new(config: RsvConfig) -> Result<Self, RsvError> {
+        Self::new_with_authorizer(config, Box::new(PermissiveAuthorizer)).await
+    }
+
+    /// Construct an `Rsv` with an operator-chosen [`Authorizer`].
+    ///
+    /// Production deployments that opt in to registration-scope
+    /// binding pass `Box::new(RegistrationScopeAuthorizer)` per
+    /// CS v6.8.0 §9.1.X (W4). Custom authorizers (Cedar-backed,
+    /// composite, etc.) work the same way.
+    pub async fn new_with_authorizer(
+        config: RsvConfig,
+        authorizer: Box<dyn Authorizer + Send + Sync>,
+    ) -> Result<Self, RsvError> {
         let substrate = CustomerSubstrateReader::connect(&config.customer_redis_url).await?;
         let redis_client = redis::Client::open(config.customer_redis_url.clone())
             .map_err(|e| RsvError::Io(std::io::Error::other(e.to_string())))?;
@@ -42,6 +87,7 @@ impl Rsv {
             substrate,
             redis_client,
             config,
+            authorizer: DynAuthorizer(authorizer),
         })
     }
 
@@ -103,16 +149,16 @@ impl Rsv {
         })?;
         let mut replay = RedisReplayCheck::new(conn);
 
-        // 6. Authorizer impl — PermissiveAuthorizer for alpha
-        let authorizer = PermissiveAuthorizer;
-
+        // 6. Authorizer impl — operator-chosen at construction time.
+        //    v6.8.0 (W4) lets operators select RegistrationScopeAuthorizer
+        //    or any custom impl via Rsv::new_with_authorizer.
         // 7. Cascade call
         let (token_body, body_plaintext) = verify_and_decrypt_request(
             &parsed,
             Some(&session),
             &ctx,
             &mut replay,
-            &authorizer,
+            &self.authorizer,
             encrypted_request,
             request_aad,
         )
@@ -163,14 +209,12 @@ impl Rsv {
             tool_arguments: None,
         };
 
-        let authorizer = PermissiveAuthorizer;
-
         let (token_body, body_plaintext) = verify_and_decrypt_request(
             &parsed,
             Some(&session),
             &ctx,
             replay,
-            &authorizer,
+            &self.authorizer,
             encrypted_request,
             request_aad,
         )
