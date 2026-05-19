@@ -15,8 +15,14 @@ use haap_substrate_reader::CustomerSubstrateReader;
 use haap_wire::decode_token;
 use zeroize::Zeroizing;
 
-use crate::authorizer::PermissiveAuthorizer;
+use crate::authorizer::{PermissiveAuthorizer, RegistrationScopeAuthorizer};
 use crate::replay::{InMemReplayCheck, RedisReplayCheck};
+
+/// Environment variable selecting the operator's [`Authorizer`].
+///
+/// Set to `permissive` (default) or `strict`. Read by
+/// [`Rsv::new_from_env`].
+pub const ENV_RSV_AUTHORIZER: &str = "HAWCX_RSV_AUTHORIZER";
 
 /// Trait-object wrapper for the runtime-chosen [`Authorizer`].
 ///
@@ -68,6 +74,32 @@ impl Rsv {
     /// binding; the cascade's Step 10 ceiling check remains the floor.
     pub async fn new(config: RsvConfig) -> Result<Self, RsvError> {
         Self::new_with_authorizer(config, Box::new(PermissiveAuthorizer)).await
+    }
+
+    /// Construct an `Rsv` with the authorizer selected by the
+    /// [`ENV_RSV_AUTHORIZER`] environment variable.
+    ///
+    /// | Value         | Authorizer                          |
+    /// |---------------|-------------------------------------|
+    /// | (unset)       | [`PermissiveAuthorizer`]            |
+    /// | `permissive`  | [`PermissiveAuthorizer`]            |
+    /// | `strict`      | [`RegistrationScopeAuthorizer`]     |
+    ///
+    /// Matching is ASCII case-insensitive. Any other value is rejected
+    /// fail-fast (`RsvError::Io` with an explanatory message) to avoid
+    /// the silent-permissive-fallback foot-gun.
+    ///
+    /// Switching to `strict` requires that all enrolled agents have
+    /// `registered_scope_json` written into substrate (per the AS-side
+    /// W4 work landing concurrently). Pre-v6.9.0 sessions without it
+    /// fall through to permissive semantics at the per-session level
+    /// via [`RegistrationScopeAuthorizer`]'s `None` branch (see
+    /// `authorizer.rs:71`) — this is the documented graceful fallback,
+    /// not a global toggle.
+    pub async fn new_from_env(config: RsvConfig) -> Result<Self, RsvError> {
+        let raw = std::env::var(ENV_RSV_AUTHORIZER).ok();
+        let authorizer = authorizer_from_env_value(raw.as_deref())?;
+        Self::new_with_authorizer(config, authorizer).await
     }
 
     /// Construct an `Rsv` with an operator-chosen [`Authorizer`].
@@ -252,6 +284,29 @@ impl Rsv {
     }
 }
 
+/// Pure parser for the [`ENV_RSV_AUTHORIZER`] value. Extracted so unit
+/// tests can exercise the dispatch table without touching the process
+/// environment (which is global, race-prone, and hard to clean up).
+///
+/// `None`, `Some("")`, `Some("permissive")` → [`PermissiveAuthorizer`].
+/// `Some("strict")` → [`RegistrationScopeAuthorizer`].
+/// Any other value → `RsvError::Io` (fail-fast, no silent fallback).
+///
+/// Matching is ASCII case-insensitive with surrounding whitespace
+/// trimmed.
+pub(crate) fn authorizer_from_env_value(
+    raw: Option<&str>,
+) -> Result<Box<dyn Authorizer + Send + Sync>, RsvError> {
+    let normalized = raw.map(|s| s.trim().to_ascii_lowercase());
+    match normalized.as_deref() {
+        None | Some("") | Some("permissive") => Ok(Box::new(PermissiveAuthorizer)),
+        Some("strict") => Ok(Box::new(RegistrationScopeAuthorizer)),
+        Some(other) => Err(RsvError::Io(std::io::Error::other(format!(
+            "{ENV_RSV_AUTHORIZER}={other:?} is not a recognized value; expected 'permissive' or 'strict'"
+        )))),
+    }
+}
+
 /// Map a `CascadeRejectReason` to a `VerifyError` variant.
 ///
 /// Every cascade rejection variant gets a stable SDK-side mapping so
@@ -297,5 +352,133 @@ fn map_cascade_reject(reject: CascadeRejectReason) -> VerifyError {
         PopSigInvalid => VerifyError::CascadeRejected("PopSigInvalid (step 14)".into()),
         PopPubMissing => VerifyError::CascadeRejected("PopPubMissing (step 14)".into()),
         ConcurrentConsume => VerifyError::Replay,
+    }
+}
+
+#[cfg(test)]
+mod env_authorizer_tests {
+    //! Env-var dispatch tests for `HAWCX_RSV_AUTHORIZER`.
+    //!
+    //! These exercise the pure parser `authorizer_from_env_value` rather
+    //! than `Rsv::new_from_env` directly, so the suite doesn't need a
+    //! live Redis and doesn't mutate the process environment (which is
+    //! global state and unsafe under cargo's parallel test runner).
+    //!
+    //! Behavior is asserted by inspecting the returned trait object's
+    //! `Authorizer::authorize` decision on synthetic SessionRecords —
+    //! Permissive always returns true; RegistrationScope rejects on
+    //! mismatch.
+    use super::authorizer_from_env_value;
+    use curve25519_dalek::{ristretto::RistrettoPoint, scalar::Scalar};
+    use haap_core::types::{SessionRecord, SessionStatus};
+    use haap_sdk_types::RsvError;
+
+    fn session_with_scope(registered_scope_json: Option<Vec<u8>>) -> SessionRecord {
+        SessionRecord {
+            tqs_public: RistrettoPoint::default(),
+            sek_secret: Scalar::ZERO,
+            sek_public: RistrettoPoint::default(),
+            sek_valid_from: 0,
+            sek_valid_until: 0,
+            verifier_secret: [0u8; 32],
+            k_session_root: [0u8; 32],
+            current_epoch: 0,
+            scope_ceiling: None,
+            pop_pub: None,
+            status: SessionStatus::Active,
+            org_id: None,
+            audience: None,
+            profile: None,
+            registered_scope_json,
+        }
+    }
+
+    fn unwrap_auth(
+        r: Result<Box<dyn haap_core::types::Authorizer + Send + Sync>, RsvError>,
+    ) -> Box<dyn haap_core::types::Authorizer + Send + Sync> {
+        // Box<dyn Trait> doesn't impl Debug, so `.expect(...)` is not
+        // available. Match directly.
+        match r {
+            Ok(a) => a,
+            Err(e) => panic!("authorizer_from_env_value rejected unexpectedly: {e}"),
+        }
+    }
+
+    #[test]
+    fn env_unset_selects_permissive() {
+        let auth = unwrap_auth(authorizer_from_env_value(None));
+        // Permissive accepts mismatched claimed-vs-registered.
+        let session = session_with_scope(Some(b"registered".to_vec()));
+        assert!(auth.authorize(b"different", "read", "x", &session));
+    }
+
+    #[test]
+    fn env_empty_string_selects_permissive() {
+        // Common ops mistake: HAWCX_RSV_AUTHORIZER= (export with no
+        // value). Treat as unset, not as a parse error — refusing to
+        // start the verifier over a whitespace-only env value would be
+        // an annoying ops trap with no security upside.
+        let auth = unwrap_auth(authorizer_from_env_value(Some("")));
+        let session = session_with_scope(Some(b"registered".to_vec()));
+        assert!(auth.authorize(b"different", "read", "x", &session));
+    }
+
+    #[test]
+    fn env_permissive_explicit_selects_permissive() {
+        let auth = unwrap_auth(authorizer_from_env_value(Some("permissive")));
+        let session = session_with_scope(Some(b"registered".to_vec()));
+        assert!(auth.authorize(b"different", "read", "x", &session));
+    }
+
+    #[test]
+    fn env_strict_selects_registration_scope_authorizer() {
+        let auth = unwrap_auth(authorizer_from_env_value(Some("strict")));
+        let session = session_with_scope(Some(b"registered".to_vec()));
+        // Strict rejects mismatched claimed-vs-registered.
+        assert!(!auth.authorize(b"different", "read", "x", &session));
+        // Strict accepts matching scope.
+        assert!(auth.authorize(b"registered", "read", "x", &session));
+    }
+
+    #[test]
+    fn env_strict_legacy_substrate_defers_permissive() {
+        // Strict mode with a pre-W4 session (no registered_scope_json
+        // in substrate) MUST NOT brick verification — it falls through
+        // to permissive at the per-session level via the
+        // RegistrationScopeAuthorizer::None branch. This is the
+        // documented graceful-fallback contract.
+        let auth = unwrap_auth(authorizer_from_env_value(Some("strict")));
+        let session = session_with_scope(None);
+        assert!(auth.authorize(b"any:scope", "any", "any", &session));
+    }
+
+    #[test]
+    fn env_case_insensitive_with_whitespace() {
+        // Operators commonly hit case-sensitivity gotchas (`Strict`,
+        // ` strict `, `STRICT`). Normalize.
+        for v in ["Strict", " strict ", "STRICT", "\tstrict\n"] {
+            let auth = unwrap_auth(authorizer_from_env_value(Some(v)));
+            let session = session_with_scope(Some(b"reg".to_vec()));
+            assert!(
+                !auth.authorize(b"mismatch", "read", "x", &session),
+                "{v:?} should resolve to strict semantics"
+            );
+        }
+    }
+
+    #[test]
+    fn env_unknown_value_fails_fast() {
+        // Silent fallback on unknown values is the classic "I thought I
+        // was running strict but it's actually permissive" foot-gun.
+        // Reject loudly.
+        let err = match authorizer_from_env_value(Some("paranoid")) {
+            Ok(_) => panic!("unknown value must fail fast, not silently fall back"),
+            Err(e) => e,
+        };
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("HAWCX_RSV_AUTHORIZER") && msg.contains("paranoid"),
+            "error must name both env var and rejected value, got: {msg}"
+        );
     }
 }

@@ -58,7 +58,11 @@ async fn main() -> Result<()> {
         .init();
 
     let config = RsvConfig::from_env()?;
-    let rsv = Rsv::new(config).await?;
+    // Authorizer selection per env: HAWCX_RSV_AUTHORIZER=permissive|strict
+    // (default: permissive). See crates/haap-rsv/src/rsv.rs:new_from_env
+    // and the README for the strict-mode prerequisite (substrate must
+    // carry `registered_scope_json` for enrolled agents).
+    let rsv = Rsv::new_from_env(config).await?;
 
     let state = AppState {
         rsv: Arc::new(Mutex::new(rsv)),

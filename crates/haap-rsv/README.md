@@ -36,7 +36,45 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
+## Authorizer selection
+
+The cascade's `Authorizer` decision belongs to the operator. The
+default constructor (`Rsv::new`) uses `PermissiveAuthorizer` —
+suitable for alpha deployments where the cascade's Step 10 ceiling
+check is the protection floor. Operators ready to enforce
+registration-scope binding (CS v6.8.0 §9.1.X, W4) have three options:
+
+- `Rsv::new_with_authorizer(config, Box::new(RegistrationScopeAuthorizer))`
+  — explicit, no env coupling.
+- `Rsv::new_from_env(config)` — reads `HAWCX_RSV_AUTHORIZER`:
+
+  | Value           | Authorizer                          |
+  |-----------------|-------------------------------------|
+  | (unset / empty) | `PermissiveAuthorizer` (default)    |
+  | `permissive`    | `PermissiveAuthorizer`              |
+  | `strict`        | `RegistrationScopeAuthorizer`       |
+
+  Matching is ASCII case-insensitive (`strict`, `STRICT`, ` strict ` all
+  work). Unknown values are rejected fail-fast — silent
+  fallback-to-permissive is the classic "I thought strict was on but
+  it isn't" foot-gun, so we refuse to start.
+
+- Custom impl — wrap any `dyn haap_core::types::Authorizer` and pass
+  via `new_with_authorizer`. Cedar-backed, composite, etc.
+
+**Strict-mode prerequisite.** Switching to `strict` requires that
+enrolled agents have `registered_scope_json` populated in substrate
+(populated by the AS at v6.9.0 `/v3/register_agent` per the W4
+workstream). Pre-v6.9.0 sessions without it fall through to
+permissive semantics at the per-session level via
+`RegistrationScopeAuthorizer`'s `None` branch — this is the
+documented graceful-fallback contract. The global selector says
+"strict"; the per-session fall-through avoids bricking verification
+on a mixed-vintage substrate during rollout.
+
 ## See also
 
 For a network-fronted variant (HTTP API sidecar), see the
-`haap-rsv-bin` companion crate in the SDK workspace.
+`haap-rsv-bin` companion crate in the SDK workspace. The bin reads
+`HAWCX_RSV_AUTHORIZER` at startup (via `Rsv::new_from_env`) so the
+sidecar inherits the same selection model.
