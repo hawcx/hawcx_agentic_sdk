@@ -79,6 +79,15 @@ export interface ToolCallRequest {
   toolArguments?: unknown;
   contentType?: string;
   transport?: TokenTransport;
+  /**
+   * Optional runtime principal (CS v6.9.0 line 163). When set, the
+   * Assembler projects this string into `scope_json.user_principal_id`
+   * on the minted token so the gateway's Cedar policy can enforce
+   * `context.user_principal_id == resource.owner_user_id`. The
+   * agent's pinned `subject_user_id` is NOT modified — only per-call
+   * scope_json metadata. See `HawcxAgent.invokeFor`.
+   */
+  actingForUser?: string;
 }
 
 /**
@@ -119,6 +128,12 @@ function toolCallRequestToWire(req: ToolCallRequest): Record<string, unknown> {
   }
   if (req.transport !== undefined) {
     wire.transport = req.transport;
+  }
+  if (req.actingForUser !== undefined) {
+    // Top-level wire field, NOT nested in `constraints`. The Assembler
+    // projects this into `scope_json.user_principal_id` per
+    // CS v6.9.0 line 163.
+    wire.acting_for_user = req.actingForUser;
   }
   return wire;
 }

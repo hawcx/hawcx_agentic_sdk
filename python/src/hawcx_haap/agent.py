@@ -107,6 +107,7 @@ class HawcxAgent:
         content_type: str | None = None,
         transport: TokenTransport | None = None,
         request_id: str | None = None,
+        acting_for_user: str | None = None,
     ) -> ToolCallResponse:
         """Profile E tool call.
 
@@ -117,6 +118,30 @@ class HawcxAgent:
         Parameters mirror the fields of ``haap_ipc::messages::assembler::
         ToolCallRequest``. ``body`` maps to the wire field
         ``plaintext_request_body``.
+
+        Runtime principal switching
+        ---------------------------
+        ``acting_for_user`` (optional) declares the human principal on whose
+        behalf this single tool call is made. When set, the Assembler is
+        expected to project the value into ``scope_json.user_principal_id``
+        on the minted token (CS v6.9.0 line 163 explicitly allows arbitrary
+        identity / correlation fields inside the AEAD-encrypted scope_json).
+        The agent's pinned ``subject_user_id`` (set at enrollment) is NOT
+        modified — only the per-call scope_json carries the runtime principal.
+
+        The gateway's Cedar policy (e.g., ``config/policies/user_ownership.cedar``
+        in the hx_labs admin-console policy set) can then enforce
+        ``context.user_principal_id == resource.owner_user_id``, so one
+        agent can serve Alice and Bob from the same supervisor pipeline
+        with per-call ownership gating.
+
+        When ``acting_for_user`` is ``None`` (the default), no
+        ``user_principal_id`` field is added to scope_json — the agent
+        acts on its own pinned ``subject_user_id``. Existing callers
+        observe identical wire output.
+
+        See :meth:`invoke_for` for the sugar form when the principal is the
+        single most-important axis of a call.
         """
         if self._client is None:
             raise HawcxError("agent already closed")
@@ -134,8 +159,61 @@ class HawcxAgent:
             tool_arguments=tool_arguments,
             content_type=content_type,
             transport=transport,
+            acting_for_user=acting_for_user,
         )
         return self._client.invoke(req)
+
+    def invoke_for(
+        self,
+        user_principal_id: str,
+        *,
+        target_rs_url: str,
+        http_method: str = "POST",
+        headers: dict[str, str] | None = None,
+        tool: str = "",
+        action: Iterable[str] | None = None,
+        resource: str = "*",
+        constraints: dict[str, Any] | None = None,
+        body: bytes | None = None,
+        claimed_intent_hash: str | None = None,
+        tool_arguments: Any = None,
+        content_type: str | None = None,
+        transport: TokenTransport | None = None,
+        request_id: str | None = None,
+    ) -> ToolCallResponse:
+        """Sugar for :meth:`invoke` with a required ``acting_for_user``.
+
+        ``agent.invoke_for("alice", target_rs_url=...)`` is equivalent to
+        ``agent.invoke(acting_for_user="alice", target_rs_url=...)`` —
+        the positional principal makes the per-call identity axis
+        visually load-bearing at call sites that fan out to many users.
+
+        Raises :class:`ValueError` if ``user_principal_id`` is empty
+        (a missing principal is most likely a caller bug; use
+        :meth:`invoke` directly if "no principal" is the intended
+        semantic).
+        """
+        if not user_principal_id:
+            raise ValueError(
+                "invoke_for requires a non-empty user_principal_id; "
+                "use invoke(...) without acting_for_user for unprincipled calls"
+            )
+        return self.invoke(
+            target_rs_url=target_rs_url,
+            http_method=http_method,
+            headers=headers,
+            tool=tool,
+            action=action,
+            resource=resource,
+            constraints=constraints,
+            body=body,
+            claimed_intent_hash=claimed_intent_hash,
+            tool_arguments=tool_arguments,
+            content_type=content_type,
+            transport=transport,
+            request_id=request_id,
+            acting_for_user=user_principal_id,
+        )
 
     def send_clarification_answer(
         self,

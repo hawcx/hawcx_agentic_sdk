@@ -77,6 +77,15 @@ class ToolCallRequest:
     constructs the requested scope from ``tool``/``action``/``resource``/
     ``constraints`` per CS §39.7; the Python process does not see token
     material or session keys.
+
+    ``acting_for_user`` is a v6.9.0-line-163 identity field: when set,
+    the Assembler is expected to surface it as
+    ``scope_json.user_principal_id`` so the gateway's Cedar policy can
+    enforce ``context.user_principal_id == resource.owner_user_id``.
+    The agent's pinned ``subject_user_id`` (set at enrollment via the
+    AS) is NOT mutated by this field — only the per-call scope_json
+    metadata. See CS v6.9.0 line 163 ("any future identity or
+    correlation fields") and the CrewAI demo audit Q10/Q13.
     """
 
     request_id: str
@@ -92,6 +101,7 @@ class ToolCallRequest:
     tool_arguments: Any = None
     content_type: str | None = None
     transport: TokenTransport | None = None
+    acting_for_user: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -116,6 +126,11 @@ class ToolCallRequest:
             out["content_type"] = self.content_type
         if self.transport is not None:
             out["transport"] = self.transport.value
+        if self.acting_for_user is not None:
+            # Top-level wire field, NOT inside `constraints`. The
+            # Assembler projects this into `scope_json.user_principal_id`
+            # at token-mint time per CS v6.9.0 line 163.
+            out["acting_for_user"] = self.acting_for_user
         return out
 
 
