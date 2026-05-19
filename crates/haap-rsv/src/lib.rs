@@ -12,4 +12,4 @@ pub mod rsv;
 
 pub use authorizer::{PermissiveAuthorizer, RegistrationScopeAuthorizer};
 pub use replay::{InMemReplayCheck, RedisReplayCheck, ReplayError};
-pub use rsv::Rsv;
+pub use rsv::{Rsv, ENV_RSV_AUTHORIZER};

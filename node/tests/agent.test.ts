@@ -135,6 +135,85 @@ describe("defaultEndpointFor", () => {
   });
 });
 
+describe("runtime principal switching (acting_for_user)", () => {
+  let mock: MockAssembler;
+
+  beforeEach(async () => {
+    mock = new MockAssembler();
+    await mock.start();
+  });
+
+  afterEach(async () => {
+    await mock.close();
+  });
+
+  it("omits acting_for_user from the wire when not set", async () => {
+    // Backward-compat: existing callers must observe identical wire shape.
+    const agent = await HawcxAgent.connect(mock.socketPath);
+    try {
+      await agent.invoke({
+        targetRsUrl: "https://api.example.com/echo",
+        httpMethod: "POST",
+        tool: "echo",
+        body: Buffer.from("x"),
+      });
+    } finally {
+      agent.close();
+    }
+    expect(mock.receivedRequest).toBeDefined();
+    expect("acting_for_user" in (mock.receivedRequest ?? {})).toBe(false);
+  });
+
+  it("places acting_for_user at the top level (not in constraints) when set", async () => {
+    // Per CS v6.9.0 line 163 the Assembler projects this into
+    // scope_json.user_principal_id. Nesting it inside `constraints`
+    // would silently land it under scope_json.constraints.* and miss
+    // any Cedar policy that reads context.user_principal_id.
+    const agent = await HawcxAgent.connect(mock.socketPath);
+    try {
+      await agent.invoke({
+        targetRsUrl: "https://api.example.com/echo",
+        httpMethod: "POST",
+        tool: "read",
+        actingForUser: "alice",
+      });
+    } finally {
+      agent.close();
+    }
+    expect(mock.receivedRequest?.acting_for_user).toBe("alice");
+    expect(mock.receivedRequest?.constraints?.acting_for_user).toBeUndefined();
+  });
+
+  it("invokeFor(...) is equivalent to invoke({ actingForUser })", async () => {
+    const agent = await HawcxAgent.connect(mock.socketPath);
+    try {
+      await agent.invokeFor("bob", {
+        targetRsUrl: "https://api.example.com/echo",
+        httpMethod: "POST",
+        tool: "read",
+      });
+    } finally {
+      agent.close();
+    }
+    expect(mock.receivedRequest?.acting_for_user).toBe("bob");
+  });
+
+  it("invokeFor rejects an empty principal", async () => {
+    const agent = await HawcxAgent.connect(mock.socketPath);
+    try {
+      await expect(
+        agent.invokeFor("", {
+          targetRsUrl: "https://api.example.com/echo",
+          httpMethod: "POST",
+          tool: "x",
+        }),
+      ).rejects.toThrow(/userPrincipalId/);
+    } finally {
+      agent.close();
+    }
+  });
+});
+
 describe("invoke transports", () => {
   let mock: MockAssembler;
 

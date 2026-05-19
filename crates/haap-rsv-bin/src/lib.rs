@@ -44,9 +44,68 @@ pub struct VerifyResp {
     pub verification_handle: String,
 }
 
+/// `/encrypt-response` request body.
+///
+/// `verification_handle` is the opaque UUID returned by a prior `/verify`
+/// call; the sidecar uses it to look up the cached per-request
+/// `response_key` and `session_id`. Handles TTL at 30s, matching the
+/// cascade's request/response window.
+#[derive(Deserialize, Debug)]
+pub struct EncryptReq {
+    pub verification_handle: String,
+    pub plaintext_b64: String,
+}
+
+/// `/encrypt-response` response body. `ciphertext_b64` is base64 of the
+/// AES-256-GCM ciphertext + tag produced by
+/// `haap_core::response::encrypt_response`.
+#[derive(Serialize, Debug)]
+pub struct EncryptResp {
+    pub ciphertext_b64: String,
+}
+
 #[derive(Serialize, Debug)]
 pub struct ErrorResp {
     pub error: String,
+}
+
+/// Error variants produced while decoding an `EncryptReq`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum EncryptDecodeError {
+    /// `verification_handle` failed UUID parse.
+    Handle(String),
+    /// `plaintext_b64` failed base64 decode.
+    Plaintext(String),
+}
+
+impl EncryptDecodeError {
+    pub fn message(&self) -> String {
+        match self {
+            EncryptDecodeError::Handle(e) => format!("invalid handle uuid: {e}"),
+            EncryptDecodeError::Plaintext(e) => format!("invalid base64 plaintext: {e}"),
+        }
+    }
+}
+
+/// Decoded form of an `EncryptReq` — handle UUID plus raw plaintext bytes.
+#[derive(Debug)]
+pub struct DecodedEncryptRequest {
+    pub handle: uuid::Uuid,
+    pub plaintext: Vec<u8>,
+}
+
+/// Decode an `EncryptReq` from JSON-friendly base64 + UUID-string fields,
+/// returning a structured `EncryptDecodeError` for client-error cases.
+pub fn decode_encrypt_request(req: &EncryptReq) -> Result<DecodedEncryptRequest, EncryptDecodeError> {
+    use base64::Engine;
+    let handle = req
+        .verification_handle
+        .parse::<uuid::Uuid>()
+        .map_err(|e| EncryptDecodeError::Handle(e.to_string()))?;
+    let plaintext = base64::engine::general_purpose::STANDARD
+        .decode(&req.plaintext_b64)
+        .map_err(|e| EncryptDecodeError::Plaintext(e.to_string()))?;
+    Ok(DecodedEncryptRequest { handle, plaintext })
 }
 
 /// Error variants produced while decoding a `VerifyReq`.

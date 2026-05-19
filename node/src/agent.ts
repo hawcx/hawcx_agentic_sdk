@@ -39,6 +39,18 @@ export interface HawcxAgentInvokeOptions {
   contentType?: string;
   transport?: TokenTransport;
   requestId?: string;
+  /**
+   * Optional runtime principal — the human user on whose behalf this
+   * single tool call is made (CS v6.9.0 line 163). When set, the
+   * Assembler projects this into `scope_json.user_principal_id` on
+   * the minted token; the gateway's Cedar policy can then enforce
+   * `context.user_principal_id == resource.owner_user_id`. The
+   * agent's pinned `subject_user_id` (set at enrollment) is not
+   * modified — only per-call scope_json metadata.
+   *
+   * Use {@link HawcxAgent.invokeFor} for the sugar form.
+   */
+  actingForUser?: string;
 }
 
 function defaultIpcDir(): string {
@@ -148,7 +160,33 @@ export class HawcxAgent {
       toolArguments: opts.toolArguments,
       contentType: opts.contentType,
       transport: opts.transport,
+      actingForUser: opts.actingForUser,
     });
+  }
+
+  /**
+   * Sugar for {@link invoke} with a required `actingForUser`.
+   *
+   * `agent.invokeFor("alice", { targetRsUrl: ... })` is equivalent to
+   * `agent.invoke({ actingForUser: "alice", targetRsUrl: ... })`. The
+   * positional principal makes the per-call identity axis visually
+   * load-bearing at call sites that fan out to many users.
+   *
+   * Throws if `userPrincipalId` is the empty string (a missing
+   * principal is most likely a caller bug; use plain `invoke()` if
+   * "no principal" is the intended semantic).
+   */
+  async invokeFor(
+    userPrincipalId: string,
+    opts: HawcxAgentInvokeOptions,
+  ): Promise<ToolCallResponse> {
+    if (!userPrincipalId) {
+      throw new Error(
+        "invokeFor requires a non-empty userPrincipalId; " +
+          "use invoke() without actingForUser for unprincipled calls",
+      );
+    }
+    return this.invoke({ ...opts, actingForUser: userPrincipalId });
   }
 
   /**

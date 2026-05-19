@@ -131,4 +131,19 @@ mod tests {
         let session = fake_session(None);
         assert!(auth.authorize(br#"["any:thing"]"#, "any", "any", &session));
     }
+
+    #[test]
+    fn registration_scope_empty_registered_rejects_nonempty_claimed() {
+        // `Some(vec![])` means the AS explicitly registered an empty
+        // scope. Strict equality means *any* non-empty claimed_scope
+        // must fail. This is distinct from `None` (legacy substrate)
+        // which defers permissive — we don't conflate the two.
+        let auth = RegistrationScopeAuthorizer;
+        let session = fake_session(Some(Vec::new()));
+        assert!(!auth.authorize(br#"["read:notes"]"#, "read", "notes", &session));
+        // ...and equally, an empty claimed_scope against empty registered
+        // is a vacuous match (the cascade's Step 10 ceiling check is the
+        // load-bearing gate for empty-scope cases — see authorizer.rs:69).
+        assert!(auth.authorize(b"", "", "", &session));
+    }
 }

@@ -16,18 +16,27 @@
 use anyhow::Result;
 use axum::{routing::{get, post}, Json, Router};
 use haap_rsv::Rsv;
-use haap_rsv_bin::{decode_request, should_warn_non_loopback, ErrorResp, VerifyReq, VerifyResp};
-use haap_sdk_types::RsvConfig;
-use serde::{Deserialize, Serialize};
+use haap_rsv_bin::{
+    decode_encrypt_request, decode_request, should_warn_non_loopback, EncryptDecodeError,
+    EncryptReq, EncryptResp, ErrorResp, VerifyReq, VerifyResp,
+};
+use haap_sdk_types::{RsvConfig, VerifiedRequest};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
-#[allow(dead_code)]
+/// Cached post-verify state needed to fulfil a subsequent `/encrypt-response`
+/// call. The response_key is held inside `Zeroizing` so it is wiped on drop.
+///
+/// `jti` is kept for diagnostics symmetry with `/verify`'s response shape but
+/// is not load-bearing for the encryption path — `haap_core::response::encrypt_response`
+/// reads only `response_key` and `session_id` (see crates/haap-rsv/src/rsv.rs:235).
 struct CachedHandle {
-    response_key: [u8; 32],
+    response_key: Zeroizing<[u8; 32]>,
     session_id: u64,
+    jti: [u8; 16],
     expires_at_unix: u64,
 }
 
@@ -49,7 +58,11 @@ async fn main() -> Result<()> {
         .init();
 
     let config = RsvConfig::from_env()?;
-    let rsv = Rsv::new(config).await?;
+    // Authorizer selection per env: HAWCX_RSV_AUTHORIZER=permissive|strict
+    // (default: permissive). See crates/haap-rsv/src/rsv.rs:new_from_env
+    // and the README for the strict-mode prerequisite (substrate must
+    // carry `registered_scope_json` for enrolled agents).
+    let rsv = Rsv::new_from_env(config).await?;
 
     let state = AppState {
         rsv: Arc::new(Mutex::new(rsv)),
@@ -132,8 +145,9 @@ async fn verify_handler(
     handles.insert(
         handle,
         CachedHandle {
-            response_key: *verified.response_key,
+            response_key: Zeroizing::new(*verified.response_key),
             session_id: verified.session_id,
+            jti: verified.jti,
             expires_at_unix: now + 30,
         },
     );
@@ -147,60 +161,70 @@ async fn verify_handler(
     }))
 }
 
-#[derive(Deserialize)]
-struct EncryptReq {
-    verification_handle: String,
-    plaintext_b64: String,
-}
-
-#[derive(Serialize)]
-struct EncryptResp {
-    ciphertext_b64: String,
-}
-
 async fn encrypt_response_handler(
     axum::extract::State(state): axum::extract::State<AppState>,
     Json(req): Json<EncryptReq>,
 ) -> Result<Json<EncryptResp>, (axum::http::StatusCode, Json<ErrorResp>)> {
     use base64::Engine;
 
-    let handle: Uuid = req.verification_handle.parse().map_err(|e: uuid::Error| {
+    let decoded = decode_encrypt_request(&req).map_err(|e| {
+        let status = match e {
+            // Both decode failures are client-side input errors.
+            EncryptDecodeError::Handle(_) | EncryptDecodeError::Plaintext(_) => {
+                axum::http::StatusCode::BAD_REQUEST
+            }
+        };
         (
-            axum::http::StatusCode::BAD_REQUEST,
+            status,
             Json(ErrorResp {
-                error: format!("invalid handle uuid: {e}"),
+                error: e.message(),
             }),
         )
     })?;
 
-    let _plaintext = base64::engine::general_purpose::STANDARD
-        .decode(&req.plaintext_b64)
-        .map_err(|e| {
-            (
-                axum::http::StatusCode::BAD_REQUEST,
-                Json(ErrorResp {
-                    error: format!("invalid base64 plaintext: {e}"),
-                }),
-            )
-        })?;
+    // Look up cached post-verify state. Drop the lock before the (sync)
+    // encrypt_response call so a long encryption does not stall concurrent
+    // /verify handlers on the same Mutex.
+    let (response_key, session_id, jti) = {
+        let handles = state.handles.lock().await;
+        let cached = handles.get(&decoded.handle).ok_or((
+            axum::http::StatusCode::NOT_FOUND,
+            Json(ErrorResp {
+                error: "verification handle not found (expired or never created)".into(),
+            }),
+        ))?;
+        ((*cached.response_key), cached.session_id, cached.jti)
+    };
 
-    let handles = state.handles.lock().await;
-    let _cached = handles.get(&handle).ok_or((
-        axum::http::StatusCode::NOT_FOUND,
-        Json(ErrorResp {
-            error: "verification handle not found (expired or never created)".into(),
-        }),
-    ))?;
-    drop(handles);
+    // Rebuild a minimal VerifiedRequest for the library call.
+    // `encrypt_response` only consumes `response_key` + `session_id`
+    // (see crates/haap-rsv/src/rsv.rs:235); `plaintext_body` and `jti`
+    // are not read on the encrypt path. Wrapping in Zeroizing means the
+    // local key copy is wiped when this scope exits.
+    let verified = VerifiedRequest {
+        session_id,
+        jti,
+        plaintext_body: Vec::new(),
+        response_key: Zeroizing::new(response_key),
+    };
 
-    // Response encryption is wired up alongside the RSV cascade adapter
-    // in a focused follow-up PR (see crates/haap-rsv/src/rsv.rs).
-    Err((
-        axum::http::StatusCode::NOT_IMPLEMENTED,
-        Json(ErrorResp {
-            error: "encrypt-response wire-up lands with RSV cascade adapter".into(),
-        }),
-    ))
+    let rsv = state.rsv.lock().await;
+    let ciphertext = rsv.encrypt_response(&verified, &decoded.plaintext).map_err(|e| {
+        // encrypt_response's only failure mode today is an internal AEAD
+        // error (see CascadeRejectReason path in haap-core). Surface as
+        // 500 with the message; do not leak key material.
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResp {
+                error: format!("encrypt_response failed: {e}"),
+            }),
+        )
+    })?;
+    drop(rsv);
+
+    Ok(Json(EncryptResp {
+        ciphertext_b64: base64::engine::general_purpose::STANDARD.encode(&ciphertext),
+    }))
 }
 
 async fn healthz() -> &'static str {
