@@ -26,3 +26,16 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 once_cell = { workspace = true }
+# Zeroize on drop for the cached response_key (Profile E sidecar holds
+# response_key only between /verify and /encrypt-response — handle TTL
+# is 30s — but we still wipe on drop to avoid stale key material in
+# freed heap pages).
+zeroize = { workspace = true }
+
+[dev-dependencies]
+# Round-trip tests for /encrypt-response exercise the library contract
+# directly (haap_core::response::{encrypt_response,decrypt_response})
+# so the bytes-flow the handler promises is pinned without needing a
+# live Redis / token / cascade.
+haap-core = { workspace = true }
+serde_json = { workspace = true }
