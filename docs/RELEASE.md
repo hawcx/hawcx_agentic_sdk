@@ -41,6 +41,7 @@ hx-agent-sdk-<version>-<target>/
 │   ├── haap-tqs-precompute-bin        (from hx_labs)
 │   ├── haap-tqs-jit-bin               (from hx_labs)
 │   ├── haap-assembler-bin             (from hx_labs)
+│   ├── haap-eib-bin                   (from hx_labs; Pattern Z, §45)
 │   ├── haap-supervisor                (from hx_labs)
 │   ├── haap-rsv                       (from SDK; crate haap-rsv-bin)
 │   └── haap-sdk                       (from SDK; crate haap-sdk-cli)
@@ -48,7 +49,7 @@ hx-agent-sdk-<version>-<target>/
 └── docs/
 ```
 
-Seven binaries total: five from hx_labs, two from the SDK.
+Eight binaries total: six from hx_labs, two from the SDK.
 
 ## Docker image
 

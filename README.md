@@ -1,7 +1,7 @@
 # hx_agentic_sdk
 
 Customer-facing distribution of the **Hawcx Agent Authentication
-Protocol** (HAAP Canonical Specification v6.7.4).
+Protocol** (HAAP Canonical Specification v7.2.0).
 
 > **Status**: alpha rebuild (Option X / Mechanism 2). Public API may
 > change. The `haap-rsv` library is publishable; everything else in
@@ -9,7 +9,7 @@ Protocol** (HAAP Canonical Specification v6.7.4).
 
 ## What ships in a release
 
-Each `vX.Y.Z` tag produces seven binaries packaged per-platform plus
+Each `vX.Y.Z` tag produces eight binaries packaged per-platform plus
 a multi-arch Docker image:
 
 | Binary | Source | Role |
@@ -18,11 +18,12 @@ a multi-arch Docker image:
 | `haap-tqs-precompute-bin` | `hx_labs` | TQS pre-compute side — Schnorr commitment pre-minting |
 | `haap-tqs-jit-bin` | `hx_labs` | TQS just-in-time side — request-time token completion |
 | `haap-assembler-bin` | `hx_labs` | Assembler — K_req/K_resp + single-flight |
-| `haap-supervisor` | `hx_labs` | Pipeline orchestrator — spawns the four child processes |
+| `haap-eib-bin` | `hx_labs` | External Identity Broker — holds OAuth bearer tokens (Pattern Z, §45) |
+| `haap-supervisor` | `hx_labs` | Pipeline orchestrator — spawns the five child processes |
 | `haap-rsv` | SDK (`haap-rsv-bin`) | MCP-server-side HAAP Verifier HTTP API |
 | `haap-sdk` | SDK (`haap-sdk-cli`) | Testing/demo CLI |
 
-Five binaries come from `hx_labs` directly (Option X distribution
+Six binaries come from `hx_labs` directly (Option X distribution
 model — the SDK is a distribution source, not a wrapper layer).
 Two binaries come from this repo's library crates.
 
@@ -35,15 +36,15 @@ in-process embedding.
 ### Tarball (recommended for customer hosts)
 
 ```bash
-curl -L https://github.com/hawcx/hx_agentic_sdk/releases/download/v0.1.0-alpha.1/hx-agent-sdk-v0.1.0-alpha.1-x86_64-unknown-linux-gnu.tar.gz \
+curl -L https://github.com/hawcx/hx_agentic_sdk/releases/download/v0.1.0-alpha.7/hx-agent-sdk-v0.1.0-alpha.7-x86_64-unknown-linux-gnu.tar.gz \
     | tar -xz -C /usr/local
-export PATH=/usr/local/hx-agent-sdk-v0.1.0-alpha.1-x86_64-unknown-linux-gnu/bin:$PATH
+export PATH=/usr/local/hx-agent-sdk-v0.1.0-alpha.7-x86_64-unknown-linux-gnu/bin:$PATH
 ```
 
 ### Docker
 
 ```bash
-docker pull ghcr.io/hawcx/hx-agent-sdk:v0.1.0-alpha.1
+docker pull ghcr.io/hawcx/hx-agent-sdk:v0.1.0-alpha.7
 # Default ENTRYPOINT is haap-supervisor; override with --entrypoint for the others.
 ```
 
@@ -59,7 +60,7 @@ cd hx_agentic_sdk
 cargo build --release --workspace
 ```
 
-## Architecture (5-process customer-side pipeline + RSV)
+## Architecture (6-process customer-side pipeline + RSV)
 
 ```
 ┌─── MCP host (customer-deployed) ─────────────────────────────────────┐
@@ -68,7 +69,8 @@ cargo build --release --workspace
 │     ├── haap-auth-bin                  (Authenticator: IK_i)         │
 │     ├── haap-tqs-precompute-bin        (TQS pre-compute)             │
 │     ├── haap-tqs-jit-bin               (TQS JIT)                     │
-│     └── haap-assembler-bin             (Assembler: K_req/K_resp)     │
+│     ├── haap-assembler-bin             (Assembler: K_req/K_resp)     │
+│     └── haap-eib-bin                   (EIB: OAuth bearer tokens)    │
 │                                                                      │
 └──────────────────────────────────────────────────────────────────────┘
                               │
@@ -85,7 +87,7 @@ cargo build --release --workspace
 ```
 
 The Supervisor is the customer-facing entrypoint — it manages the
-four child processes that together form the request-side pipeline.
+five child processes that together form the request-side pipeline.
 The MCP server side runs the RSV (either as a sidecar HTTP API or
 as an in-process Rust library) to verify and decrypt incoming
 requests.

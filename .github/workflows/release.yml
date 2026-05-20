@@ -76,6 +76,7 @@ jobs:
             --bin haap-tqs-precompute \
             --bin haap-tqs-jit \
             --bin haap-assembler \
+            --bin haap-eib \
             --bin haap-supervisor
         shell: bash
 
@@ -92,7 +93,7 @@ jobs:
           mkdir -p dist
           OUT="hx-agent-sdk-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir -p "$OUT/bin"
-          for b in haap-authenticator haap-tqs-precompute haap-tqs-jit haap-assembler haap-supervisor; do
+          for b in haap-authenticator haap-tqs-precompute haap-tqs-jit haap-assembler haap-eib haap-supervisor; do
             cp "hx_labs/target/${{ matrix.target }}/release/$b" "$OUT/bin/" || \
               cp "hx_labs/target/${{ matrix.target }}/release/$b.exe" "$OUT/bin/"
           done
@@ -123,6 +124,7 @@ jobs:
           cp hx_labs/target/${{ matrix.target }}/release/haap-tqs-precompute docker-staging/
           cp hx_labs/target/${{ matrix.target }}/release/haap-tqs-jit docker-staging/
           cp hx_labs/target/${{ matrix.target }}/release/haap-assembler docker-staging/
+          cp hx_labs/target/${{ matrix.target }}/release/haap-eib docker-staging/
           cp hx_labs/target/${{ matrix.target }}/release/haap-supervisor docker-staging/
           cp hx_agentic_sdk/target/${{ matrix.target }}/release/haap-rsv docker-staging/
           cp hx_agentic_sdk/target/${{ matrix.target }}/release/haap-sdk docker-staging/
@@ -280,7 +282,7 @@ jobs:
 
             ## Contents
 
-            **hx_labs binaries**: `haap-authenticator`, `haap-tqs-precompute`, `haap-tqs-jit`, `haap-assembler`, `haap-supervisor`
+            **hx_labs binaries**: `haap-authenticator`, `haap-tqs-precompute`, `haap-tqs-jit`, `haap-assembler`, `haap-eib`, `haap-supervisor`
 
             **SDK binaries**: `haap-rsv`, `haap-sdk`
 

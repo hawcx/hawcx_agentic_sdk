@@ -1,7 +1,7 @@
 # @hawcx/hawcx-haap
 
 Node.js customer SDK for the [Hawcx Agent Authentication Protocol (HAAP)][cs],
-per [Canonical Specification v6.7.4][cs] §39 (Profile E).
+per [Canonical Specification v7.2.0][cs] §39 (Profile E).
 
 > **Status**: alpha (0.1.0-alpha.1). Public API may change before 1.0.
 
@@ -24,9 +24,10 @@ DACL enforcement at connect time.
 This SDK does **not** spawn or manage the `haap-supervisor` process. The
 supervisor runs as a long-lived service (Docker / systemd / Windows SCM)
 that you deploy separately using the
-[hx_agentic_sdk release artifacts](../README.md). The 5-process pipeline
-(Authenticator, TQS-precompute, TQS-jit, Assembler, Supervisor) needs to be
-already running before you construct `HawcxAgent`.
+[hx_agentic_sdk release artifacts](../README.md). The 6-process pipeline
+(Authenticator, TQS-precompute, TQS-jit, Assembler, External Identity
+Broker, Supervisor — per HAAP CS v7.2.0 §45.2) needs to be already
+running before you construct `HawcxAgent`.
 
 ## Prerequisites
 
@@ -169,7 +170,7 @@ npm run build                # emit dist/
 ```
 
 Tests run against an in-process mock Assembler — no real binaries needed.
-End-to-end validation against the real 5-process pipeline depends on
+End-to-end validation against the real 6-process pipeline depends on
 alpha-2 closure of the RSV cascade adapter; see the closure report at
 [`docs/priority2_foundation_closure_2026-05-17.md`](../docs/priority2_foundation_closure_2026-05-17.md).
 

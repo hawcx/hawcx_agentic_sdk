@@ -29,6 +29,7 @@ RUN cargo build --release \
     --bin haap-tqs-precompute \
     --bin haap-tqs-jit \
     --bin haap-assembler \
+    --bin haap-eib \
     --bin haap-supervisor
 
 # Build SDK binaries.
@@ -42,6 +43,7 @@ COPY --from=builder /build/hx_labs/target/release/haap-authenticator /usr/local/
 COPY --from=builder /build/hx_labs/target/release/haap-tqs-precompute /usr/local/bin/
 COPY --from=builder /build/hx_labs/target/release/haap-tqs-jit /usr/local/bin/
 COPY --from=builder /build/hx_labs/target/release/haap-assembler /usr/local/bin/
+COPY --from=builder /build/hx_labs/target/release/haap-eib /usr/local/bin/
 COPY --from=builder /build/hx_labs/target/release/haap-supervisor /usr/local/bin/
 COPY --from=builder /build/hx_agentic_sdk/target/release/haap-rsv /usr/local/bin/
 COPY --from=builder /build/hx_agentic_sdk/target/release/haap-sdk /usr/local/bin/

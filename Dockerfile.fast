@@ -15,6 +15,7 @@ COPY prebuilt-bins/haap-authenticator   /usr/local/bin/
 COPY prebuilt-bins/haap-tqs-precompute  /usr/local/bin/
 COPY prebuilt-bins/haap-tqs-jit         /usr/local/bin/
 COPY prebuilt-bins/haap-assembler       /usr/local/bin/
+COPY prebuilt-bins/haap-eib             /usr/local/bin/
 COPY prebuilt-bins/haap-supervisor      /usr/local/bin/
 COPY prebuilt-bins/haap-rsv             /usr/local/bin/
 COPY prebuilt-bins/haap-sdk             /usr/local/bin/
