@@ -10,10 +10,22 @@ FROM rust:1-bookworm AS builder
 WORKDIR /build
 
 # Build dependencies: protoc (tonic-build needs it for code generation).
+#
+# protoc is pinned to a specific release artifact + SHA-256. The official
+# checksum for protoc-25.1-linux-x86_64.zip is published on the upstream
+# release page:
+#   https://github.com/protocolbuffers/protobuf/releases/tag/v25.1
+# Bumping the version REQUIRES updating PROTOC_SHA256 in lockstep. Without
+# the hash a compromised mirror or release-asset swap silently slips
+# arbitrary code into the build stage (L-2 hardening 2026-05-20).
+ARG PROTOC_VERSION=25.1
+ARG PROTOC_SHA256=ed8fca87a11c888fed329d6a59c34c7d436165f662a2c875246ddb1ac2b6dd50
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         unzip curl ca-certificates && \
-    curl -fsSL -o /tmp/protoc.zip https://github.com/protocolbuffers/protobuf/releases/download/v25.1/protoc-25.1-linux-x86_64.zip && \
+    curl -fsSL -o /tmp/protoc.zip \
+        "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip" && \
+    echo "${PROTOC_SHA256}  /tmp/protoc.zip" | sha256sum -c - && \
     unzip -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*' && \
     chmod +x /usr/local/bin/protoc && \
     rm -rf /var/lib/apt/lists/* /tmp/*
