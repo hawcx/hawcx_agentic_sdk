@@ -25,8 +25,18 @@ pub enum SealerConfig {
 pub struct RsvConfig {
     /// Customer Redis connection URL (e.g., redis://customer-redis:6379).
     pub customer_redis_url: String,
-    /// SHA-256 of the audience URL (UTF-8 bytes). Tokens must carry
-    /// this aud_hash to be accepted.
+    /// SHA-256 of the operator's audience URL (UTF-8 bytes). The
+    /// verifier constant-time compares the token's wire-level
+    /// `aud_hash` (CS §7.1 bytes 48–79) against this value as the
+    /// front-line gate, BEFORE any substrate fetch. Tokens minted for
+    /// a different audience are rejected with
+    /// [`crate::VerifyError::AudienceMismatch`] without consuming a
+    /// substrate round-trip.
+    ///
+    /// Enforcement landed 2026-05-20 (H-1). Prior to that the field
+    /// was collected from `HAAP_AUDIENCE_HASH` but never compared — a
+    /// dormant config knob that gave callers a false sense of
+    /// audience scoping.
     pub audience_hash: [u8; 32],
     /// LRU capacity for the in-process replay-check fast path.
     pub replay_lru_capacity: usize,

@@ -211,6 +211,19 @@ impl Rsv {
         let parsed = decode_token(token_bytes)
             .map_err(|e| VerifyError::Framing(format!("{e:?}")))?;
 
+        // 1b. Audience pre-filter (H-1 2026-05-20). The cascade's
+        //     Step 3b compares the token's aud_hash to
+        //     `session.audience` in substrate — which is the right
+        //     check for the *bound* audience but does nothing when the
+        //     substrate's `audience` field is `None` (legacy sessions)
+        //     OR when the SDK operator deploys multiple verifiers
+        //     against the same substrate and wants per-verifier
+        //     audience scoping. `RsvConfig::audience_hash` is the
+        //     operator's per-deployment expectation; we constant-time
+        //     compare BEFORE any substrate round-trip to drop
+        //     wrong-audience traffic at the boundary.
+        check_audience_hash(&parsed.aud_hash, &self.config.audience_hash)?;
+
         // 2. Substrate fetch → RawSessionRecord
         let raw = self
             .substrate
@@ -288,6 +301,10 @@ impl Rsv {
         let parsed = decode_token(token_bytes)
             .map_err(|e| VerifyError::Framing(format!("{e:?}")))?;
 
+        // H-1: mirror the boundary audience pre-filter from the
+        // production path so unit tests exercise the same gate.
+        check_audience_hash(&parsed.aud_hash, &self.config.audience_hash)?;
+
         let raw = self
             .substrate
             .fetch_session(parsed.session_id)
@@ -352,6 +369,27 @@ impl Rsv {
     /// and tests.
     pub fn config(&self) -> &RsvConfig {
         &self.config
+    }
+}
+
+/// H-1 (2026-05-20) — constant-time compare the token's wire-level
+/// `aud_hash` with the operator-configured
+/// [`RsvConfig::audience_hash`](haap_sdk_types::RsvConfig). Returns
+/// `VerifyError::AudienceMismatch` on inequality. Extracted so the
+/// predicate is unit-testable without a live substrate or token mint.
+///
+/// `subtle::ConstantTimeEq` guarantees the compare runs in time
+/// proportional to the buffer length regardless of where the first
+/// differing byte lives. Both inputs are `[u8; 32]` so the
+/// length-class side-channel concern from the bearer-token compare
+/// (C-1) does not apply, but we still avoid the early-return byte
+/// memcmp on principle.
+fn check_audience_hash(token_aud: &[u8; 32], expected: &[u8; 32]) -> Result<(), VerifyError> {
+    use subtle::ConstantTimeEq;
+    if bool::from(token_aud.ct_eq(expected)) {
+        Ok(())
+    } else {
+        Err(VerifyError::AudienceMismatch)
     }
 }
 
@@ -601,6 +639,30 @@ mod env_authorizer_tests {
                 !auth.authorize(b"mismatch", "read", "x", &session),
                 "{v:?} should resolve to strict semantics"
             );
+        }
+    }
+
+    #[test]
+    fn audience_hash_match_accepts() {
+        // H-1 predicate: matching aud_hash returns Ok(()).
+        let token_aud = [0x42u8; 32];
+        let expected = [0x42u8; 32];
+        assert!(super::check_audience_hash(&token_aud, &expected).is_ok());
+    }
+
+    #[test]
+    fn audience_hash_mismatch_rejects_with_typed_variant() {
+        // H-1 predicate: any single-byte difference rejects with the
+        // typed `AudienceMismatch` variant (not a generic
+        // `CascadeRejected("...")` string blob). Callers branching on
+        // the variant can detect wrong-audience traffic without
+        // string-parsing.
+        let token_aud = [0x42u8; 32];
+        let mut expected = [0x42u8; 32];
+        expected[17] = 0x43;
+        match super::check_audience_hash(&token_aud, &expected) {
+            Err(haap_sdk_types::VerifyError::AudienceMismatch) => { /* expected */ }
+            other => panic!("expected AudienceMismatch, got: {other:?}"),
         }
     }
 

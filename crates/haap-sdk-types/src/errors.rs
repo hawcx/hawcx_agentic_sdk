@@ -54,6 +54,16 @@ pub enum VerifyError {
     CascadeRejected(String),
     #[error("replay detected")]
     Replay,
+    /// H-1 (2026-05-20): the token's wire-level `aud_hash` (CS §7.1
+    /// bytes 48–79) did not match the operator-configured
+    /// `RsvConfig::audience_hash`. Distinct from the cascade's Step 3b
+    /// `AudHashMismatch` (which compares against `session.audience`
+    /// in substrate) because the SDK-level check is the front-line
+    /// gate before substrate is even queried — it catches tokens
+    /// minted for a different audience without consuming a substrate
+    /// round-trip.
+    #[error("token aud_hash does not match RsvConfig::audience_hash")]
+    AudienceMismatch,
     #[error("internal: {0}")]
     Internal(String),
 }
