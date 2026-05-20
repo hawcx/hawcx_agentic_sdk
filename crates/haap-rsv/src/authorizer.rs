@@ -96,6 +96,7 @@ mod tests {
             audience: None,
             profile: None,
             registered_scope_json,
+            pop_transcript_version: None,
         }
     }
 

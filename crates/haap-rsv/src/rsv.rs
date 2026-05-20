@@ -69,10 +69,56 @@ pub struct Rsv {
 }
 
 impl Rsv {
-    /// Construct an `Rsv` with [`PermissiveAuthorizer`]. Suitable for
-    /// alpha deployments that do not yet enforce registration-scope
-    /// binding; the cascade's Step 10 ceiling check remains the floor.
-    pub async fn new(config: RsvConfig) -> Result<Self, RsvError> {
+    /// Construct an `Rsv` with an operator-chosen [`Authorizer`].
+    ///
+    /// This is the only constructor that takes the authorizer as a
+    /// direct parameter. Operators MUST pass an authorizer explicitly
+    /// — the previous `Rsv::new(config)` form silently defaulted to
+    /// [`PermissiveAuthorizer`], which was the right choice for
+    /// in-process tests but the wrong choice for the customer-facing
+    /// SDK surface (C-2 hardening 2026-05-20). Removing the default
+    /// makes "what authorizer is this verifier enforcing?" a typed
+    /// question at every call site rather than something the reader
+    /// has to remember.
+    ///
+    /// For production deployments, pass
+    /// `Box::new(RegistrationScopeAuthorizer)` (CS v6.8.0 §9.1.X).
+    /// For dev / unit-test deployments that explicitly want the
+    /// permissive behaviour, use [`Rsv::new_alpha_permissive`] —
+    /// which logs a startup warning naming the caller crate so
+    /// "permissive snuck into prod" failures show up in the log
+    /// stream rather than only on review.
+    pub async fn new(
+        config: RsvConfig,
+        authorizer: Box<dyn Authorizer + Send + Sync>,
+    ) -> Result<Self, RsvError> {
+        Self::new_with_authorizer(config, authorizer).await
+    }
+
+    /// Construct an `Rsv` with [`PermissiveAuthorizer`], explicitly
+    /// opting into the dev-only permissive path.
+    ///
+    /// This constructor exists so callers that genuinely want the
+    /// dev/test behaviour (unit-test harnesses, the local crewai-demo
+    /// flow, anything where you control all token issuance) can do so
+    /// without reaching for the env-var dispatch. It logs a
+    /// `tracing::warn!` with the caller's crate name at construction
+    /// time — that warning is the audit trail for "why is this
+    /// verifier permissive?" so a future reader doesn't have to grep
+    /// the codebase.
+    ///
+    /// Hard rule: do not call this from production binaries. The
+    /// `haap-rsv-bin` sidecar uses [`Rsv::new_from_env`], which
+    /// defaults to `strict` and forces the operator to opt into
+    /// `permissive` via `HAWCX_RSV_AUTHORIZER=permissive`.
+    pub async fn new_alpha_permissive(config: RsvConfig) -> Result<Self, RsvError> {
+        tracing::warn!(
+            caller = env!("CARGO_PKG_NAME"),
+            "Rsv::new_alpha_permissive: constructing an RSV with PermissiveAuthorizer; \
+             this is the dev-only opt-in path. Production callers must pass \
+             RegistrationScopeAuthorizer to Rsv::new explicitly, or rely on \
+             Rsv::new_from_env (which defaults to 'strict')."
+        );
         Self::new_with_authorizer(config, Box::new(PermissiveAuthorizer)).await
     }
 
@@ -81,7 +127,7 @@ impl Rsv {
     ///
     /// | Value         | Authorizer                          |
     /// |---------------|-------------------------------------|
-    /// | (unset)       | [`PermissiveAuthorizer`]            |
+    /// | (unset)       | [`RegistrationScopeAuthorizer`]     |
     /// | `permissive`  | [`PermissiveAuthorizer`]            |
     /// | `strict`      | [`RegistrationScopeAuthorizer`]     |
     ///
@@ -89,15 +135,33 @@ impl Rsv {
     /// fail-fast (`RsvError::Io` with an explanatory message) to avoid
     /// the silent-permissive-fallback foot-gun.
     ///
+    /// Default flipped to `strict` 2026-05-20 (C-2 hardening). The
+    /// previous default was `permissive`, which was load-bearingly
+    /// wrong for production: a customer who deployed `haap-rsv-bin`
+    /// with default env config got a verifier that accepted any
+    /// claimed scope, regardless of what the agent registered. The
+    /// `Rsv::new` constructor used the same default. The new behaviour
+    /// is "strict unless you ask for permissive" and emits a
+    /// `tracing::warn!` when the env var is unset so the implicit
+    /// choice still shows up in logs.
+    ///
     /// Switching to `strict` requires that all enrolled agents have
     /// `registered_scope_json` written into substrate (per the AS-side
-    /// W4 work landing concurrently). Pre-v6.9.0 sessions without it
-    /// fall through to permissive semantics at the per-session level
-    /// via [`RegistrationScopeAuthorizer`]'s `None` branch (see
+    /// W4 work). Pre-v6.9.0 sessions without it fall through to
+    /// permissive semantics at the per-session level via
+    /// [`RegistrationScopeAuthorizer`]'s `None` branch (see
     /// `authorizer.rs:71`) — this is the documented graceful fallback,
     /// not a global toggle.
     pub async fn new_from_env(config: RsvConfig) -> Result<Self, RsvError> {
         let raw = std::env::var(ENV_RSV_AUTHORIZER).ok();
+        if raw.is_none() {
+            tracing::warn!(
+                env_var = ENV_RSV_AUTHORIZER,
+                "HAWCX_RSV_AUTHORIZER unset; defaulting to 'strict' \
+                 (RegistrationScopeAuthorizer). Set HAWCX_RSV_AUTHORIZER=permissive \
+                 to opt into the dev/alpha permissive path."
+            );
+        }
         let authorizer = authorizer_from_env_value(raw.as_deref())?;
         Self::new_with_authorizer(config, authorizer).await
     }
@@ -295,9 +359,14 @@ impl Rsv {
 /// tests can exercise the dispatch table without touching the process
 /// environment (which is global, race-prone, and hard to clean up).
 ///
-/// `None`, `Some("")`, `Some("permissive")` → [`PermissiveAuthorizer`].
-/// `Some("strict")` → [`RegistrationScopeAuthorizer`].
+/// `None`, `Some("")`, `Some("strict")` → [`RegistrationScopeAuthorizer`].
+/// `Some("permissive")` → [`PermissiveAuthorizer`].
 /// Any other value → `RsvError::Io` (fail-fast, no silent fallback).
+///
+/// Default flipped from `permissive` to `strict` 2026-05-20 (C-2). A
+/// caller who has not yet thought about authorizer choice now gets the
+/// safer answer; opting into `permissive` requires typing the word out
+/// loud in the operator's env config.
 ///
 /// Matching is ASCII case-insensitive with surrounding whitespace
 /// trimmed.
@@ -306,8 +375,8 @@ pub(crate) fn authorizer_from_env_value(
 ) -> Result<Box<dyn Authorizer + Send + Sync>, RsvError> {
     let normalized = raw.map(|s| s.trim().to_ascii_lowercase());
     match normalized.as_deref() {
-        None | Some("") | Some("permissive") => Ok(Box::new(PermissiveAuthorizer)),
-        Some("strict") => Ok(Box::new(RegistrationScopeAuthorizer)),
+        None | Some("") | Some("strict") => Ok(Box::new(RegistrationScopeAuthorizer)),
+        Some("permissive") => Ok(Box::new(PermissiveAuthorizer)),
         Some(other) => Err(RsvError::Io(std::io::Error::other(format!(
             "{ENV_RSV_AUTHORIZER}={other:?} is not a recognized value; expected 'permissive' or 'strict'"
         )))),
@@ -447,6 +516,7 @@ mod env_authorizer_tests {
             audience: None,
             profile: None,
             registered_scope_json,
+            pop_transcript_version: None,
         }
     }
 
@@ -462,26 +532,37 @@ mod env_authorizer_tests {
     }
 
     #[test]
-    fn env_unset_selects_permissive() {
+    fn env_unset_selects_strict() {
+        // C-2 2026-05-20: default flipped from permissive to strict.
+        // An operator who has not configured HAWCX_RSV_AUTHORIZER gets
+        // the registration-scope-binding authorizer; a mismatched
+        // claimed_scope is rejected at this layer rather than relying
+        // on the cascade's Step 10 ceiling as the only floor.
         let auth = unwrap_auth(authorizer_from_env_value(None));
-        // Permissive accepts mismatched claimed-vs-registered.
         let session = session_with_scope(Some(b"registered".to_vec()));
-        assert!(auth.authorize(b"different", "read", "x", &session));
+        assert!(
+            !auth.authorize(b"different", "read", "x", &session),
+            "unset env should resolve to strict and reject mismatched claimed_scope"
+        );
+        // Matching scope still accepted.
+        assert!(auth.authorize(b"registered", "read", "x", &session));
     }
 
     #[test]
-    fn env_empty_string_selects_permissive() {
+    fn env_empty_string_selects_strict() {
         // Common ops mistake: HAWCX_RSV_AUTHORIZER= (export with no
         // value). Treat as unset, not as a parse error — refusing to
         // start the verifier over a whitespace-only env value would be
-        // an annoying ops trap with no security upside.
+        // an annoying ops trap with no security upside. Post-C-2 this
+        // also resolves to strict (was: permissive).
         let auth = unwrap_auth(authorizer_from_env_value(Some("")));
         let session = session_with_scope(Some(b"registered".to_vec()));
-        assert!(auth.authorize(b"different", "read", "x", &session));
+        assert!(!auth.authorize(b"different", "read", "x", &session));
     }
 
     #[test]
     fn env_permissive_explicit_selects_permissive() {
+        // Permissive remains explicitly opt-in for the dev/alpha path.
         let auth = unwrap_auth(authorizer_from_env_value(Some("permissive")));
         let session = session_with_scope(Some(b"registered".to_vec()));
         assert!(auth.authorize(b"different", "read", "x", &session));
