@@ -6,12 +6,15 @@ the operational surface customers care about. For internals see the
 
 ## Lifecycle
 
-The Supervisor spawns four child processes in order:
+The Supervisor spawns five child processes in order (per HAAP CS
+v7.2.0 §45.2, Pattern Z extends the runtime from four protected
+children to five with the addition of the EIB):
 
 1. `haap-auth-bin` (Authenticator)
 2. `haap-tqs-precompute-bin`
 3. `haap-tqs-jit-bin`
 4. `haap-assembler-bin`
+5. `haap-eib-bin` (External Identity Broker, §45)
 
 Each child must bring up its UDS before the next is spawned. If any
 child fails to start within the configured timeout (default 30s),

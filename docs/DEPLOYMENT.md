@@ -66,7 +66,7 @@ For Rust MCP servers, embed the `haap-rsv` library instead — see
   - File backend: the path is writable, the passphrase env var is set
     via secret manager (Kubernetes Secret, AWS Secrets Manager, etc.)
   - OS keychain: tested by an initial seal+unseal cycle.
-- [ ] Five hx_labs binaries on `$PATH` of the Supervisor (or use
+- [ ] Six hx_labs binaries on `$PATH` of the Supervisor (or use
     `--supervisor-bin` to point at a tarball install dir).
 - [ ] Customer Redis sized: ~1 KB per active session, plus replay-store
     entries (~50 bytes each, TTL-expiring).

@@ -1,7 +1,7 @@
 # hawcx-haap
 
 Customer SDK for the **Hawcx Agent Authentication Protocol** (HAAP Canonical
-Specification v6.7.4, Profile E). Pure-Python, no native build.
+Specification v7.2.0, Profile E). Pure-Python, no native build.
 
 > **Status:** alpha (0.1.0a1). Public API may change. End-to-end testing
 > against the real binary pipeline is pending alpha-2 closure of the RSV
@@ -31,8 +31,9 @@ Windows.
 ## Prerequisites
 
 - The `haap-supervisor` pipeline (Authenticator + TQS-precompute + TQS-jit +
-  Assembler + Supervisor) must be running locally, installed from the
-  `hx_agentic_sdk` release.
+  Assembler + External Identity Broker + Supervisor — per HAAP CS v7.2.0
+  §45.2) must be running locally, installed from the `hx_agentic_sdk`
+  release.
 - The agent identity must be pre-provisioned via the Hawcx Admin Console
   (Console → CAA → Authenticator flow per CS §4.6.3).
 
@@ -105,7 +106,7 @@ class TokenTransport(str, Enum):
     MCP_META = "mcp_meta"         # MCP params._meta["haap/tbac"].token
 ```
 
-Per CS v6.7.4 §34. Default per-call selector is omitted on the wire → the
+Per CS v7.2.0 §34. Default per-call selector is omitted on the wire → the
 Assembler uses `HttpHeader`.
 
 ## Wire protocol

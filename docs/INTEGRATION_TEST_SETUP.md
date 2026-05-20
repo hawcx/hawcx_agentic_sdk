@@ -1,8 +1,9 @@
 # Integration Test Setup
 
 The `full_pipeline` test exercises the SDK's RSV against the
-5-process hx_labs binary pipeline. Default `cargo test` skips this
-test (feature flag `integration-tests` is off by default).
+6-process hx_labs binary pipeline (per HAAP CS v7.2.0 §45.2,
+Pattern Z). Default `cargo test` skips this test (feature flag
+`integration-tests` is off by default).
 
 ## Prerequisites
 
@@ -12,7 +13,8 @@ test (feature flag `integration-tests` is off by default).
    cd ~/Projects/hx_labs
    cargo build --release \
        --bin haap-authenticator --bin haap-tqs-precompute \
-       --bin haap-tqs-jit --bin haap-assembler --bin haap-supervisor
+       --bin haap-tqs-jit --bin haap-assembler --bin haap-eib \
+       --bin haap-supervisor
    ```
 
 2. **SDK binaries built**:
@@ -47,8 +49,8 @@ cargo test --features integration-tests \
 
 ## What this validates (once wired)
 
-- The 5-process pipeline launches (Authenticator → TQS-precompute →
-  TQS-JIT → Assembler + Supervisor orchestrator)
+- The 6-process pipeline launches (Authenticator → TQS-precompute →
+  TQS-JIT → Assembler → EIB + Supervisor orchestrator)
 - The Authenticator successfully completes `/v3/register_agent` against
   the AS
 - TQS-precompute pre-mints token commitments; TQS-JIT finalizes them

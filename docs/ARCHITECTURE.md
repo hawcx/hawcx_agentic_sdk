@@ -11,7 +11,13 @@ binaries come from `hx_labs` directly. The SDK contributes:
 4. Mechanism 2 release CI that bundles everything into per-platform
    tarballs and a multi-arch Docker image.
 
-## 5-process customer-side pipeline
+## 6-process customer-side pipeline
+
+Per HAAP Canonical Specification v7.2.0 §45.2 (Pattern Z), the per-agent
+runtime extends from four protected child processes to five with the
+addition of the External Identity Broker (EIB) for OAuth bearer-token
+isolation. Together with the Supervisor, the customer-side pipeline is
+six processes.
 
 ```
 ┌── haap-supervisor (zero crypto; manages lifecycle) ──┐
@@ -39,6 +45,13 @@ binaries come from `hx_labs` directly. The SDK contributes:
 │  │ K_req encrypt           │      Assembler API      │
 │  │ K_resp decrypt          │                          │
 │  │ Single-flight           │                          │
+│  └─────────────┬───────────┘                          │
+│                │ bearer-attach IPC (§45.4)             │
+│  ┌─────────────▼───────────┐                          │
+│  │ haap-eib-bin            │                          │
+│  │ External Identity       │                          │
+│  │ Broker — holds OAuth    │                          │
+│  │ bearer tokens (§45)     │                          │
 │  └─────────────────────────┘                          │
 │                                                       │
 └───────────────────────────────────────────────────────┘
@@ -105,10 +118,10 @@ persistence, lifecycle, distribution packaging), the SDK owns it.
 
 ## IPC
 
-The four customer-side processes (Authenticator, TQS-precompute,
-TQS-JIT, Assembler) communicate over IPC managed by `hx_labs`'s
-`haap-supervisor`. The SDK does NOT define their IPC envelope — that
-lives in `hx_labs::haap-ipc`.
+The five customer-side processes (Authenticator, TQS-precompute,
+TQS-JIT, Assembler, External Identity Broker) communicate over IPC
+managed by `hx_labs`'s `haap-supervisor`. The SDK does NOT define
+their IPC envelope — that lives in `hx_labs::haap-ipc`.
 
 The SDK's own `haap-sdk-ipc` crate is a generic UDS framing + SO_PEERCRED
 primitive for SDK-internal use (CLI ↔ helpers, future bin-to-bin
