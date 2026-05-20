@@ -177,3 +177,76 @@ pub fn decode_request(req: &VerifyReq) -> Result<DecodedRequest, DecodeError> {
 pub fn should_warn_non_loopback(addr: &SocketAddr) -> bool {
     !addr.ip().is_loopback()
 }
+
+/// Minimum bearer-token length, in bytes, accepted by the `/verify` and
+/// `/encrypt-response` authentication middleware. Anything shorter is
+/// refused at process startup (fail-fast — better to never bind than to
+/// run with a guessable token).
+///
+/// 32 bytes ≈ 256 bits — comfortable margin against online guessing once
+/// per-connection latency is in the millisecond range, and matches the
+/// recommended floor in `docs/RSV_HTTP_API.md`.
+pub const MIN_AUTH_TOKEN_LEN: usize = 32;
+
+/// Outcome of [`extract_bearer_token`] — the bearer string sans the
+/// `Bearer ` prefix, or an explanatory rejection. Separated from the
+/// HTTP-layer middleware so the predicate is testable without standing
+/// up an `axum::Router`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BearerExtractError {
+    /// `Authorization` header absent.
+    MissingHeader,
+    /// `Authorization` header value not UTF-8.
+    NonUtf8Header,
+    /// Scheme is not `Bearer` (case-sensitive — RFC 6750 §2.1 leaves
+    /// scheme casing implementation-defined; we pin to `Bearer` to
+    /// avoid normalization ambiguity).
+    WrongScheme,
+    /// `Bearer` with empty token after the space.
+    EmptyToken,
+}
+
+impl BearerExtractError {
+    /// Stable client-facing message. Does NOT vary by failure mode —
+    /// every 401 surfaces the same `"unauthorized"` string so an
+    /// attacker probing the endpoint cannot distinguish "missing
+    /// header" from "wrong scheme" from "token mismatch".
+    pub fn client_message(&self) -> &'static str {
+        "unauthorized"
+    }
+}
+
+/// Parse a raw `Authorization` header value (`Some(bytes)` if present)
+/// and return the bearer token bytes if and only if the header is well
+/// formed.
+///
+/// Whitespace handling: exactly one ASCII space between scheme and
+/// token, matching the conservative subset of RFC 7235 §2.1. Trailing
+/// whitespace on the token is rejected — a real bearer should never
+/// carry it, and treating "tok " as equal to "tok" creates a constant-
+/// time-compare foot-gun.
+pub fn extract_bearer_token(header_value: Option<&[u8]>) -> Result<&[u8], BearerExtractError> {
+    let bytes = header_value.ok_or(BearerExtractError::MissingHeader)?;
+    let s = std::str::from_utf8(bytes).map_err(|_| BearerExtractError::NonUtf8Header)?;
+    let rest = s
+        .strip_prefix("Bearer ")
+        .ok_or(BearerExtractError::WrongScheme)?;
+    if rest.is_empty() {
+        return Err(BearerExtractError::EmptyToken);
+    }
+    Ok(rest.as_bytes())
+}
+
+/// Constant-time equality predicate over the bearer token presented on
+/// the wire and the operator-configured expected token. Wraps
+/// `subtle::ConstantTimeEq` so unequal-length inputs are still compared
+/// in time proportional to `max(len(a), len(b))` — the early-return
+/// `if a.len() != b.len()` form leaks length classes.
+///
+/// The expected token MUST be at least [`MIN_AUTH_TOKEN_LEN`] bytes;
+/// the startup code in `main.rs` enforces this before any request is
+/// accepted, so the predicate itself does not re-check.
+pub fn tokens_match_ct(presented: &[u8], expected: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    presented.ct_eq(expected).unwrap_u8() == 1
+}

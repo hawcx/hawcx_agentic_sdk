@@ -26,6 +26,13 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 once_cell = { workspace = true }
+clap = { workspace = true }
+subtle = { workspace = true }
+libc = { workspace = true }
+nix = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+tower = { workspace = true }
 # Zeroize on drop for the cached response_key (Profile E sidecar holds
 # response_key only between /verify and /encrypt-response — handle TTL
 # is 30s — but we still wipe on drop to avoid stale key material in

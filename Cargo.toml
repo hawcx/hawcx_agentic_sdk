@@ -67,3 +67,16 @@ libc = "0.2"
 clap = { version = "4", features = ["derive"] }
 axum = "0.7"
 base64 = "0.22"
+
+# Constant-time comparison for bearer-token authn on `haap-rsv`'s HTTP
+# surface. Hard-pinned through hx_labs's vetted version chain via the
+# Cargo lock; do not swap for ad-hoc memcmp.
+subtle = "2.6"
+
+# Hyper/tower needed by `haap-rsv-bin` to serve axum over a UDS — axum
+# 0.7's `serve()` only accepts `TcpListener`, so we drive hyper's per-
+# connection HTTP/1 server directly when binding a Unix socket. Versions
+# tracked through axum 0.7's transitive chain.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = { version = "0.5", features = ["util"] }

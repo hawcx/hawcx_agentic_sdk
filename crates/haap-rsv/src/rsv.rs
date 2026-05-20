@@ -173,6 +173,12 @@ impl Rsv {
             max_confirmation_ttl_secs: 300,
             pop_sig: None,
             tool_arguments: None,
+            // The SDK's alpha cascade path doesn't carry PoP-v2 envelopes
+            // (the HTTP API doesn't surface them). Sessions whose active
+            // policy requires PoP-v2 reject at Step 14 with
+            // `PopRequestEnvelopeMissing`, which `map_cascade_reject`
+            // surfaces unchanged.
+            pop_envelope: None,
         };
 
         // 5. ReplayCheck impl — sync Redis-backed
@@ -239,6 +245,7 @@ impl Rsv {
             max_confirmation_ttl_secs: 300,
             pop_sig: None,
             tool_arguments: None,
+            pop_envelope: None,
         };
 
         let (token_body, body_plaintext) = verify_and_decrypt_request(
@@ -351,6 +358,56 @@ fn map_cascade_reject(reject: CascadeRejectReason) -> VerifyError {
         PopSigMissing => VerifyError::CascadeRejected("PopSigMissing (step 14)".into()),
         PopSigInvalid => VerifyError::CascadeRejected("PopSigInvalid (step 14)".into()),
         PopPubMissing => VerifyError::CascadeRejected("PopPubMissing (step 14)".into()),
+        PopTranscriptVersionUnknown => {
+            VerifyError::CascadeRejected("PopTranscriptVersionUnknown (step 14)".into())
+        }
+        PopRequestEnvelopeMissing => {
+            VerifyError::CascadeRejected("PopRequestEnvelopeMissing (step 14)".into())
+        }
+        // §43 delegation chain (CS v7.0.0). The SDK passes these through
+        // verbatim; the consumer is the customer's gateway, not the SDK
+        // process. Keep messages stable so existing log greps continue
+        // to work.
+        DelegationSigInvalid => VerifyError::CascadeRejected("DelegationSigInvalid (step 13.2)".into()),
+        DelegationExpired => VerifyError::CascadeRejected("DelegationExpired (step 13.2)".into()),
+        DelegationNotYetValid => {
+            VerifyError::CascadeRejected("DelegationNotYetValid (step 13.2)".into())
+        }
+        DelegationChainBroken => VerifyError::CascadeRejected("DelegationChainBroken (step 13.2)".into()),
+        DelegationScopeEscalation => {
+            VerifyError::CascadeRejected("DelegationScopeEscalation (step 13.2)".into())
+        }
+        DelegationPubkeyMismatch => {
+            VerifyError::CascadeRejected("DelegationPubkeyMismatch (step 13.2)".into())
+        }
+        DelegationLeafMismatch => VerifyError::CascadeRejected("DelegationLeafMismatch (step 13.2)".into()),
+        DelegationScopeExceedsCeiling => {
+            VerifyError::CascadeRejected("DelegationScopeExceedsCeiling (step 13.2)".into())
+        }
+        DelegationDepthExceeded => {
+            VerifyError::CascadeRejected("DelegationDepthExceeded (step 13.2)".into())
+        }
+        DelegationRevoked => VerifyError::CascadeRejected("DelegationRevoked (step 13.2)".into()),
+        DelegationGrantTooLong => {
+            VerifyError::CascadeRejected("DelegationGrantTooLong (step 13.2)".into())
+        }
+        DelegationRevocationStale => {
+            VerifyError::CascadeRejected("DelegationRevocationStale (step 13.2)".into())
+        }
+        DelegationRevocationUnavailable => {
+            VerifyError::CascadeRejected("DelegationRevocationUnavailable (step 13.2)".into())
+        }
+        DelegationDirectoryUnavailable => {
+            VerifyError::CascadeRejected("DelegationDirectoryUnavailable (step 13.2)".into())
+        }
+        // §16 user/admin policy signature (v7.1.0).
+        UserPolicySigRequired => {
+            VerifyError::CascadeRejected("UserPolicySigRequired (step 15)".into())
+        }
+        UserPolicySigInvalid => {
+            VerifyError::CascadeRejected("UserPolicySigInvalid (step 15)".into())
+        }
+        SignerRoleMismatch => VerifyError::CascadeRejected("SignerRoleMismatch (step 15)".into()),
         ConcurrentConsume => VerifyError::Replay,
     }
 }

@@ -129,10 +129,28 @@ serve verify requests.
 
 ## Operation
 
-The binary listens on `HAAP_RSV_LISTEN` (default `127.0.0.1:8443`).
-Use a reverse proxy + TLS termination in production; the binary
-itself does not terminate TLS. See the threat-model section below
-for the supported deployment patterns.
+`haap-rsv` runs in one of two transport modes (selected via `--transport`
+or `HAAP_RSV_TRANSPORT`):
+
+- **`unix` (default)**: bind a Unix Domain Socket at
+  `$XDG_RUNTIME_DIR/hawcx/rsv.sock` (overridable via `HAAP_RSV_UDS_PATH`).
+  Authentication is performed at accept time via `SO_PEERCRED`
+  (Linux) / `LOCAL_PEEREUID` (macOS). The peer's effective UID must
+  equal `HAAP_RSV_EXPECTED_PEER_UID` (default: the `haap-rsv` process's
+  own UID). Mismatched peers are dropped without a response.
+- **`tcp` (opt-in)**: bind a TCP listener at `HAAP_RSV_LISTEN`
+  (default `127.0.0.1:8443`). Every authenticated route requires
+  `Authorization: Bearer <token>` where the token equals
+  `HAAP_RSV_AUTH_TOKEN`. `HAAP_RSV_AUTH_TOKEN` MUST be at least
+  32 bytes; shorter values cause `haap-rsv` to refuse to start. The
+  comparison is constant-time (`subtle::ConstantTimeEq`).
+
+`GET /healthz` is exempt from both authentication paths (it is a
+liveness probe and exposes no secrets).
+
+Use a TLS-terminating reverse proxy in front of the TCP listener for
+any deployment that crosses a host boundary; the binary itself does
+not terminate TLS.
 
 Concurrent verification requests are serialized at the `Rsv` mutex —
 internal redesign for finer-grained concurrency lands in a follow-up
@@ -140,55 +158,47 @@ PR.
 
 ## Threat model and transport security
 
-`haap-rsv` listens for HTTP connections at the configured `HAAP_RSV_LISTEN`
-address. By default this is `127.0.0.1:8443` (loopback only). The default
-is intentional and reflects the supported alpha deployment pattern.
+`haap-rsv` defaults to UDS (`$XDG_RUNTIME_DIR/hawcx/rsv.sock`) so that
+"any process on the host can hit the verifier and decrypt request
+bodies" is not the out-of-the-box reality. The previous "loopback is
+fine" reasoning has been retired: loopback TCP authenticates _nothing_
+about its caller — any local process (including unrelated daemons,
+container neighbours, and SSRF-reachable services) could call
+`/verify` and learn plaintext request bodies.
 
 ### Sidecar deployment (recommended)
 
-The supported alpha pattern co-locates `haap-rsv` with the MCP server
-process on the same host:
+The supported pattern co-locates `haap-rsv` with the MCP server process
+on the same host and uses UDS for the wire between them:
 
 ```
-[MCP server process]  <-HTTP->  [haap-rsv on 127.0.0.1:8443]
-        (same host)
+[MCP server process]  <-UDS->  [haap-rsv on $XDG_RUNTIME_DIR/hawcx/rsv.sock]
+        (same host, same UID)
 ```
 
-The TCP traffic between these two processes never leaves the host. Loopback
-HTTP is sufficient because:
-
-1. **The HAAP-layer cryptography is the protective surface.** The agent's
-   request body reaches `haap-rsv` already AES-256-GCM-encrypted with K_req.
-   `haap-rsv` decrypts via the cascade (using K_session_root-derived keys)
-   and returns plaintext to the local MCP server. The MCP server encrypts
-   its response with K_resp before sending it back. HTTP-vs-HTTPS at the
-   transport layer is a defense-in-depth question for the metadata around
-   those encrypted payloads, not for the protective surface itself.
-
-2. **Loopback traffic does not leave the host.** An attacker would need
-   local code execution on the same host to intercept, at which point they
-   have more direct attack paths (process memory, debugger attach, etc.).
-
-3. **TLS cert management adds operational complexity for marginal protection
-   on loopback.** The supported pattern uses reverse proxies (nginx, Caddy,
-   Envoy) for TLS termination when cross-host traffic is involved (see
-   below). Loopback deployments skip the cert lifecycle burden.
+The UDS is `chmod 600` and the parent directory is `chmod 700`. The
+`haap-rsv` accept loop validates `SO_PEERCRED` on every connection and
+drops peers whose UID doesn't match `HAAP_RSV_EXPECTED_PEER_UID`. An
+attacker who lands code execution under a different UID on the same
+host cannot reach the verifier even though the socket file is on the
+local filesystem.
 
 ### Cross-host deployment
 
 If `haap-rsv` runs on a different host than the MCP server (network traffic
-between them), HTTPS becomes essential. The supported pattern places a
-TLS-terminating reverse proxy in front of `haap-rsv`:
+between them), use TCP transport, the bearer-token authenticator, and a
+TLS-terminating reverse proxy:
 
 ```
-[MCP server]  --TLS->  [reverse proxy]  <-HTTP->  [haap-rsv on 127.0.0.1:8443]
-                      (TLS termination)              (loopback only)
+[MCP server]  --TLS->  [reverse proxy]  <--HTTP+Bearer-->  [haap-rsv on 127.0.0.1:8443]
+                      (TLS termination)                       (--transport tcp)
 ```
 
 The reverse proxy:
 
 - Terminates TLS with a certificate the MCP server trusts
-- Forwards plaintext HTTP to `haap-rsv` on loopback within its own host
+- Forwards HTTP to `haap-rsv` on loopback within its own host, including
+  the `Authorization: Bearer <HAAP_RSV_AUTH_TOKEN>` header
 - Optionally adds rate limiting, request logging, and access control
 
 This deployment pattern is the standard "production" deployment shape.
@@ -210,11 +220,13 @@ Native TLS support is a documented post-alpha workstream.
 
 ### Direct network exposure (NOT supported)
 
-Configurations like `HAAP_RSV_LISTEN=0.0.0.0:8443` (binding all interfaces
-without a reverse proxy) are not supported. `haap-rsv` will emit a
-startup warning if it detects non-loopback binding. The warning is
-informational; the binary will still serve traffic, but the deployment
-is operating outside the supported pattern.
+Configurations like `--transport tcp` + `HAAP_RSV_LISTEN=0.0.0.0:8443`
+(binding all interfaces without a reverse proxy) are not supported.
+The bearer-token middleware authenticates every request but does not
+encrypt the wire — HTTP headers, response bodies that the MCP server
+re-encrypts, and timing information are all visible to a network
+attacker. `haap-rsv` will emit a startup warning if it detects
+non-loopback binding even in TCP mode.
 
 If a customer needs to expose `haap-rsv` on a network address, the correct
 solution is to put it behind a TLS-terminating reverse proxy.
