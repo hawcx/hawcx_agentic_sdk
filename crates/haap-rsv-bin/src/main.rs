@@ -405,6 +405,81 @@ fn unauthorized_response() -> Response {
         .into_response()
 }
 
+// ── Cascade-reject → HTTP response mapping ──────────────────────────
+
+/// H-2 (2026-05-20) — collapse every cascade rejection to a generic
+/// `{"error": "unauthorized"}` 401 body, then log the verbose reason
+/// server-side at `tracing::debug!`.
+///
+/// The previous mapping surfaced strings like
+/// `"AudHashMismatch (step 3b)"`, `"VerifierSecretMismatch (step 8)"`,
+/// `"ScopeCeilingExceeded (step 13)"`, etc. directly to the HTTP body.
+/// An attacker probing the endpoint could distinguish "your token is
+/// for the wrong audience" from "your token is replayed" from "your
+/// scope was downgraded" — turning the verifier into a free oracle for
+/// the cascade's internal state machine.
+///
+/// Verbose mode (legacy behaviour) is gated behind
+/// `HAAP_RSV_VERBOSE_ERRORS=1`. The binary refuses to enable verbose
+/// errors when `HAAP_PRODUCTION_MODE=true` — combining the two is a
+/// configuration error rather than a security policy choice, and we
+/// detect it at the request boundary rather than letting it slip
+/// through with a deployment-time warning that ops might miss.
+fn map_cascade_reject_to_response(
+    err: haap_sdk_types::VerifyError,
+) -> (StatusCode, Json<ErrorResp>) {
+    // Always log the full reason server-side. This is the canonical
+    // place to grep for "why did this token get rejected?" — the
+    // verbose-on-the-wire form is only an opt-in convenience.
+    tracing::debug!(reason = %err, "cascade rejected token");
+
+    let body = if verbose_errors_enabled() {
+        ErrorResp {
+            error: err.to_string(),
+        }
+    } else {
+        ErrorResp {
+            error: "unauthorized".to_string(),
+        }
+    };
+    (StatusCode::UNAUTHORIZED, Json(body))
+}
+
+/// Read `HAAP_RSV_VERBOSE_ERRORS` / `HAAP_PRODUCTION_MODE` and return
+/// whether the handler should surface the verbose cascade-reject
+/// string. Combining `HAAP_PRODUCTION_MODE=true` with
+/// `HAAP_RSV_VERBOSE_ERRORS=1` logs a warning and forces verbose mode
+/// OFF — production must not leak internal state via 401 bodies, and
+/// detecting the misconfiguration here keeps the deploy-time check from
+/// being the only line of defence.
+fn verbose_errors_enabled() -> bool {
+    let production = matches!(
+        std::env::var("HAAP_PRODUCTION_MODE")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("true") | Some("1")
+    );
+    let verbose = matches!(
+        std::env::var("HAAP_RSV_VERBOSE_ERRORS")
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("1")
+    );
+    if production && verbose {
+        tracing::warn!(
+            "HAAP_RSV_VERBOSE_ERRORS=1 is set under HAAP_PRODUCTION_MODE=true; \
+             forcing verbose mode OFF — 401 bodies will stay generic. Remove \
+             HAAP_RSV_VERBOSE_ERRORS from the production env to silence this warning."
+        );
+        return false;
+    }
+    verbose
+}
+
 // ── Handlers ────────────────────────────────────────────────────────
 
 async fn verify_handler(
@@ -427,22 +502,11 @@ async fn verify_handler(
         Some((body, aad)) => rsv
             .verify_and_decrypt_with_body(&decoded.token, Some(body), aad)
             .await
-            .map_err(|e| {
-                (
-                    axum::http::StatusCode::UNAUTHORIZED,
-                    Json(ErrorResp {
-                        error: e.to_string(),
-                    }),
-                )
-            })?,
-        None => rsv.verify_and_decrypt(&decoded.token).await.map_err(|e| {
-            (
-                axum::http::StatusCode::UNAUTHORIZED,
-                Json(ErrorResp {
-                    error: e.to_string(),
-                }),
-            )
-        })?,
+            .map_err(map_cascade_reject_to_response)?,
+        None => rsv
+            .verify_and_decrypt(&decoded.token)
+            .await
+            .map_err(map_cascade_reject_to_response)?,
     };
 
     let handle = Uuid::new_v4();
