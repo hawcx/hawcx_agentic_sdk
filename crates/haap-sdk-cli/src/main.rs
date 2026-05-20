@@ -147,7 +147,9 @@ mod commands {
         let bytes = tokio::fs::read(input).await?;
         let bundle: SealedBundle = bincode::deserialize(&bytes).map_err(|e| anyhow!("deserialize: {e}"))?;
         let plaintext = sealer.unseal(&bundle).await?;
-        println!("{}", String::from_utf8_lossy(&plaintext));
+        // `plaintext` is Zeroizing<Vec<u8>>; the borrow keeps the
+        // wipe-on-drop guarantee intact through the print.
+        println!("{}", String::from_utf8_lossy(plaintext.as_slice()));
         Ok(())
     }
 

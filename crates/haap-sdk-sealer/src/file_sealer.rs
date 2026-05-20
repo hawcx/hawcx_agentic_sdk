@@ -148,7 +148,7 @@ impl AgentIdentitySealer for FileSealer {
         })
     }
 
-    async fn unseal(&self, bundle: &SealedBundle) -> Result<Vec<u8>, SealerError> {
+    async fn unseal(&self, bundle: &SealedBundle) -> Result<Zeroizing<Vec<u8>>, SealerError> {
         if bundle.backend_tag != BACKEND_TAG {
             return Err(SealerError::BackendTagMismatch(
                 bundle.backend_tag.clone(),
@@ -180,7 +180,7 @@ impl AgentIdentitySealer for FileSealer {
             )
             .map_err(|e| SealerError::AeadDecrypt(e.to_string()))?;
 
-        Ok(plaintext)
+        Ok(Zeroizing::new(plaintext))
     }
 }
 
@@ -200,7 +200,7 @@ mod tests {
         let plaintext = b"sample identity bundle bytes".to_vec();
         let bundle = sealer.seal(&plaintext).await.unwrap();
         let recovered = sealer.unseal(&bundle).await.unwrap();
-        assert_eq!(plaintext, recovered);
+        assert_eq!(plaintext.as_slice(), recovered.as_slice());
     }
 
     #[tokio::test]
@@ -238,7 +238,7 @@ mod tests {
         // still drive the derivation and unseal should succeed.
         std::env::set_var("HAAP_TEST_PASSPHRASE_F4", "different-env-value");
         let recovered = sealer.unseal(&bundle).await.unwrap();
-        assert_eq!(recovered, b"plaintext");
+        assert_eq!(recovered.as_slice(), b"plaintext");
 
         std::env::remove_var("HAAP_TEST_PASSPHRASE_F4_FILE");
         std::env::remove_var("HAAP_TEST_PASSPHRASE_F4");

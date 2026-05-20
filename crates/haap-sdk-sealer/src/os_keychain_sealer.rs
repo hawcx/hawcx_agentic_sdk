@@ -15,6 +15,7 @@ use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use async_trait::async_trait;
 use haap_sdk_types::{SealedBundle, SealerError};
+use zeroize::Zeroizing;
 
 use crate::sealer::AgentIdentitySealer;
 
@@ -106,7 +107,7 @@ impl AgentIdentitySealer for OsKeychainSealer {
         })
     }
 
-    async fn unseal(&self, bundle: &SealedBundle) -> Result<Vec<u8>, SealerError> {
+    async fn unseal(&self, bundle: &SealedBundle) -> Result<Zeroizing<Vec<u8>>, SealerError> {
         if bundle.backend_tag != BACKEND_TAG {
             return Err(SealerError::BackendTagMismatch(
                 bundle.backend_tag.clone(),
@@ -133,7 +134,7 @@ impl AgentIdentitySealer for OsKeychainSealer {
             )
             .map_err(|e| SealerError::AeadDecrypt(e.to_string()))?;
 
-        Ok(plaintext)
+        Ok(Zeroizing::new(plaintext))
     }
 }
 
@@ -150,6 +151,6 @@ mod tests {
         let plaintext = b"sample".to_vec();
         let bundle = sealer.seal(&plaintext).await.unwrap();
         let recovered = sealer.unseal(&bundle).await.unwrap();
-        assert_eq!(plaintext, recovered);
+        assert_eq!(plaintext.as_slice(), recovered.as_slice());
     }
 }
