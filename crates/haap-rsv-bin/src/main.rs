@@ -134,6 +134,13 @@ async fn main() -> Result<()> {
         auth_token,
     };
 
+    // M-4 (2026-05-20): the handle cache also gets a background
+    // sweeper so abandoned handles (verified but never followed up
+    // with /encrypt-response) are wiped well inside their 30-second
+    // TTL — not at process exit. Cheap: HashMap::retain over a
+    // single-digit-entry cache every 10s.
+    spawn_handle_sweeper(state.handles.clone());
+
     let app = Router::new()
         .route("/verify", post(verify_handler))
         .route("/encrypt-response", post(encrypt_response_handler))
@@ -510,10 +517,7 @@ async fn verify_handler(
     };
 
     let handle = Uuid::new_v4();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let now = now_unix();
     let mut handles = state.handles.lock().await;
     handles.insert(
         handle,
@@ -555,30 +559,91 @@ async fn encrypt_response_handler(
         )
     })?;
 
-    // Look up cached post-verify state. Drop the lock before the (sync)
-    // encrypt_response call so a long encryption does not stall concurrent
-    // /verify handlers on the same Mutex.
+    // Look up cached post-verify state. Two hardenings versus the
+    // previous implementation:
+    //
+    // 1. TTL enforcement on read (M-4 2026-05-20): the cache entry's
+    //    `expires_at_unix` is checked against `now()` *before* the
+    //    response_key is returned. An entry that has aged past its
+    //    TTL since the `/verify` call is removed and the handler
+    //    returns 410 Gone — not 404 — so the operator can
+    //    distinguish "you never had this handle" (404) from "you
+    //    had it and waited too long" (410). The previous code only
+    //    swept expired entries opportunistically on the next
+    //    `/verify` call, so a handle minted 5 minutes ago and never
+    //    overwritten would still encrypt a response under a key
+    //    that should already have been wiped.
+    //
+    // 2. Zeroizing thread-through (L-3 2026-05-20): the previous
+    //    code did `(*cached.response_key)` to peel the inner
+    //    `[u8; 32]` out of the cache's `Zeroizing<[u8; 32]>`, then
+    //    re-wrapped it in a fresh `Zeroizing`. The intermediate
+    //    bare-array temporary on the stack lived just long enough
+    //    to break the wipe-on-drop guarantee for the duration of
+    //    the function frame. Now we clone the `Zeroizing<[u8; 32]>`
+    //    by value — the clone is itself Zeroizing, so the
+    //    wipe-on-drop is unbroken end-to-end.
+    //
+    // We still drop the handles lock before the (sync)
+    // encrypt_response call so a long encryption does not stall
+    // concurrent /verify handlers.
     let (response_key, session_id, jti) = {
-        let handles = state.handles.lock().await;
-        let cached = handles.get(&decoded.handle).ok_or((
-            axum::http::StatusCode::NOT_FOUND,
-            Json(ErrorResp {
-                error: "verification handle not found (expired or never created)".into(),
-            }),
-        ))?;
-        ((*cached.response_key), cached.session_id, cached.jti)
+        let mut handles = state.handles.lock().await;
+        let now = now_unix();
+        // Peek the entry's TTL first so we can choose between 404
+        // (never existed) and 410 (existed, expired). Doing this in
+        // two steps avoids a `remove` followed by `re-insert` race.
+        let still_alive = handles
+            .get(&decoded.handle)
+            .map(|h| h.expires_at_unix >= now);
+        match still_alive {
+            Some(true) => {
+                let cached = handles.get(&decoded.handle).expect(
+                    "presence rechecked under the same lock; cannot vanish",
+                );
+                (
+                    cached.response_key.clone(),
+                    cached.session_id,
+                    cached.jti,
+                )
+            }
+            Some(false) => {
+                // Expired: drop the entry now so any later /encrypt
+                // attempt with the same handle gets a clean 404,
+                // and so the response_key bytes are wiped from the
+                // process heap immediately rather than waiting for
+                // the next opportunistic sweep.
+                handles.remove(&decoded.handle);
+                return Err((
+                    axum::http::StatusCode::GONE,
+                    Json(ErrorResp {
+                        error: "verification handle expired".into(),
+                    }),
+                ));
+            }
+            None => {
+                return Err((
+                    axum::http::StatusCode::NOT_FOUND,
+                    Json(ErrorResp {
+                        error: "verification handle not found".into(),
+                    }),
+                ));
+            }
+        }
     };
 
     // Rebuild a minimal VerifiedRequest for the library call.
     // `encrypt_response` only consumes `response_key` + `session_id`
     // (see crates/haap-rsv/src/rsv.rs:235); `plaintext_body` and `jti`
-    // are not read on the encrypt path. Wrapping in Zeroizing means the
-    // local key copy is wiped when this scope exits.
+    // are not read on the encrypt path. The `response_key` was cloned
+    // out of the cache as a `Zeroizing<[u8; 32]>` and is moved
+    // straight into the VerifiedRequest — no bare `[u8; 32]`
+    // temporary on the stack (L-3).
     let verified = VerifiedRequest {
         session_id,
         jti,
         plaintext_body: Vec::new(),
-        response_key: Zeroizing::new(response_key),
+        response_key,
     };
 
     let rsv = state.rsv.lock().await;
@@ -607,4 +672,59 @@ const _PATH_TYPE: Option<&Path> = None;
 
 async fn healthz() -> &'static str {
     "ok"
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────
+
+/// Current wall-clock unix seconds. Saturates to 0 on a host whose
+/// clock somehow predates 1970 (the previous `unwrap_or(0)` form,
+/// preserved here so a misconfigured host degrades to "everything
+/// looks expired" rather than panicking mid-request).
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Period between handle-cache sweeps. Short enough that an expired
+/// `response_key` is wiped well inside its 30-second TTL window,
+/// long enough that the sweep itself is cheap (HashMap::retain is
+/// O(N) over the live entries — N is bounded by the in-flight
+/// /verify count, typically single digits).
+const SWEEPER_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Background task that walks the handle cache every
+/// [`SWEEPER_INTERVAL`] and drops entries whose TTL has elapsed.
+///
+/// Without this task, an expired `response_key` would sit in memory
+/// until either (a) a subsequent `/verify` happened to overwrite the
+/// same handle (impossible — UUIDv4 collision probability is
+/// negligible) or (b) a successful `/encrypt-response` removed it on
+/// the M-4 read path. In other words: handles that callers simply
+/// abandon would keep a 32-byte AEAD key in the process heap for the
+/// process's lifetime. The sweeper closes that hole.
+fn spawn_handle_sweeper(handles: HandleCache) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(SWEEPER_INTERVAL);
+        // First tick fires immediately; skip it so the first sweep
+        // runs one interval after startup (no point sweeping an
+        // empty cache).
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let now = now_unix();
+            let mut guard = handles.lock().await;
+            let before = guard.len();
+            guard.retain(|_, h| h.expires_at_unix >= now);
+            let removed = before.saturating_sub(guard.len());
+            if removed > 0 {
+                tracing::debug!(
+                    removed,
+                    remaining = guard.len(),
+                    "handle-cache sweeper dropped expired entries"
+                );
+            }
+        }
+    });
 }
