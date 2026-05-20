@@ -45,9 +45,30 @@ enum Command {
         output: PathBuf,
     },
     /// Unseal a previously-sealed file.
+    ///
+    /// By default the recovered plaintext is written to `--output`
+    /// with mode 0o600 (and the call refuses to overwrite an
+    /// existing file). The historical behaviour of dumping plaintext
+    /// to stdout is gated behind
+    /// `--yes-i-know-this-is-dangerous` because writing
+    /// identity-bundle plaintext to a terminal that's being captured
+    /// by `script(1)`, `tee`, a CI log collector, or shell history
+    /// with pipefail is exactly how secrets escape into the log
+    /// infrastructure the seal step was trying to defend against
+    /// (L-1 hardening 2026-05-20).
     Unseal {
         #[arg(long)]
         input: PathBuf,
+        /// Output path. Created with mode 0o600; refuses to
+        /// overwrite an existing file. Mutually exclusive with
+        /// `--yes-i-know-this-is-dangerous`.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Opt-in flag to dump plaintext to stdout. Long, ugly,
+        /// and intentional — the goal is that nobody types this
+        /// without thinking about it.
+        #[arg(long = "yes-i-know-this-is-dangerous", default_value_t = false)]
+        unsafe_stdout: bool,
     },
 }
 
@@ -66,7 +87,9 @@ async fn main() -> Result<()> {
         Command::RunRsv { rsv_bin, listen } => commands::run_rsv(rsv_bin, listen).await,
         Command::SubstrateFetch { session_id } => commands::substrate_fetch(session_id).await,
         Command::Seal { input, output } => commands::seal(&input, &output).await,
-        Command::Unseal { input } => commands::unseal(&input).await,
+        Command::Unseal { input, output, unsafe_stdout } => {
+            commands::unseal(&input, output.as_deref(), unsafe_stdout).await
+        }
     }
 }
 
@@ -141,16 +164,67 @@ mod commands {
         Ok(())
     }
 
-    pub async fn unseal(input: &PathBuf) -> Result<()> {
+    pub async fn unseal(
+        input: &PathBuf,
+        output: Option<&std::path::Path>,
+        unsafe_stdout: bool,
+    ) -> Result<()> {
         let sealer_config = sealer_config_from_env()?;
         let sealer = build_sealer(&sealer_config)?;
         let bytes = tokio::fs::read(input).await?;
         let bundle: SealedBundle = bincode::deserialize(&bytes).map_err(|e| anyhow!("deserialize: {e}"))?;
         let plaintext = sealer.unseal(&bundle).await?;
-        // `plaintext` is Zeroizing<Vec<u8>>; the borrow keeps the
-        // wipe-on-drop guarantee intact through the print.
-        println!("{}", String::from_utf8_lossy(plaintext.as_slice()));
-        Ok(())
+
+        match (output, unsafe_stdout) {
+            (Some(path), false) => {
+                use std::io::Write;
+                // create_new + mode 0o600: refuse to overwrite, and
+                // never let the file exist with a wider mode even
+                // for the syscall window between create and chmod
+                // (`mode` is applied at `open(2)` time on Unix).
+                #[cfg(unix)]
+                let mut file = {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .mode(0o600)
+                        .open(path)
+                        .map_err(|e| anyhow!("open {} for write: {e}", path.display()))?
+                };
+                #[cfg(not(unix))]
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+                    .map_err(|e| anyhow!("open {} for write: {e}", path.display()))?;
+                file.write_all(plaintext.as_slice())
+                    .map_err(|e| anyhow!("write {}: {e}", path.display()))?;
+                file.sync_all()
+                    .map_err(|e| anyhow!("fsync {}: {e}", path.display()))?;
+                // Status to stderr — stdout stays reserved for the
+                // explicit `--yes-i-know-this-is-dangerous` path.
+                eprintln!(
+                    "unsealed {} bytes -> {} (mode 0600)",
+                    plaintext.len(),
+                    path.display()
+                );
+                Ok(())
+            }
+            (None, true) => {
+                // Operator opted in to the footgun. The borrow keeps
+                // `plaintext`'s Zeroizing wipe-on-drop intact.
+                println!("{}", String::from_utf8_lossy(plaintext.as_slice()));
+                Ok(())
+            }
+            (Some(_), true) => Err(anyhow!(
+                "--output and --yes-i-know-this-is-dangerous are mutually exclusive; pick one"
+            )),
+            (None, false) => Err(anyhow!(
+                "unseal requires either --output <path> (writes mode 0600) \
+                 or --yes-i-know-this-is-dangerous (dump plaintext to stdout)"
+            )),
+        }
     }
 
     fn which(bin: &str) -> Option<PathBuf> {
