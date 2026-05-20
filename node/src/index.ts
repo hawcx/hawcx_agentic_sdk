@@ -29,6 +29,7 @@
  *
  *     const agent = await HawcxAgent.connect(
  *       "/var/run/haap/research-u1/agent-assembler-0.sock",
+ *       { principalAllowlist: [] }, // or ["alice", "bob"] for runtime principal switching
  *     );
  *     try {
  *       const response = await agent.invoke({

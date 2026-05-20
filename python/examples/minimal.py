@@ -24,7 +24,10 @@ def main() -> int:
         print("set HAAP_AGENT_ID to the provisioned agent identity", file=sys.stderr)
         return 2
 
-    with HawcxAgent.connect_by_agent_id(agent_id) as agent:
+    # H-3: pass `principal_allowlist=[]` because this example never
+    # uses runtime principal switching. A real deployment that fans
+    # out tool calls per end-user populates this from operator config.
+    with HawcxAgent.connect_by_agent_id(agent_id, principal_allowlist=[]) as agent:
         response = agent.invoke(
             target_rs_url="https://api.example.com/search",
             http_method="POST",

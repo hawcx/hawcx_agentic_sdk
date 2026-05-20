@@ -14,7 +14,7 @@
  */
 
 import { Buffer } from "node:buffer";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as process from "node:process";
@@ -82,10 +82,54 @@ export function defaultEndpointFor(
 }
 
 /**
+ * Construction options shared by every `HawcxAgent.connect*` factory.
+ *
+ * `principalAllowlist` (H-3 hardening 2026-05-20) gates which
+ * `actingForUser` values this agent instance is permitted to emit. The
+ * SDK validates `invoke({ actingForUser })` against this allowlist
+ * before forwarding to the Assembler — out-of-list values throw
+ * synchronously, so LLM-derived principal strings cannot silently
+ * impersonate other users.
+ *
+ * Pass an empty array (`[]`) to disable runtime principal switching
+ * entirely; any non-empty `actingForUser` will throw. Pass `["*"]` only
+ * if the caller has independently verified the principal source is
+ * trusted (signed claim, headers from an authenticated upstream, etc.)
+ * — the SDK does not validate `"*"` semantics; it's an explicit
+ * escape hatch with a load-bearing string so a future reader spots it
+ * in code review.
+ */
+export interface HawcxAgentOptions {
+  timeoutMs?: number;
+  /**
+   * Closed set of user principal IDs this agent may emit via
+   * `actingForUser`. Validated synchronously inside `invoke` /
+   * `invokeFor`; out-of-list values throw before any IPC bytes are
+   * written.
+   *
+   * MUST be a static set sourced from operator config — never derive
+   * from LLM output, request bodies, or any input that a model can
+   * influence. See README "Threat model — runtime principal" for the
+   * full guidance.
+   */
+  principalAllowlist: readonly string[];
+}
+
+/**
+ * Construction options for the agent-id factory. Same as
+ * {@link HawcxAgentOptions} plus the index/ipcDir resolution fields.
+ */
+export interface HawcxAgentConnectByAgentIdOptions extends HawcxAgentOptions {
+  index?: number;
+  ipcDir?: string;
+}
+
+/**
  * High-level HAAP agent client. Connect once, invoke many times, close.
  *
  *     const agent = await HawcxAgent.connect(
  *       "/var/run/haap/research-u1/agent-assembler-0.sock",
+ *       { principalAllowlist: ["alice", "bob"] },
  *     );
  *     try {
  *       const response = await agent.invoke({
@@ -104,20 +148,27 @@ export function defaultEndpointFor(
  * agents.
  */
 export class HawcxAgent {
-  private constructor(private client: AssemblerClient | null) {}
+  private constructor(
+    private client: AssemblerClient | null,
+    private readonly principalAllowlist: ReadonlySet<string>,
+  ) {}
 
   /**
    * Open the agent IPC socket at `endpoint` and complete the version handshake.
    *
    * On Unix, `endpoint` is a filesystem path. On Windows, it's a Named Pipe
    * path (`\\\\.\\pipe\\haap-<agent_id>-agent-assembler-<index>`).
+   *
+   * `options.principalAllowlist` is required (H-3 2026-05-20). Pass `[]`
+   * to forbid runtime principal switching entirely.
    */
   static async connect(
     endpoint: string,
-    options: { timeoutMs?: number } = {},
+    options: HawcxAgentOptions,
   ): Promise<HawcxAgent> {
+    const allowlist = validatePrincipalAllowlist(options.principalAllowlist);
     const client = await AssemblerClient.connect(endpoint, options);
-    return new HawcxAgent(client);
+    return new HawcxAgent(client, allowlist);
   }
 
   /**
@@ -126,7 +177,7 @@ export class HawcxAgent {
    */
   static connectByAgentId(
     agentId: string,
-    options: { index?: number; ipcDir?: string; timeoutMs?: number } = {},
+    options: HawcxAgentConnectByAgentIdOptions,
   ): Promise<HawcxAgent> {
     return HawcxAgent.connect(
       defaultEndpointFor(agentId, options),
@@ -142,9 +193,18 @@ export class HawcxAgent {
    *
    * Parameters mirror the fields of `haap_ipc::messages::assembler::
    * ToolCallRequest`. `body` maps to the wire field `plaintext_request_body`.
+   *
+   * If `opts.actingForUser` is set, it MUST be a member of the
+   * `principalAllowlist` passed at construction time. Out-of-list
+   * values throw synchronously before any IPC bytes are written —
+   * an LLM-derived principal string can never silently switch the
+   * effective user.
    */
   async invoke(opts: HawcxAgentInvokeOptions): Promise<ToolCallResponse> {
     if (!this.client) throw new Error("agent already closed");
+    if (opts.actingForUser !== undefined) {
+      this.assertPrincipalAllowed(opts.actingForUser);
+    }
     const requestId = opts.requestId ?? `req-${randomUUID().replace(/-/g, "").slice(0, 16)}`;
     return this.client.invoke({
       requestId,
@@ -174,7 +234,8 @@ export class HawcxAgent {
    *
    * Throws if `userPrincipalId` is the empty string (a missing
    * principal is most likely a caller bug; use plain `invoke()` if
-   * "no principal" is the intended semantic).
+   * "no principal" is the intended semantic) or if the principal is
+   * not a member of the `principalAllowlist` passed at construction.
    */
   async invokeFor(
     userPrincipalId: string,
@@ -186,7 +247,35 @@ export class HawcxAgent {
           "use invoke() without actingForUser for unprincipled calls",
       );
     }
+    // assertPrincipalAllowed runs again inside invoke(), but throwing
+    // here gives the caller a clearer stack trace pointing at the
+    // invokeFor site rather than the inner forwarding call.
+    this.assertPrincipalAllowed(userPrincipalId);
     return this.invoke({ ...opts, actingForUser: userPrincipalId });
+  }
+
+  private assertPrincipalAllowed(principal: string): void {
+    // Empty-string principal is treated identically to "unset" by the
+    // Assembler (no `acting_for_user` projected onto scope_json), but
+    // we still reject it here as a caller-side correctness check —
+    // letting `""` through is almost always a bug.
+    if (principal === "") {
+      throw new Error(
+        "actingForUser must be a non-empty string; omit the field to opt out of runtime principal switching",
+      );
+    }
+    if (!this.principalAllowlist.has(principal)) {
+      // Do NOT echo the rejected principal back into the error
+      // message unredacted — an attacker fuzzing principal IDs could
+      // use the exception text to confirm or deny enumeration. We
+      // log a SHA-1-style short fingerprint instead.
+      const fp = principalFingerprint(principal);
+      throw new Error(
+        `actingForUser principal not in principalAllowlist (fingerprint=${fp}); ` +
+          "add the principal to the allowlist at HawcxAgent.connect() time " +
+          "or omit actingForUser. See README 'Threat model — runtime principal'.",
+      );
+    }
   }
 
   /**
@@ -209,4 +298,44 @@ export class HawcxAgent {
       this.client = null;
     }
   }
+}
+
+/**
+ * Validate `principalAllowlist` shape at construction time. Required so
+ * a caller can't accidentally pass `undefined` (TypeScript would catch
+ * this at compile time inside the monorepo, but the SDK is consumed
+ * from JS too).
+ */
+function validatePrincipalAllowlist(
+  list: readonly string[] | undefined,
+): ReadonlySet<string> {
+  if (!Array.isArray(list)) {
+    throw new TypeError(
+      "HawcxAgent options.principalAllowlist is required: pass an array of " +
+        "permitted user principal IDs, or [] to forbid runtime principal switching. " +
+        "See README 'Threat model — runtime principal'.",
+    );
+  }
+  for (const p of list) {
+    if (typeof p !== "string") {
+      throw new TypeError(
+        `principalAllowlist entries must be strings; got ${typeof p}`,
+      );
+    }
+    if (p === "") {
+      throw new TypeError(
+        "principalAllowlist entries must be non-empty strings",
+      );
+    }
+  }
+  return new Set(list);
+}
+
+/**
+ * 12-hex-char SHA-256 prefix of the principal string, used in error
+ * messages so the SDK does not echo rejected principal IDs verbatim.
+ * Truncated SHA-256 — never SHA-1 / MD5 (Hawcx posture).
+ */
+function principalFingerprint(principal: string): string {
+  return createHash("sha256").update(principal, "utf8").digest("hex").slice(0, 12);
 }

@@ -12,6 +12,7 @@ over the local IPC socket.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import uuid
@@ -60,27 +61,53 @@ class HawcxAgent:
     :meth:`connect_by_agent_id` (path-by-convention from an agent id). All
     cryptography happens in the Assembler; this class is a thin transport for
     :class:`ToolCallRequest` / :class:`ToolCallResponse`.
+
+    Runtime principal allowlist (H-3 hardening 2026-05-20)
+    ------------------------------------------------------
+    ``principal_allowlist`` is a required keyword argument on every
+    factory. It is the closed set of user principal IDs this agent
+    instance may emit via :meth:`invoke` ``acting_for_user`` /
+    :meth:`invoke_for`. Out-of-list principals raise :class:`HawcxError`
+    synchronously before any IPC bytes are written — an LLM-derived
+    principal string can never silently switch the effective user.
+
+    Pass ``[]`` to forbid runtime principal switching entirely (any
+    non-empty ``acting_for_user`` will raise). The allowlist MUST be
+    a static set sourced from operator config; never derive from LLM
+    output, request bodies, or any input the model can influence.
     """
 
-    def __init__(self, client: AssemblerClient) -> None:
-        self._client = client
+    def __init__(
+        self,
+        client: AssemblerClient,
+        principal_allowlist: frozenset[str],
+    ) -> None:
+        self._client: AssemblerClient | None = client
+        self._principal_allowlist = principal_allowlist
 
     @classmethod
     def connect(
         cls,
         endpoint: str,
         *,
+        principal_allowlist: list[str],
         timeout_secs: float | None = 5.0,
     ) -> HawcxAgent:
-        """Open the agent IPC socket at ``endpoint`` and complete the handshake."""
+        """Open the agent IPC socket at ``endpoint`` and complete the handshake.
+
+        ``principal_allowlist`` is required (H-3 2026-05-20). Pass ``[]``
+        to forbid runtime principal switching entirely.
+        """
+        allowlist = _validate_principal_allowlist(principal_allowlist)
         client = AssemblerClient.connect(endpoint, timeout_secs=timeout_secs)
-        return cls(client)
+        return cls(client, allowlist)
 
     @classmethod
     def connect_by_agent_id(
         cls,
         agent_id: str,
         *,
+        principal_allowlist: list[str],
         index: int = 0,
         ipc_dir: Path | None = None,
         timeout_secs: float | None = 5.0,
@@ -88,6 +115,7 @@ class HawcxAgent:
         """Resolve the conventional agent-Assembler endpoint, then ``connect``."""
         return cls.connect(
             default_endpoint_for(agent_id, index=index, ipc_dir=ipc_dir),
+            principal_allowlist=principal_allowlist,
             timeout_secs=timeout_secs,
         )
 
@@ -142,9 +170,16 @@ class HawcxAgent:
 
         See :meth:`invoke_for` for the sugar form when the principal is the
         single most-important axis of a call.
+
+        Allowlist enforcement: when ``acting_for_user`` is provided it
+        MUST be a member of the ``principal_allowlist`` passed at
+        construction. Out-of-list values raise :class:`HawcxError`
+        before any IPC bytes are written.
         """
         if self._client is None:
             raise HawcxError("agent already closed")
+        if acting_for_user is not None:
+            self._assert_principal_allowed(acting_for_user)
         req = ToolCallRequest(
             request_id=request_id or f"req-{uuid.uuid4().hex[:16]}",
             target_rs_url=target_rs_url,
@@ -198,6 +233,9 @@ class HawcxAgent:
                 "invoke_for requires a non-empty user_principal_id; "
                 "use invoke(...) without acting_for_user for unprincipled calls"
             )
+        # Pre-check here so the stack trace points at the invoke_for
+        # call site rather than the inner invoke() forward.
+        self._assert_principal_allowed(user_principal_id)
         return self.invoke(
             target_rs_url=target_rs_url,
             http_method=http_method,
@@ -233,6 +271,29 @@ class HawcxAgent:
             answer_text=answer_text,
         )
 
+    def _assert_principal_allowed(self, principal: str) -> None:
+        """Validate ``principal`` against the construction-time allowlist.
+
+        Raises :class:`HawcxError` for empty strings and out-of-list
+        values. The error message redacts the rejected principal to a
+        12-hex-char SHA-256 fingerprint so an attacker fuzzing
+        principal IDs cannot use the exception text as an enumeration
+        oracle.
+        """
+        if principal == "":
+            raise HawcxError(
+                "acting_for_user must be a non-empty string; omit the "
+                "field to opt out of runtime principal switching"
+            )
+        if principal not in self._principal_allowlist:
+            fp = _principal_fingerprint(principal)
+            raise HawcxError(
+                f"acting_for_user principal not in principal_allowlist "
+                f"(fingerprint={fp}); add the principal to the allowlist "
+                "at HawcxAgent.connect() time or omit acting_for_user. "
+                "See README 'Threat model - runtime principal'."
+            )
+
     def close(self) -> None:
         if self._client is not None:
             self._client.close()
@@ -243,3 +304,43 @@ class HawcxAgent:
 
     def __exit__(self, *_: Any) -> None:
         self.close()
+
+
+# ── Module-level helpers ────────────────────────────────────────────
+
+
+def _validate_principal_allowlist(list_arg: list[str]) -> frozenset[str]:
+    """Validate the shape of ``principal_allowlist`` at construction.
+
+    The keyword-arg type annotation already declares ``list[str]`` so
+    static checkers catch the obvious shape errors, but Python isn't
+    enforced at runtime — a JS-style ``None`` slip-through (e.g., a
+    caller refactor that drops the kwarg) must hit a clear guard
+    rather than silently producing a verifier with no allowlist.
+    """
+    if not isinstance(list_arg, (list, tuple, set, frozenset)):
+        raise TypeError(
+            "HawcxAgent.connect requires keyword argument "
+            "`principal_allowlist`: pass a list of permitted user "
+            "principal IDs, or [] to forbid runtime principal switching. "
+            "See README 'Threat model - runtime principal'."
+        )
+    for p in list_arg:
+        if not isinstance(p, str):
+            raise TypeError(
+                f"principal_allowlist entries must be str; got {type(p).__name__}"
+            )
+        if p == "":
+            raise TypeError(
+                "principal_allowlist entries must be non-empty strings"
+            )
+    return frozenset(list_arg)
+
+
+def _principal_fingerprint(principal: str) -> str:
+    """12-hex-char SHA-256 prefix of the principal string.
+
+    Used in error messages so the SDK does not echo rejected principal
+    IDs verbatim. SHA-256 only - never SHA-1 / MD5 (Hawcx posture).
+    """
+    return hashlib.sha256(principal.encode("utf-8")).hexdigest()[:12]

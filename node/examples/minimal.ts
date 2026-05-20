@@ -23,7 +23,12 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const agent = await HawcxAgent.connectByAgentId(agentId);
+  // H-3: pass `principalAllowlist: []` because this example never uses
+  // runtime principal switching. A real deployment that fans out tool
+  // calls per end-user populates this from operator config.
+  const agent = await HawcxAgent.connectByAgentId(agentId, {
+    principalAllowlist: [],
+  });
   try {
     const response = await agent.invoke({
       targetRsUrl: "https://api.example.com/search",

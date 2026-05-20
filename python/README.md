@@ -125,6 +125,43 @@ The SDK speaks the same wire as the in-process Rust crates:
 
 Reference: `crates/haap-ipc/src/messages/assembler.rs` in `hx_labs`.
 
+## Threat model — runtime principal
+
+`HawcxAgent` supports per-call principal switching via the
+``acting_for_user`` field, which the Assembler projects into
+``scope_json.user_principal_id`` on the minted token (CS v6.9.0
+line 163). This lets one supervisor pipeline serve multiple end-users
+without re-enrolling the agent identity per user.
+
+``acting_for_user`` is sensitive: a value that came from an LLM (or
+any input the model can influence) MUST NOT be allowed to silently
+switch the effective user. As of 0.1.0a2 (H-3 hardening 2026-05-20):
+
+- ``HawcxAgent.connect(endpoint, principal_allowlist=[...])`` is
+  required. The allowlist is a closed set of permitted principal IDs
+  sourced from operator config.
+- ``agent.invoke(acting_for_user=...)`` and ``agent.invoke_for(...)``
+  validate against the allowlist before any IPC bytes are written.
+  Out-of-list principals raise ``HawcxError`` synchronously with a
+  redacted SHA-256 fingerprint instead of echoing the rejected
+  principal back in plaintext.
+- Pass ``principal_allowlist=[]`` to forbid runtime principal
+  switching entirely.
+
+Operator obligations:
+
+1. Source the allowlist from operator-controlled config — never
+   derive from LLM output, request bodies, MCP tool arguments, or any
+   input a model can influence.
+2. If the principal axis spans more than ~100 users, fan out to
+   per-user agents rather than one agent with a wide allowlist; the
+   Cedar policy on the gateway should still gate per-user access, but
+   reducing the SDK-side allowlist closes the blast radius of a
+   compromised supervisor.
+3. The previous code that accepted ``acting_for_user`` from any
+   caller (without an allowlist) is **deprecated**. See
+   `../CHANGELOG.md` for the migration recipe.
+
 ## Limitations / known gaps
 
 - End-to-end verification against real binaries is pending alpha-2 closure of
