@@ -401,9 +401,29 @@ export class AssemblerClient {
     answerIndex?: number;
     answerText?: string;
   }): Promise<void> {
+    // `session_id` is a `u64` on the Rust side
+    // (`haap_ipc::messages::assembler::ClarificationAnswer`). The
+    // previous code unconditionally narrowed `bigint` to `Number`
+    // via `Number(args.sessionId)`, which silently truncates session
+    // IDs above 2^53 (`Number.MAX_SAFE_INTEGER`). The Rust side then
+    // looked up the *wrong* session and returned a "session not
+    // found" rejection — a confusing failure mode rooted in JS-side
+    // narrowing (M-5 hardening 2026-05-20).
+    //
+    // Fix: bigint inputs are emitted as a decimal string so no
+    // precision is lost. Number inputs are passed through unchanged
+    // (the common path — caller already chose `number`).
+    //
+    // BREAKING WIRE CHANGE (bigint path only): a follow-up bug filed
+    // against `hx_labs/crates/haap-ipc/src/messages/assembler.rs`
+    // tracks adding a serde `deserialize_with` helper so `u64` will
+    // accept both a JSON number and a string-encoded decimal. Until
+    // that lands, callers passing `bigint` values above 2^53 will
+    // hit a deserialiser error on the Assembler side rather than
+    // silent truncation — which is the correct failure mode.
     const obj: Record<string, unknown> = {
       pending_id: args.pendingId,
-      session_id: typeof args.sessionId === "bigint" ? Number(args.sessionId) : args.sessionId,
+      session_id: encodeSessionIdForWire(args.sessionId),
     };
     if (args.answerIndex !== undefined) obj.answer_index = args.answerIndex;
     if (args.answerText !== undefined) obj.answer_text = args.answerText;
@@ -414,6 +434,23 @@ export class AssemblerClient {
   close(): void {
     this.sock.destroy();
   }
+}
+
+/**
+ * Encode a `session_id` for the JSON wire payload.
+ *
+ * `bigint` inputs are emitted as a decimal string (so 64-bit values
+ * above `Number.MAX_SAFE_INTEGER` round-trip without precision loss
+ * once the Rust deserialiser learns to accept the string form).
+ * `number` inputs are passed through unchanged (emitted as a JSON
+ * number by `JSON.stringify`).
+ *
+ * Exported so unit tests can pin the exact wire shape.
+ */
+export function encodeSessionIdForWire(
+  sessionId: number | bigint,
+): number | string {
+  return typeof sessionId === "bigint" ? sessionId.toString(10) : sessionId;
 }
 
 function write(sock: net.Socket, data: Buffer): Promise<void> {

@@ -55,6 +55,7 @@ export {
   AssemblerClient,
   TokenTransport,
   encodeFrame,
+  encodeSessionIdForWire,
   MSG_TOOL_CALL_REQUEST,
   MSG_TOOL_CALL_RESPONSE,
   MSG_REQUEST_REJECTED,
