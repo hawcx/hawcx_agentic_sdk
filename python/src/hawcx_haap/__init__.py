@@ -26,7 +26,8 @@ Quick start::
     from hawcx_haap import HawcxAgent
 
     with HawcxAgent.connect(
-        "/var/run/haap/research-u1/agent-assembler-0.sock"
+        "/var/run/haap/research-u1/agent-assembler-0.sock",
+        principal_allowlist=[],  # or ["alice", "bob"] to permit runtime principal switching
     ) as agent:
         response = agent.invoke(
             target_rs_url="https://api.example.com/search",
@@ -52,6 +53,7 @@ from hawcx_haap.errors import (
     RequestRejected,
 )
 from hawcx_haap.ipc import (
+    HAWCX_HAAP_V7_2_5_CAPABILITY,
     AssemblerClient,
     TokenTransport,
     ToolCallRequest,
@@ -65,6 +67,7 @@ __all__ = [
     "ToolCallRequest",
     "ToolCallResponse",
     "TokenTransport",
+    "HAWCX_HAAP_V7_2_5_CAPABILITY",
     "HawcxError",
     "HandshakeError",
     "IpcError",

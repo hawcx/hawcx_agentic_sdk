@@ -45,17 +45,46 @@ export const MAX_MESSAGE_SIZE = 64 * 1024;
 // ── Public wire types ───────────────────────────────────────────────
 
 /**
- * Per-call outbound transport selector (CS v6.7.4 §34).
+ * Per-call outbound transport selector.
  *
- * `http_header` (default): token in `Authorization: HAAP <b64>` HTTP header.
- * `mcp_meta`: token in MCP `params._meta["haap/tbac"].token`.
+ * - `http_header` (default): token in `Authorization: HAAP <b64>` HTTP header.
+ * - `mcp_meta`: legacy v6.7.4 §34 carriage. Token placed at
+ *   `params._meta["haap/tbac"].token`. Retained for compatibility
+ *   with MCP servers that have not yet negotiated v7.2.5; will be
+ *   removed once every shipped server advertises
+ *   `experimental.hawcx-haap-v7-2-5`.
+ * - `mcp_meta_v7_2_5`: current carriage per HAAP v7.2.5 §45.7.5.
+ *   The Assembler places the HAAP token at
+ *   `params._meta.hawcx.haap_token` and any OAuth bridging bearer at
+ *   `params._meta.hawcx.oauth_bearer`. RSV strip-on-egress semantics
+ *   apply: the gateway MUST remove the `_meta.hawcx` envelope before
+ *   forwarding to the underlying tool. JSON-RPC error mapping per
+ *   §45.7.5: rejection codes `-32000` … `-32005`, with
+ *   `data.hawcx_reason_code` carrying the Hawcx-side reason.
  *
  * Values match serde `#[rename_all = "snake_case"]` on the Rust side.
+ *
+ * Wire selector change (M-6, 2026-05-20): `mcp_meta_v7_2_5` is a new
+ * selector value; callers must opt in explicitly. The Assembler
+ * advertises support via the `experimental.hawcx-haap-v7-2-5`
+ * capability at MCP `initialize`; see
+ * `AssemblerClient.connect`'s `experimentalCapabilities` option for
+ * the connect-time advertisement.
  */
 export enum TokenTransport {
   HttpHeader = "http_header",
+  /** @deprecated v6.7.4 carriage. Use `McpMetaV725` for new code. */
   McpMeta = "mcp_meta",
+  McpMetaV725 = "mcp_meta_v7_2_5",
 }
+
+/**
+ * Capability tag advertised at MCP `initialize` time when the
+ * Assembler offers the v7.2.5 `_meta.hawcx` envelope to an upstream
+ * MCP server. Mirrored verbatim into the JSON-RPC initialize
+ * `experimental` map.
+ */
+export const HAWCX_HAAP_V7_2_5_CAPABILITY = "hawcx-haap-v7-2-5";
 
 /**
  * Agent → Assembler request (msg_type `0x52`).
@@ -340,13 +369,34 @@ export class AssemblerClient {
   private constructor(
     private readonly sock: net.Socket,
     private readonly reader: FrameReader,
+    /**
+     * Experimental MCP capabilities the SDK is advertising on this
+     * connection. The Assembler echoes these into the `experimental`
+     * field of its outbound MCP `initialize` calls, allowing the
+     * upstream MCP server to negotiate features. Today the only
+     * entry is `hawcx-haap-v7-2-5` (M-6).
+     */
+    private readonly experimentalCapabilities: readonly string[],
   ) {}
 
   static async connect(
     endpoint: string,
-    options: { timeoutMs?: number } = {},
+    options: {
+      timeoutMs?: number;
+      /**
+       * Experimental MCP capabilities to advertise via the Assembler
+       * to upstream MCP servers (HAAP v7.2.5 §45.7.5). The Assembler
+       * includes these verbatim in its outbound MCP `initialize` as
+       * `params.capabilities.experimental[cap] = {}`. Pass
+       * `[HAWCX_HAAP_V7_2_5_CAPABILITY]` to enable v7.2.5 payload
+       * carriage end-to-end. Empty array (default) means legacy
+       * v6.7.4 carriage only.
+       */
+      experimentalCapabilities?: readonly string[];
+    } = {},
   ): Promise<AssemblerClient> {
     const timeoutMs = options.timeoutMs ?? 5000;
+    const capabilities = options.experimentalCapabilities ?? [];
     const sock = await connectAssembler(endpoint, timeoutMs);
     const reader = new FrameReader(sock);
     try {
@@ -370,11 +420,21 @@ export class AssemblerClient {
       sock.destroy();
       throw err;
     }
-    return new AssemblerClient(sock, reader);
+    return new AssemblerClient(sock, reader, capabilities);
   }
 
   async invoke(req: ToolCallRequest): Promise<ToolCallResponse> {
     const wire = toolCallRequestToWire(req);
+    // Forward the connection-level experimental capability list on
+    // every call so the Assembler can re-key its MCP initialize when
+    // a new upstream server is contacted (each ToolCallRequest may
+    // target a new RS / MCP server). Wire key matches the Rust-side
+    // serde rename (`hawcx_experimental_capabilities`).
+    if (this.experimentalCapabilities.length > 0) {
+      wire.hawcx_experimental_capabilities = [
+        ...this.experimentalCapabilities,
+      ];
+    }
     const payload = Buffer.from(JSON.stringify(wire), "utf-8");
     await write(this.sock, encodeFrame(MSG_TOOL_CALL_REQUEST, payload));
 

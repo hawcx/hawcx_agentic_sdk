@@ -54,6 +54,7 @@ export type { HawcxAgentInvokeOptions } from "./agent";
 export {
   AssemblerClient,
   TokenTransport,
+  HAWCX_HAAP_V7_2_5_CAPABILITY,
   encodeFrame,
   encodeSessionIdForWire,
   MSG_TOOL_CALL_REQUEST,

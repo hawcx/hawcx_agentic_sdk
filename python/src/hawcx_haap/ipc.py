@@ -59,14 +59,43 @@ MAX_MESSAGE_SIZE: int = 64 * 1024
 
 
 class TokenTransport(str, Enum):
-    """Per-call outbound transport selector (CS v6.7.4 §34).
+    """Per-call outbound transport selector.
 
-    ``http_header`` (default): token in ``Authorization: HAAP <b64>`` header.
-    ``mcp_meta``: token in MCP ``params._meta["haap/tbac"].token``.
+    - ``http_header`` (default): token in ``Authorization: HAAP <b64>``
+      HTTP header.
+    - ``mcp_meta``: legacy v6.7.4 §34 carriage. Token placed at
+      ``params._meta["haap/tbac"].token``. Retained for compatibility
+      with MCP servers that have not yet negotiated v7.2.5; will be
+      removed once every shipped server advertises
+      ``experimental.hawcx-haap-v7-2-5``.
+    - ``mcp_meta_v7_2_5``: current carriage per HAAP v7.2.5 §45.7.5.
+      The Assembler places the HAAP token at
+      ``params._meta.hawcx.haap_token`` and any OAuth bridging bearer
+      at ``params._meta.hawcx.oauth_bearer``. RSV strip-on-egress
+      semantics apply: the gateway MUST remove the ``_meta.hawcx``
+      envelope before forwarding to the underlying tool. JSON-RPC
+      error mapping per §45.7.5: rejection codes ``-32000`` …
+      ``-32005`` with ``data.hawcx_reason_code`` carrying the Hawcx
+      reason.
+
+    Wire selector change (M-6, 2026-05-20): ``mcp_meta_v7_2_5`` is a
+    new selector value; callers must opt in explicitly. The Assembler
+    advertises support via the ``experimental.hawcx-haap-v7-2-5``
+    capability at MCP ``initialize``; see
+    :meth:`AssemblerClient.connect`'s ``experimental_capabilities``
+    parameter for the connect-time advertisement.
     """
 
     HTTP_HEADER = "http_header"
     MCP_META = "mcp_meta"
+    MCP_META_V7_2_5 = "mcp_meta_v7_2_5"
+
+
+#: Capability tag advertised at MCP ``initialize`` time when the
+#: Assembler offers the v7.2.5 ``_meta.hawcx`` envelope to an upstream
+#: MCP server. Mirrored verbatim into the JSON-RPC initialize
+#: ``experimental`` map.
+HAWCX_HAAP_V7_2_5_CAPABILITY: str = "hawcx-haap-v7-2-5"
 
 
 @dataclass
@@ -280,8 +309,18 @@ class AssemblerClient:
     the connection is ready for ToolCallRequest / ToolCallResponse round-trips.
     """
 
-    def __init__(self, sock: socket.socket) -> None:
+    def __init__(
+        self,
+        sock: socket.socket,
+        experimental_capabilities: tuple[str, ...] = (),
+    ) -> None:
         self._sock = sock
+        # Experimental MCP capabilities the SDK advertises on this
+        # connection. The Assembler echoes these into the
+        # ``experimental`` field of its outbound MCP ``initialize``
+        # calls so the upstream MCP server can negotiate features.
+        # Today the only entry is ``hawcx-haap-v7-2-5`` (M-6).
+        self._experimental_capabilities = experimental_capabilities
 
     @classmethod
     def connect(
@@ -289,7 +328,16 @@ class AssemblerClient:
         endpoint: str,
         *,
         timeout_secs: float | None = 5.0,
+        experimental_capabilities: tuple[str, ...] = (),
     ) -> AssemblerClient:
+        """Connect, handshake, and return a client.
+
+        ``experimental_capabilities`` is a tuple of capability tags the
+        SDK advertises via the Assembler to upstream MCP servers (HAAP
+        v7.2.5 §45.7.5). Pass ``(HAWCX_HAAP_V7_2_5_CAPABILITY,)`` to
+        enable v7.2.5 payload carriage end-to-end. Empty tuple
+        (default) means legacy v6.7.4 carriage only.
+        """
         sock = connect_assembler(endpoint, timeout_secs=timeout_secs)
         try:
             peer_role = perform_handshake(sock, local_role=ROLE_AGENT)
@@ -307,7 +355,7 @@ class AssemblerClient:
             raise IpcError(
                 f"expected peer role Assembler (0x05), got 0x{peer_role:02x}"
             )
-        return cls(sock)
+        return cls(sock, experimental_capabilities=experimental_capabilities)
 
     def invoke(self, req: ToolCallRequest) -> ToolCallResponse:
         """Send a ToolCallRequest; await ToolCallResponse or RequestRejected.
@@ -315,7 +363,16 @@ class AssemblerClient:
         Raises :class:`RequestRejected` if the Assembler rejects.
         Raises :class:`IpcError` on framing / transport errors.
         """
-        payload = json.dumps(req.to_wire(), separators=(",", ":")).encode("utf-8")
+        wire = req.to_wire()
+        # Forward the connection-level experimental capability list on
+        # every call so the Assembler can re-key its MCP initialize
+        # when a new upstream server is contacted. Wire key matches
+        # the Rust-side serde rename.
+        if self._experimental_capabilities:
+            wire["hawcx_experimental_capabilities"] = list(
+                self._experimental_capabilities
+            )
+        payload = json.dumps(wire, separators=(",", ":")).encode("utf-8")
         write_frame(self._sock, MSG_TOOL_CALL_REQUEST, payload)
 
         msg_type, body = read_frame(self._sock)
