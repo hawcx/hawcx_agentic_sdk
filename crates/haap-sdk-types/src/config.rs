@@ -63,9 +63,37 @@ impl RsvConfig {
     }
 }
 
+/// Default sealer backend when `HAAP_SEALER_BACKEND` is unset.
+///
+/// On macOS, Windows, and Linux we default to the OS-native keychain
+/// (Keychain Services / Credential Manager / Secret Service). The
+/// `file` backend is still supported but must be opted into explicitly
+/// — defaulting to a passphrase-on-disk store is a footgun (M-1
+/// hardening 2026-05-20): the typical operator who never sets
+/// `HAAP_SEALER_BACKEND` should end up with the keychain-backed sealer,
+/// not a file the wrong process can grep.
+const fn default_sealer_backend() -> &'static str {
+    if cfg!(any(target_os = "macos", target_os = "windows", target_os = "linux")) {
+        "os-keychain"
+    } else {
+        // Other Unix flavours (FreeBSD, illumos, …) have no first-party
+        // keyring-rs backend yet. Force operators to pick explicitly
+        // rather than silently falling back to file mode.
+        ""
+    }
+}
+
 /// Parse SealerConfig from env vars (used by haap-sdk-cli seal/unseal).
 pub fn sealer_config_from_env() -> Result<SealerConfig, ConfigError> {
-    let backend = std::env::var("HAAP_SEALER_BACKEND").unwrap_or_else(|_| "file".to_string());
+    let backend = std::env::var("HAAP_SEALER_BACKEND")
+        .unwrap_or_else(|_| default_sealer_backend().to_string());
+    if backend.is_empty() {
+        return Err(ConfigError::UnknownSealerBackend(
+            "HAAP_SEALER_BACKEND unset and no OS-keychain backend available on this platform; \
+             set HAAP_SEALER_BACKEND to one of: os-keychain, file, kms"
+                .to_string(),
+        ));
+    }
     match backend.as_str() {
         "file" => {
             let path = std::env::var("HAAP_SEALER_FILE_PATH")
