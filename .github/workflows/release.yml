@@ -20,6 +20,10 @@ jobs:
             os: ubuntu-22.04-arm
           - target: aarch64-apple-darwin
             os: macos-14
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
 
     steps:
       - name: Checkout hx_agentic_sdk
@@ -77,11 +81,22 @@ jobs:
             --bin haap-supervisor
         shell: bash
 
-      - name: Build SDK binaries
+      - name: Build SDK binary (haap-sdk; all platforms)
         working-directory: hx_agentic_sdk
         run: |
-          cargo build --release --target ${{ matrix.target }} \
-            --bin haap-rsv --bin haap-sdk
+          cargo build --release --target ${{ matrix.target }} --bin haap-sdk
+        shell: bash
+
+      # haap-rsv is the MCP-server-side verifier sidecar (sits in front of
+      # the resource server). It uses Unix domain sockets + SO_PEERCRED
+      # for the local-sidecar trust model (CS v7.2.5 §39.12.1), so it is
+      # Unix-only by design. Server operators deploy it as a Linux
+      # container; Windows does not need a haap-rsv binary.
+      - name: Build SDK binary (haap-rsv; Unix only)
+        if: runner.os != 'Windows'
+        working-directory: hx_agentic_sdk
+        run: |
+          cargo build --release --target ${{ matrix.target }} --bin haap-rsv
         shell: bash
 
       - name: Package distribution tarball
@@ -90,12 +105,25 @@ jobs:
           mkdir -p dist
           OUT="hx-agent-sdk-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir -p "$OUT/bin"
+          # hx_labs agent-side runtime: supervisor + 5 protected children.
+          # Per CS v7.2.5 §35.6 and §39.12, these run on the agent host
+          # (Linux / macOS / Windows) with platform-native IPC (UDS on
+          # Unix family, named pipes with DACL on Windows).
           for b in haap-authenticator haap-tqs-precompute haap-tqs-jit haap-assembler haap-eib haap-supervisor; do
-            cp "hx_labs/target/${{ matrix.target }}/release/$b" "$OUT/bin/"
+            if [[ "${{ runner.os }}" == "Windows" ]]; then
+              cp "hx_labs/target/${{ matrix.target }}/release/$b.exe" "$OUT/bin/"
+            else
+              cp "hx_labs/target/${{ matrix.target }}/release/$b" "$OUT/bin/"
+            fi
           done
-          for b in haap-rsv haap-sdk; do
-            cp "hx_agentic_sdk/target/${{ matrix.target }}/release/$b" "$OUT/bin/"
-          done
+          # SDK CLI: agent-side, all platforms.
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp "hx_agentic_sdk/target/${{ matrix.target }}/release/haap-sdk.exe" "$OUT/bin/"
+          else
+            cp "hx_agentic_sdk/target/${{ matrix.target }}/release/haap-sdk" "$OUT/bin/"
+            # haap-rsv: MCP-server-side, Unix-only (see §39.12.1).
+            cp "hx_agentic_sdk/target/${{ matrix.target }}/release/haap-rsv" "$OUT/bin/"
+          fi
           cp hx_agentic_sdk/README.md "$OUT/" 2>/dev/null || true
           cp -r hx_agentic_sdk/docs "$OUT/" 2>/dev/null || true
           tar -czf "dist/$OUT.tar.gz" "$OUT"
@@ -262,9 +290,7 @@ jobs:
             **Binary tarballs** (attached below):
             - Linux x86_64 / aarch64
             - macOS aarch64 (Apple Silicon)
-
-            Windows is not currently supported: `haap-rsv` uses Unix
-            domain sockets and peer-credential checks for IPC.
+            - Windows x86_64 / aarch64
 
             **Multi-arch Docker image**:
             ```
@@ -275,9 +301,29 @@ jobs:
 
             ## Contents
 
-            **hx_labs binaries**: `haap-authenticator`, `haap-tqs-precompute`, `haap-tqs-jit`, `haap-assembler`, `haap-eib`, `haap-supervisor`
+            **Agent-side runtime** (all platforms — Linux, macOS, Windows):
+            the supervisor and the 5 protected child processes that form
+            the per-agent runtime per CS v7.2.5 §35.6:
 
-            **SDK binaries**: `haap-rsv`, `haap-sdk`
+            - `haap-supervisor` — lifecycle, zero crypto material
+            - `haap-authenticator` — holds IK_i, performs X3DH (§4.2.1)
+            - `haap-tqs-precompute` — session-scoped, holds K_session_root (§40)
+            - `haap-tqs-jit` — request-scoped, paired 1:1 with Assembler
+            - `haap-assembler` — single-flight crypto-proxy (§39)
+            - `haap-eib` — External Identity Broker, OAuth bearer isolation (§45)
+
+            On Windows, supervisor↔child IPC uses Named Pipes with DACL
+            restricting access to the current user SID + SYSTEM, per
+            CS v7.2.5 §39.12.2. On Linux / macOS, IPC uses Unix domain
+            sockets with `SO_PEERCRED` / `LOCAL_PEERCRED`, per §39.12.1.
+
+            **SDK CLI** (all platforms): `haap-sdk`
+
+            **MCP server-side sidecar** (Linux / macOS only): `haap-rsv`
+            sits in front of the resource server and is deployed by MCP
+            server operators (typically as a Linux container). It is
+            Unix-only by design (UDS + peer-credential checks for the
+            local-sidecar trust model).
 
             ## Evaluation bundle
 
