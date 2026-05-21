@@ -35,7 +35,7 @@ def test_default_endpoint_for_windows(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_agent_invoke_echo(mock_assembler, mock_assembler_endpoint: str) -> None:
-    with HawcxAgent.connect(mock_assembler_endpoint) as agent:
+    with HawcxAgent.connect(mock_assembler_endpoint, principal_allowlist=["alice", "bob"]) as agent:
         resp = agent.invoke(
             target_rs_url="https://api.example.com/echo",
             http_method="POST",
@@ -55,7 +55,7 @@ def test_agent_invoke_echo(mock_assembler, mock_assembler_endpoint: str) -> None
 
 def test_agent_invoke_rejection(mock_assembler, mock_assembler_endpoint: str) -> None:
     mock_assembler.reject_with("intent verification failed")
-    with HawcxAgent.connect(mock_assembler_endpoint) as agent:
+    with HawcxAgent.connect(mock_assembler_endpoint, principal_allowlist=["alice", "bob"]) as agent:
         with pytest.raises(RequestRejected) as ei:
             agent.invoke(
                 target_rs_url="https://api.example.com/forbidden",
@@ -67,7 +67,7 @@ def test_agent_invoke_rejection(mock_assembler, mock_assembler_endpoint: str) ->
 def test_agent_invoke_with_request_id_override(
     mock_assembler, mock_assembler_endpoint: str
 ) -> None:
-    with HawcxAgent.connect(mock_assembler_endpoint) as agent:
+    with HawcxAgent.connect(mock_assembler_endpoint, principal_allowlist=["alice", "bob"]) as agent:
         resp = agent.invoke(
             target_rs_url="https://api.example.com/",
             tool="x",
@@ -78,7 +78,7 @@ def test_agent_invoke_with_request_id_override(
 
 
 def test_agent_close_idempotent(mock_assembler_endpoint: str) -> None:
-    agent = HawcxAgent.connect(mock_assembler_endpoint)
+    agent = HawcxAgent.connect(mock_assembler_endpoint, principal_allowlist=["alice", "bob"])
     agent.close()
     agent.close()  # second call must not raise
 
@@ -95,7 +95,7 @@ def test_invoke_without_acting_for_user_omits_field(
     must observe the exact same wire payload as before the field existed,
     i.e. NO ``acting_for_user`` key in the JSON.
     """
-    with HawcxAgent.connect(mock_assembler_endpoint) as agent:
+    with HawcxAgent.connect(mock_assembler_endpoint, principal_allowlist=["alice", "bob"]) as agent:
         agent.invoke(
             target_rs_url="https://api.example.com/echo",
             tool="echo",
@@ -119,7 +119,7 @@ def test_invoke_with_acting_for_user_sets_wire_field(
     wire under the agreed key; the Assembler's job is to put it in
     scope_json. We test only the SDK half here.
     """
-    with HawcxAgent.connect(mock_assembler_endpoint) as agent:
+    with HawcxAgent.connect(mock_assembler_endpoint, principal_allowlist=["alice", "bob"]) as agent:
         agent.invoke(
             target_rs_url="https://api.example.com/echo",
             tool="read",
@@ -140,7 +140,7 @@ def test_invoke_for_is_equivalent_to_invoke_with_acting_for_user(
     mock_assembler, mock_assembler_endpoint: str
 ) -> None:
     """``invoke_for("bob", ...)`` == ``invoke(acting_for_user="bob", ...)``."""
-    with HawcxAgent.connect(mock_assembler_endpoint) as agent:
+    with HawcxAgent.connect(mock_assembler_endpoint, principal_allowlist=["alice", "bob"]) as agent:
         agent.invoke_for(
             "bob",
             target_rs_url="https://api.example.com/echo",
@@ -160,7 +160,7 @@ def test_invoke_for_rejects_empty_principal(mock_assembler_endpoint: str) -> Non
     Raise loudly and direct the caller to plain invoke() for
     unprincipled calls.
     """
-    with HawcxAgent.connect(mock_assembler_endpoint) as agent:
+    with HawcxAgent.connect(mock_assembler_endpoint, principal_allowlist=["alice", "bob"]) as agent:
         with pytest.raises(ValueError) as ei:
             agent.invoke_for(
                 "",
@@ -168,6 +168,91 @@ def test_invoke_for_rejects_empty_principal(mock_assembler_endpoint: str) -> Non
                 tool="echo",
             )
     assert "user_principal_id" in str(ei.value)
+
+
+def test_invoke_with_out_of_allowlist_principal_raises_before_ipc(
+    mock_assembler_endpoint: str,
+    mock_assembler: Any,
+) -> None:
+    """H-3: an out-of-allowlist principal must raise before IPC bytes fly.
+
+    Tests that an LLM-derived (or attacker-controlled) principal string
+    cannot silently switch the effective user — the SDK validates
+    against the construction-time allowlist before forwarding to the
+    Assembler.
+    """
+    from hawcx_haap import HawcxError
+
+    with HawcxAgent.connect(
+        mock_assembler_endpoint, principal_allowlist=["alice"]
+    ) as agent:
+        with pytest.raises(HawcxError) as ei:
+            agent.invoke(
+                target_rs_url="https://api.example.com/echo",
+                http_method="POST",
+                tool="read",
+                acting_for_user="eve",  # not in allowlist
+            )
+    assert "principal_allowlist" in str(ei.value)
+    # No request was forwarded to the mock.
+    assert mock_assembler.received_request is None
+
+
+def test_invoke_for_with_out_of_allowlist_principal_raises(
+    mock_assembler_endpoint: str,
+) -> None:
+    from hawcx_haap import HawcxError
+
+    with HawcxAgent.connect(
+        mock_assembler_endpoint, principal_allowlist=["alice"]
+    ) as agent:
+        with pytest.raises(HawcxError) as ei:
+            agent.invoke_for(
+                "eve",
+                target_rs_url="https://api.example.com/echo",
+                http_method="POST",
+                tool="read",
+            )
+    assert "principal_allowlist" in str(ei.value)
+
+
+def test_connect_without_principal_allowlist_raises_type_error(
+    mock_assembler_endpoint: str,
+) -> None:
+    """`principal_allowlist` is a required kwarg post-H-3.
+
+    Static type checkers catch the obvious case, but a JS-style
+    refactor that drops the kwarg must hit a runtime guard.
+    """
+    with pytest.raises(TypeError):
+        HawcxAgent.connect(mock_assembler_endpoint)  # type: ignore[call-arg]
+
+
+def test_empty_allowlist_forbids_any_acting_for_user(
+    mock_assembler_endpoint: str,
+    mock_assembler: Any,
+) -> None:
+    """`principal_allowlist=[]` opts out of runtime principal switching."""
+    from hawcx_haap import HawcxError
+
+    with HawcxAgent.connect(
+        mock_assembler_endpoint, principal_allowlist=[]
+    ) as agent:
+        with pytest.raises(HawcxError):
+            agent.invoke(
+                target_rs_url="https://api.example.com/echo",
+                http_method="POST",
+                tool="read",
+                acting_for_user="alice",
+            )
+        # Unprincipled call still works.
+        agent.invoke(
+            target_rs_url="https://api.example.com/echo",
+            http_method="POST",
+            tool="read",
+        )
+    assert mock_assembler.received_request is not None
+    assert "acting_for_user" not in mock_assembler.received_request
 
 
 def test_tool_call_request_to_wire_omits_acting_for_user_when_none() -> None:

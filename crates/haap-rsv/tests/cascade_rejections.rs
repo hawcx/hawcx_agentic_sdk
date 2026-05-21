@@ -12,7 +12,7 @@
 //! feature-gated on `integration-tests`).
 
 use haap_core::error::CascadeRejectReason;
-use haap_rsv::Rsv;
+use haap_rsv::{RegistrationScopeAuthorizer, Rsv};
 use haap_sdk_types::{RsvConfig, VerifyError};
 
 /// Bytes that won't pass `decode_token` (too short, no valid framing).
@@ -25,7 +25,7 @@ async fn rsv_new_requires_reachable_redis() {
         audience_hash: [0u8; 32],
         replay_lru_capacity: 1024,
     };
-    let result = Rsv::new(config).await;
+    let result = Rsv::new(config, Box::new(RegistrationScopeAuthorizer)).await;
     assert!(result.is_err(), "Rsv::new should fail when Redis is unreachable");
 }
 
@@ -43,7 +43,7 @@ async fn malformed_token_returns_framing_error() {
         replay_lru_capacity: 1024,
     };
 
-    let Ok(mut rsv) = Rsv::new(config).await else {
+    let Ok(mut rsv) = Rsv::new(config, Box::new(RegistrationScopeAuthorizer)).await else {
         eprintln!("skipping: Redis unavailable for malformed_token test");
         return;
     };

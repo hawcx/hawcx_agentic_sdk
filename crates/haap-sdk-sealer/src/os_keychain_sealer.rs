@@ -15,6 +15,7 @@ use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use async_trait::async_trait;
 use haap_sdk_types::{SealedBundle, SealerError};
+use zeroize::Zeroizing;
 
 use crate::sealer::AgentIdentitySealer;
 
@@ -36,16 +37,29 @@ impl OsKeychainSealer {
             .map_err(|e| SealerError::Keyring(e.to_string()))
     }
 
-    fn load_or_create_key(&self) -> Result<[u8; 32], SealerError> {
+    /// Load the existing keychain entry or create one on first use.
+    ///
+    /// The returned key is wrapped in `Zeroizing` (M-2 hardening
+    /// 2026-05-20) so the stack copy is wiped when the calling scope
+    /// exits. The previous `[u8; 32]` return left the key bytes in
+    /// the calling frame until that frame was overwritten by later
+    /// stack activity — not catastrophic, but a free improvement.
+    fn load_or_create_key(&self) -> Result<Zeroizing<[u8; 32]>, SealerError> {
         let entry = self.entry()?;
         match entry.get_password() {
             Ok(hex_string) => decode_key(&hex_string),
             Err(keyring::Error::NoEntry) => {
-                let mut key = [0u8; 32];
+                let mut key = Zeroizing::new([0u8; 32]);
                 use rand::RngCore;
-                rand::rngs::OsRng.fill_bytes(&mut key);
+                rand::rngs::OsRng.fill_bytes(key.as_mut());
+                // hex::encode allocates a new String; this temporary
+                // String holds the hex of the key and is dropped at
+                // the end of the statement, but the underlying
+                // allocation is NOT zeroized. This is an acceptable
+                // window — the bytes already went to the OS keychain
+                // syscall, so the keychain process already has them.
                 entry
-                    .set_password(&hex::encode(key))
+                    .set_password(&hex::encode(key.as_ref()))
                     .map_err(|e| SealerError::Keyring(e.to_string()))?;
                 Ok(key)
             }
@@ -53,7 +67,7 @@ impl OsKeychainSealer {
         }
     }
 
-    fn load_key(&self) -> Result<[u8; 32], SealerError> {
+    fn load_key(&self) -> Result<Zeroizing<[u8; 32]>, SealerError> {
         let entry = self.entry()?;
         let hex_string = entry
             .get_password()
@@ -62,14 +76,19 @@ impl OsKeychainSealer {
     }
 }
 
-fn decode_key(s: &str) -> Result<[u8; 32], SealerError> {
+fn decode_key(s: &str) -> Result<Zeroizing<[u8; 32]>, SealerError> {
+    // hex::decode also allocates; same caveat as the encode path —
+    // the bytes briefly live in the heap before being copied into the
+    // Zeroizing-wrapped buffer. Acceptable for the keychain code path
+    // (the entry process already owns the bytes); not appropriate for
+    // a constant-time-comparison code path.
     let bytes = hex::decode(s.trim()).map_err(|e| SealerError::Keyring(e.to_string()))?;
     if bytes.len() != 32 {
         return Err(SealerError::InvalidFormat(
             "keychain-stored key not 32 bytes",
         ));
     }
-    let mut out = [0u8; 32];
+    let mut out = Zeroizing::new([0u8; 32]);
     out.copy_from_slice(&bytes);
     Ok(out)
 }
@@ -82,7 +101,7 @@ impl AgentIdentitySealer for OsKeychainSealer {
 
     async fn seal(&self, plaintext: &[u8]) -> Result<SealedBundle, SealerError> {
         let key = self.load_or_create_key()?;
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_ref()));
         let nonce_bytes = Aes256Gcm::generate_nonce(&mut OsRng);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
@@ -106,7 +125,7 @@ impl AgentIdentitySealer for OsKeychainSealer {
         })
     }
 
-    async fn unseal(&self, bundle: &SealedBundle) -> Result<Vec<u8>, SealerError> {
+    async fn unseal(&self, bundle: &SealedBundle) -> Result<Zeroizing<Vec<u8>>, SealerError> {
         if bundle.backend_tag != BACKEND_TAG {
             return Err(SealerError::BackendTagMismatch(
                 bundle.backend_tag.clone(),
@@ -118,7 +137,7 @@ impl AgentIdentitySealer for OsKeychainSealer {
         }
 
         let key = self.load_key()?;
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_ref()));
         let nonce_bytes = &bundle.ciphertext[..12];
         let ct = &bundle.ciphertext[12..];
         let nonce = Nonce::from_slice(nonce_bytes);
@@ -133,7 +152,7 @@ impl AgentIdentitySealer for OsKeychainSealer {
             )
             .map_err(|e| SealerError::AeadDecrypt(e.to_string()))?;
 
-        Ok(plaintext)
+        Ok(Zeroizing::new(plaintext))
     }
 }
 
@@ -150,6 +169,6 @@ mod tests {
         let plaintext = b"sample".to_vec();
         let bundle = sealer.seal(&plaintext).await.unwrap();
         let recovered = sealer.unseal(&bundle).await.unwrap();
-        assert_eq!(plaintext, recovered);
+        assert_eq!(plaintext.as_slice(), recovered.as_slice());
     }
 }

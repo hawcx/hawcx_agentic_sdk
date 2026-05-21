@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use haap_sdk_types::{SealedBundle, SealerConfig, SealerError};
+use zeroize::Zeroizing;
 
 use crate::{FileSealer, KmsWrappedSealer, OsKeychainSealer};
 
@@ -11,7 +12,18 @@ pub trait AgentIdentitySealer: Send + Sync {
     fn backend_tag(&self) -> &'static str;
 
     async fn seal(&self, plaintext: &[u8]) -> Result<SealedBundle, SealerError>;
-    async fn unseal(&self, bundle: &SealedBundle) -> Result<Vec<u8>, SealerError>;
+
+    /// Unseal `bundle` and return the recovered plaintext wrapped in
+    /// [`Zeroizing`] so the buffer is wiped on drop.
+    ///
+    /// The previous `Vec<u8>` return left identity-bundle bytes
+    /// lingering in the heap until the allocator chose to reuse the
+    /// page — a long-lived agent that unsealed once at boot could be
+    /// core-dumped or `/proc/<pid>/mem`-scraped minutes later and the
+    /// bytes were still recoverable (L-4 hardening 2026-05-20). Callers
+    /// that genuinely need a plain `Vec<u8>` can pull it out with
+    /// `Zeroizing::into_inner`, but should think hard before doing so.
+    async fn unseal(&self, bundle: &SealedBundle) -> Result<Zeroizing<Vec<u8>>, SealerError>;
 }
 
 pub fn build_sealer(config: &SealerConfig) -> Result<Box<dyn AgentIdentitySealer>, SealerError> {

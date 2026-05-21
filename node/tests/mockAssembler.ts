@@ -55,15 +55,22 @@ export class MockAssembler {
   readonly socketPath: string;
   receivedRequest: ToolCallRequestWire | null = null;
 
+  private readonly parentDir: string;
   private server: net.Server | null = null;
   private rejectReason: string | null = null;
   private responseOverride: MockResponseOverride | null = null;
   private closed = false;
 
   constructor() {
+    // Sockets must live inside a 0o700 dir owned by the current UID
+    // for the H-4 client-side parent-dir check to accept them. Use
+    // mkdtempSync inside os.tmpdir() (which gives us a fresh
+    // exclusive dir) and chmod it 0o700.
+    this.parentDir = fs.mkdtempSync(path.join(os.tmpdir(), "hawcx-mock-"));
+    fs.chmodSync(this.parentDir, 0o700);
     this.socketPath = path.join(
-      os.tmpdir(),
-      `hawcx-mock-${crypto.randomBytes(8).toString("hex")}.sock`,
+      this.parentDir,
+      `assembler-${crypto.randomBytes(8).toString("hex")}.sock`,
     );
   }
 
@@ -95,6 +102,11 @@ export class MockAssembler {
     });
     try {
       fs.unlinkSync(this.socketPath);
+    } catch {
+      // ignore
+    }
+    try {
+      fs.rmdirSync(this.parentDir);
     } catch {
       // ignore
     }

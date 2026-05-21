@@ -28,7 +28,9 @@ describe("HawcxAgent", () => {
   });
 
   it("invoke round-trip echoes the body", async () => {
-    const agent = await HawcxAgent.connect(mock.socketPath);
+    const agent = await HawcxAgent.connect(mock.socketPath, {
+      principalAllowlist: ["alice", "bob"],
+    });
     try {
       const resp = await agent.invoke({
         targetRsUrl: "https://api.example.com/echo",
@@ -51,7 +53,9 @@ describe("HawcxAgent", () => {
   });
 
   it("auto-generates request_id when caller does not supply one", async () => {
-    const agent = await HawcxAgent.connect(mock.socketPath);
+    const agent = await HawcxAgent.connect(mock.socketPath, {
+      principalAllowlist: ["alice", "bob"],
+    });
     try {
       await agent.invoke({
         targetRsUrl: "https://example.com",
@@ -65,7 +69,9 @@ describe("HawcxAgent", () => {
   });
 
   it("preserves caller-supplied request_id", async () => {
-    const agent = await HawcxAgent.connect(mock.socketPath);
+    const agent = await HawcxAgent.connect(mock.socketPath, {
+      principalAllowlist: ["alice", "bob"],
+    });
     try {
       await agent.invoke({
         targetRsUrl: "https://example.com",
@@ -81,7 +87,9 @@ describe("HawcxAgent", () => {
 
   it("throws RequestRejected when Assembler rejects", async () => {
     mock.rejectWith("intent verification failed");
-    const agent = await HawcxAgent.connect(mock.socketPath);
+    const agent = await HawcxAgent.connect(mock.socketPath, {
+      principalAllowlist: ["alice", "bob"],
+    });
     try {
       await expect(
         agent.invoke({
@@ -96,13 +104,17 @@ describe("HawcxAgent", () => {
   });
 
   it("close is idempotent", async () => {
-    const agent = await HawcxAgent.connect(mock.socketPath);
+    const agent = await HawcxAgent.connect(mock.socketPath, {
+      principalAllowlist: ["alice", "bob"],
+    });
     agent.close();
     expect(() => agent.close()).not.toThrow();
   });
 
   it("uppercases the http method", async () => {
-    const agent = await HawcxAgent.connect(mock.socketPath);
+    const agent = await HawcxAgent.connect(mock.socketPath, {
+      principalAllowlist: ["alice", "bob"],
+    });
     try {
       await agent.invoke({
         targetRsUrl: "https://example.com",
@@ -149,7 +161,9 @@ describe("runtime principal switching (acting_for_user)", () => {
 
   it("omits acting_for_user from the wire when not set", async () => {
     // Backward-compat: existing callers must observe identical wire shape.
-    const agent = await HawcxAgent.connect(mock.socketPath);
+    const agent = await HawcxAgent.connect(mock.socketPath, {
+      principalAllowlist: ["alice", "bob"],
+    });
     try {
       await agent.invoke({
         targetRsUrl: "https://api.example.com/echo",
@@ -169,7 +183,9 @@ describe("runtime principal switching (acting_for_user)", () => {
     // scope_json.user_principal_id. Nesting it inside `constraints`
     // would silently land it under scope_json.constraints.* and miss
     // any Cedar policy that reads context.user_principal_id.
-    const agent = await HawcxAgent.connect(mock.socketPath);
+    const agent = await HawcxAgent.connect(mock.socketPath, {
+      principalAllowlist: ["alice", "bob"],
+    });
     try {
       await agent.invoke({
         targetRsUrl: "https://api.example.com/echo",
@@ -185,7 +201,9 @@ describe("runtime principal switching (acting_for_user)", () => {
   });
 
   it("invokeFor(...) is equivalent to invoke({ actingForUser })", async () => {
-    const agent = await HawcxAgent.connect(mock.socketPath);
+    const agent = await HawcxAgent.connect(mock.socketPath, {
+      principalAllowlist: ["alice", "bob"],
+    });
     try {
       await agent.invokeFor("bob", {
         targetRsUrl: "https://api.example.com/echo",
@@ -198,8 +216,87 @@ describe("runtime principal switching (acting_for_user)", () => {
     expect(mock.receivedRequest?.acting_for_user).toBe("bob");
   });
 
+  it("invoke({ actingForUser: <out-of-allowlist> }) throws before IPC", async () => {
+    // H-3 hardening: an LLM-derived principal MUST NOT silently
+    // switch the effective user. The SDK validates against the
+    // construction-time allowlist before any IPC bytes are written.
+    const agent = await HawcxAgent.connect(mock.socketPath, {
+      principalAllowlist: ["alice"],
+    });
+    try {
+      await expect(
+        agent.invoke({
+          targetRsUrl: "https://api.example.com/echo",
+          httpMethod: "POST",
+          tool: "read",
+          actingForUser: "eve", // not in allowlist
+        }),
+      ).rejects.toThrow(/principalAllowlist/);
+      // No request was forwarded to the mock — the throw fires before
+      // the IPC write. (MockAssembler initialises receivedRequest to
+      // `null`, not `undefined`, so a falsy check is the right shape.)
+      expect(mock.receivedRequest).toBeFalsy();
+    } finally {
+      agent.close();
+    }
+  });
+
+  it("invokeFor on an out-of-allowlist principal throws", async () => {
+    const agent = await HawcxAgent.connect(mock.socketPath, {
+      principalAllowlist: ["alice"],
+    });
+    try {
+      await expect(
+        agent.invokeFor("eve", {
+          targetRsUrl: "https://api.example.com/echo",
+          httpMethod: "POST",
+          tool: "read",
+        }),
+      ).rejects.toThrow(/principalAllowlist/);
+    } finally {
+      agent.close();
+    }
+  });
+
+  it("connect() with no principalAllowlist throws synchronously", async () => {
+    // Required parameter — TypeScript catches this at compile time,
+    // but JS callers (or `as any` escapes) must hit a runtime guard.
+    await expect(
+      // @ts-expect-error - intentionally omitting required field
+      HawcxAgent.connect(mock.socketPath, {}),
+    ).rejects.toThrow(/principalAllowlist/);
+  });
+
+  it("empty principalAllowlist forbids any actingForUser", async () => {
+    const agent = await HawcxAgent.connect(mock.socketPath, {
+      principalAllowlist: [],
+    });
+    try {
+      await expect(
+        agent.invoke({
+          targetRsUrl: "https://api.example.com/echo",
+          httpMethod: "POST",
+          tool: "read",
+          actingForUser: "alice",
+        }),
+      ).rejects.toThrow(/principalAllowlist/);
+      // But an unprincipled call still works.
+      await agent.invoke({
+        targetRsUrl: "https://api.example.com/echo",
+        httpMethod: "POST",
+        tool: "read",
+      });
+      expect(mock.receivedRequest).toBeDefined();
+      expect("acting_for_user" in (mock.receivedRequest ?? {})).toBe(false);
+    } finally {
+      agent.close();
+    }
+  });
+
   it("invokeFor rejects an empty principal", async () => {
-    const agent = await HawcxAgent.connect(mock.socketPath);
+    const agent = await HawcxAgent.connect(mock.socketPath, {
+      principalAllowlist: ["alice", "bob"],
+    });
     try {
       await expect(
         agent.invokeFor("", {
@@ -227,7 +324,9 @@ describe("invoke transports", () => {
   });
 
   it("snake_cases TokenTransport.McpMeta on the wire", async () => {
-    const agent = await HawcxAgent.connect(mock.socketPath);
+    const agent = await HawcxAgent.connect(mock.socketPath, {
+      principalAllowlist: ["alice", "bob"],
+    });
     try {
       await agent.invoke({
         targetRsUrl: "https://mcp.example.com",

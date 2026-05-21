@@ -69,10 +69,56 @@ pub struct Rsv {
 }
 
 impl Rsv {
-    /// Construct an `Rsv` with [`PermissiveAuthorizer`]. Suitable for
-    /// alpha deployments that do not yet enforce registration-scope
-    /// binding; the cascade's Step 10 ceiling check remains the floor.
-    pub async fn new(config: RsvConfig) -> Result<Self, RsvError> {
+    /// Construct an `Rsv` with an operator-chosen [`Authorizer`].
+    ///
+    /// This is the only constructor that takes the authorizer as a
+    /// direct parameter. Operators MUST pass an authorizer explicitly
+    /// — the previous `Rsv::new(config)` form silently defaulted to
+    /// [`PermissiveAuthorizer`], which was the right choice for
+    /// in-process tests but the wrong choice for the customer-facing
+    /// SDK surface (C-2 hardening 2026-05-20). Removing the default
+    /// makes "what authorizer is this verifier enforcing?" a typed
+    /// question at every call site rather than something the reader
+    /// has to remember.
+    ///
+    /// For production deployments, pass
+    /// `Box::new(RegistrationScopeAuthorizer)` (CS v6.8.0 §9.1.X).
+    /// For dev / unit-test deployments that explicitly want the
+    /// permissive behaviour, use [`Rsv::new_alpha_permissive`] —
+    /// which logs a startup warning naming the caller crate so
+    /// "permissive snuck into prod" failures show up in the log
+    /// stream rather than only on review.
+    pub async fn new(
+        config: RsvConfig,
+        authorizer: Box<dyn Authorizer + Send + Sync>,
+    ) -> Result<Self, RsvError> {
+        Self::new_with_authorizer(config, authorizer).await
+    }
+
+    /// Construct an `Rsv` with [`PermissiveAuthorizer`], explicitly
+    /// opting into the dev-only permissive path.
+    ///
+    /// This constructor exists so callers that genuinely want the
+    /// dev/test behaviour (unit-test harnesses, the local crewai-demo
+    /// flow, anything where you control all token issuance) can do so
+    /// without reaching for the env-var dispatch. It logs a
+    /// `tracing::warn!` with the caller's crate name at construction
+    /// time — that warning is the audit trail for "why is this
+    /// verifier permissive?" so a future reader doesn't have to grep
+    /// the codebase.
+    ///
+    /// Hard rule: do not call this from production binaries. The
+    /// `haap-rsv-bin` sidecar uses [`Rsv::new_from_env`], which
+    /// defaults to `strict` and forces the operator to opt into
+    /// `permissive` via `HAWCX_RSV_AUTHORIZER=permissive`.
+    pub async fn new_alpha_permissive(config: RsvConfig) -> Result<Self, RsvError> {
+        tracing::warn!(
+            caller = env!("CARGO_PKG_NAME"),
+            "Rsv::new_alpha_permissive: constructing an RSV with PermissiveAuthorizer; \
+             this is the dev-only opt-in path. Production callers must pass \
+             RegistrationScopeAuthorizer to Rsv::new explicitly, or rely on \
+             Rsv::new_from_env (which defaults to 'strict')."
+        );
         Self::new_with_authorizer(config, Box::new(PermissiveAuthorizer)).await
     }
 
@@ -81,7 +127,7 @@ impl Rsv {
     ///
     /// | Value         | Authorizer                          |
     /// |---------------|-------------------------------------|
-    /// | (unset)       | [`PermissiveAuthorizer`]            |
+    /// | (unset)       | [`RegistrationScopeAuthorizer`]     |
     /// | `permissive`  | [`PermissiveAuthorizer`]            |
     /// | `strict`      | [`RegistrationScopeAuthorizer`]     |
     ///
@@ -89,15 +135,33 @@ impl Rsv {
     /// fail-fast (`RsvError::Io` with an explanatory message) to avoid
     /// the silent-permissive-fallback foot-gun.
     ///
+    /// Default flipped to `strict` 2026-05-20 (C-2 hardening). The
+    /// previous default was `permissive`, which was load-bearingly
+    /// wrong for production: a customer who deployed `haap-rsv-bin`
+    /// with default env config got a verifier that accepted any
+    /// claimed scope, regardless of what the agent registered. The
+    /// `Rsv::new` constructor used the same default. The new behaviour
+    /// is "strict unless you ask for permissive" and emits a
+    /// `tracing::warn!` when the env var is unset so the implicit
+    /// choice still shows up in logs.
+    ///
     /// Switching to `strict` requires that all enrolled agents have
     /// `registered_scope_json` written into substrate (per the AS-side
-    /// W4 work landing concurrently). Pre-v6.9.0 sessions without it
-    /// fall through to permissive semantics at the per-session level
-    /// via [`RegistrationScopeAuthorizer`]'s `None` branch (see
+    /// W4 work). Pre-v6.9.0 sessions without it fall through to
+    /// permissive semantics at the per-session level via
+    /// [`RegistrationScopeAuthorizer`]'s `None` branch (see
     /// `authorizer.rs:71`) — this is the documented graceful fallback,
     /// not a global toggle.
     pub async fn new_from_env(config: RsvConfig) -> Result<Self, RsvError> {
         let raw = std::env::var(ENV_RSV_AUTHORIZER).ok();
+        if raw.is_none() {
+            tracing::warn!(
+                env_var = ENV_RSV_AUTHORIZER,
+                "HAWCX_RSV_AUTHORIZER unset; defaulting to 'strict' \
+                 (RegistrationScopeAuthorizer). Set HAWCX_RSV_AUTHORIZER=permissive \
+                 to opt into the dev/alpha permissive path."
+            );
+        }
         let authorizer = authorizer_from_env_value(raw.as_deref())?;
         Self::new_with_authorizer(config, authorizer).await
     }
@@ -147,6 +211,19 @@ impl Rsv {
         let parsed = decode_token(token_bytes)
             .map_err(|e| VerifyError::Framing(format!("{e:?}")))?;
 
+        // 1b. Audience pre-filter (H-1 2026-05-20). The cascade's
+        //     Step 3b compares the token's aud_hash to
+        //     `session.audience` in substrate — which is the right
+        //     check for the *bound* audience but does nothing when the
+        //     substrate's `audience` field is `None` (legacy sessions)
+        //     OR when the SDK operator deploys multiple verifiers
+        //     against the same substrate and wants per-verifier
+        //     audience scoping. `RsvConfig::audience_hash` is the
+        //     operator's per-deployment expectation; we constant-time
+        //     compare BEFORE any substrate round-trip to drop
+        //     wrong-audience traffic at the boundary.
+        check_audience_hash(&parsed.aud_hash, &self.config.audience_hash)?;
+
         // 2. Substrate fetch → RawSessionRecord
         let raw = self
             .substrate
@@ -173,6 +250,12 @@ impl Rsv {
             max_confirmation_ttl_secs: 300,
             pop_sig: None,
             tool_arguments: None,
+            // The SDK's alpha cascade path doesn't carry PoP-v2 envelopes
+            // (the HTTP API doesn't surface them). Sessions whose active
+            // policy requires PoP-v2 reject at Step 14 with
+            // `PopRequestEnvelopeMissing`, which `map_cascade_reject`
+            // surfaces unchanged.
+            pop_envelope: None,
         };
 
         // 5. ReplayCheck impl — sync Redis-backed
@@ -218,6 +301,10 @@ impl Rsv {
         let parsed = decode_token(token_bytes)
             .map_err(|e| VerifyError::Framing(format!("{e:?}")))?;
 
+        // H-1: mirror the boundary audience pre-filter from the
+        // production path so unit tests exercise the same gate.
+        check_audience_hash(&parsed.aud_hash, &self.config.audience_hash)?;
+
         let raw = self
             .substrate
             .fetch_session(parsed.session_id)
@@ -239,6 +326,7 @@ impl Rsv {
             max_confirmation_ttl_secs: 300,
             pop_sig: None,
             tool_arguments: None,
+            pop_envelope: None,
         };
 
         let (token_body, body_plaintext) = verify_and_decrypt_request(
@@ -284,13 +372,39 @@ impl Rsv {
     }
 }
 
+/// H-1 (2026-05-20) — constant-time compare the token's wire-level
+/// `aud_hash` with the operator-configured
+/// [`RsvConfig::audience_hash`](haap_sdk_types::RsvConfig). Returns
+/// `VerifyError::AudienceMismatch` on inequality. Extracted so the
+/// predicate is unit-testable without a live substrate or token mint.
+///
+/// `subtle::ConstantTimeEq` guarantees the compare runs in time
+/// proportional to the buffer length regardless of where the first
+/// differing byte lives. Both inputs are `[u8; 32]` so the
+/// length-class side-channel concern from the bearer-token compare
+/// (C-1) does not apply, but we still avoid the early-return byte
+/// memcmp on principle.
+fn check_audience_hash(token_aud: &[u8; 32], expected: &[u8; 32]) -> Result<(), VerifyError> {
+    use subtle::ConstantTimeEq;
+    if bool::from(token_aud.ct_eq(expected)) {
+        Ok(())
+    } else {
+        Err(VerifyError::AudienceMismatch)
+    }
+}
+
 /// Pure parser for the [`ENV_RSV_AUTHORIZER`] value. Extracted so unit
 /// tests can exercise the dispatch table without touching the process
 /// environment (which is global, race-prone, and hard to clean up).
 ///
-/// `None`, `Some("")`, `Some("permissive")` → [`PermissiveAuthorizer`].
-/// `Some("strict")` → [`RegistrationScopeAuthorizer`].
+/// `None`, `Some("")`, `Some("strict")` → [`RegistrationScopeAuthorizer`].
+/// `Some("permissive")` → [`PermissiveAuthorizer`].
 /// Any other value → `RsvError::Io` (fail-fast, no silent fallback).
+///
+/// Default flipped from `permissive` to `strict` 2026-05-20 (C-2). A
+/// caller who has not yet thought about authorizer choice now gets the
+/// safer answer; opting into `permissive` requires typing the word out
+/// loud in the operator's env config.
 ///
 /// Matching is ASCII case-insensitive with surrounding whitespace
 /// trimmed.
@@ -299,8 +413,8 @@ pub(crate) fn authorizer_from_env_value(
 ) -> Result<Box<dyn Authorizer + Send + Sync>, RsvError> {
     let normalized = raw.map(|s| s.trim().to_ascii_lowercase());
     match normalized.as_deref() {
-        None | Some("") | Some("permissive") => Ok(Box::new(PermissiveAuthorizer)),
-        Some("strict") => Ok(Box::new(RegistrationScopeAuthorizer)),
+        None | Some("") | Some("strict") => Ok(Box::new(RegistrationScopeAuthorizer)),
+        Some("permissive") => Ok(Box::new(PermissiveAuthorizer)),
         Some(other) => Err(RsvError::Io(std::io::Error::other(format!(
             "{ENV_RSV_AUTHORIZER}={other:?} is not a recognized value; expected 'permissive' or 'strict'"
         )))),
@@ -351,6 +465,56 @@ fn map_cascade_reject(reject: CascadeRejectReason) -> VerifyError {
         PopSigMissing => VerifyError::CascadeRejected("PopSigMissing (step 14)".into()),
         PopSigInvalid => VerifyError::CascadeRejected("PopSigInvalid (step 14)".into()),
         PopPubMissing => VerifyError::CascadeRejected("PopPubMissing (step 14)".into()),
+        PopTranscriptVersionUnknown => {
+            VerifyError::CascadeRejected("PopTranscriptVersionUnknown (step 14)".into())
+        }
+        PopRequestEnvelopeMissing => {
+            VerifyError::CascadeRejected("PopRequestEnvelopeMissing (step 14)".into())
+        }
+        // §43 delegation chain (CS v7.0.0). The SDK passes these through
+        // verbatim; the consumer is the customer's gateway, not the SDK
+        // process. Keep messages stable so existing log greps continue
+        // to work.
+        DelegationSigInvalid => VerifyError::CascadeRejected("DelegationSigInvalid (step 13.2)".into()),
+        DelegationExpired => VerifyError::CascadeRejected("DelegationExpired (step 13.2)".into()),
+        DelegationNotYetValid => {
+            VerifyError::CascadeRejected("DelegationNotYetValid (step 13.2)".into())
+        }
+        DelegationChainBroken => VerifyError::CascadeRejected("DelegationChainBroken (step 13.2)".into()),
+        DelegationScopeEscalation => {
+            VerifyError::CascadeRejected("DelegationScopeEscalation (step 13.2)".into())
+        }
+        DelegationPubkeyMismatch => {
+            VerifyError::CascadeRejected("DelegationPubkeyMismatch (step 13.2)".into())
+        }
+        DelegationLeafMismatch => VerifyError::CascadeRejected("DelegationLeafMismatch (step 13.2)".into()),
+        DelegationScopeExceedsCeiling => {
+            VerifyError::CascadeRejected("DelegationScopeExceedsCeiling (step 13.2)".into())
+        }
+        DelegationDepthExceeded => {
+            VerifyError::CascadeRejected("DelegationDepthExceeded (step 13.2)".into())
+        }
+        DelegationRevoked => VerifyError::CascadeRejected("DelegationRevoked (step 13.2)".into()),
+        DelegationGrantTooLong => {
+            VerifyError::CascadeRejected("DelegationGrantTooLong (step 13.2)".into())
+        }
+        DelegationRevocationStale => {
+            VerifyError::CascadeRejected("DelegationRevocationStale (step 13.2)".into())
+        }
+        DelegationRevocationUnavailable => {
+            VerifyError::CascadeRejected("DelegationRevocationUnavailable (step 13.2)".into())
+        }
+        DelegationDirectoryUnavailable => {
+            VerifyError::CascadeRejected("DelegationDirectoryUnavailable (step 13.2)".into())
+        }
+        // §16 user/admin policy signature (v7.1.0).
+        UserPolicySigRequired => {
+            VerifyError::CascadeRejected("UserPolicySigRequired (step 15)".into())
+        }
+        UserPolicySigInvalid => {
+            VerifyError::CascadeRejected("UserPolicySigInvalid (step 15)".into())
+        }
+        SignerRoleMismatch => VerifyError::CascadeRejected("SignerRoleMismatch (step 15)".into()),
         ConcurrentConsume => VerifyError::Replay,
     }
 }
@@ -390,6 +554,7 @@ mod env_authorizer_tests {
             audience: None,
             profile: None,
             registered_scope_json,
+            pop_transcript_version: None,
         }
     }
 
@@ -405,26 +570,37 @@ mod env_authorizer_tests {
     }
 
     #[test]
-    fn env_unset_selects_permissive() {
+    fn env_unset_selects_strict() {
+        // C-2 2026-05-20: default flipped from permissive to strict.
+        // An operator who has not configured HAWCX_RSV_AUTHORIZER gets
+        // the registration-scope-binding authorizer; a mismatched
+        // claimed_scope is rejected at this layer rather than relying
+        // on the cascade's Step 10 ceiling as the only floor.
         let auth = unwrap_auth(authorizer_from_env_value(None));
-        // Permissive accepts mismatched claimed-vs-registered.
         let session = session_with_scope(Some(b"registered".to_vec()));
-        assert!(auth.authorize(b"different", "read", "x", &session));
+        assert!(
+            !auth.authorize(b"different", "read", "x", &session),
+            "unset env should resolve to strict and reject mismatched claimed_scope"
+        );
+        // Matching scope still accepted.
+        assert!(auth.authorize(b"registered", "read", "x", &session));
     }
 
     #[test]
-    fn env_empty_string_selects_permissive() {
+    fn env_empty_string_selects_strict() {
         // Common ops mistake: HAWCX_RSV_AUTHORIZER= (export with no
         // value). Treat as unset, not as a parse error — refusing to
         // start the verifier over a whitespace-only env value would be
-        // an annoying ops trap with no security upside.
+        // an annoying ops trap with no security upside. Post-C-2 this
+        // also resolves to strict (was: permissive).
         let auth = unwrap_auth(authorizer_from_env_value(Some("")));
         let session = session_with_scope(Some(b"registered".to_vec()));
-        assert!(auth.authorize(b"different", "read", "x", &session));
+        assert!(!auth.authorize(b"different", "read", "x", &session));
     }
 
     #[test]
     fn env_permissive_explicit_selects_permissive() {
+        // Permissive remains explicitly opt-in for the dev/alpha path.
         let auth = unwrap_auth(authorizer_from_env_value(Some("permissive")));
         let session = session_with_scope(Some(b"registered".to_vec()));
         assert!(auth.authorize(b"different", "read", "x", &session));
@@ -463,6 +639,30 @@ mod env_authorizer_tests {
                 !auth.authorize(b"mismatch", "read", "x", &session),
                 "{v:?} should resolve to strict semantics"
             );
+        }
+    }
+
+    #[test]
+    fn audience_hash_match_accepts() {
+        // H-1 predicate: matching aud_hash returns Ok(()).
+        let token_aud = [0x42u8; 32];
+        let expected = [0x42u8; 32];
+        assert!(super::check_audience_hash(&token_aud, &expected).is_ok());
+    }
+
+    #[test]
+    fn audience_hash_mismatch_rejects_with_typed_variant() {
+        // H-1 predicate: any single-byte difference rejects with the
+        // typed `AudienceMismatch` variant (not a generic
+        // `CascadeRejected("...")` string blob). Callers branching on
+        // the variant can detect wrong-audience traffic without
+        // string-parsing.
+        let token_aud = [0x42u8; 32];
+        let mut expected = [0x42u8; 32];
+        expected[17] = 0x43;
+        match super::check_audience_hash(&token_aud, &expected) {
+            Err(haap_sdk_types::VerifyError::AudienceMismatch) => { /* expected */ }
+            other => panic!("expected AudienceMismatch, got: {other:?}"),
         }
     }
 

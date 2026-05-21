@@ -159,6 +159,45 @@ Connecting performs the version handshake (`0x00`); subsequent calls use the
 JSON-payload framing. Windows Named Pipes are supported transparently via
 Node's `net.connect({ path })`.
 
+## Threat model — runtime principal
+
+`HawcxAgent` supports per-call principal switching via the
+`actingForUser` field, which the Assembler projects into
+`scope_json.user_principal_id` on the minted token (CS v6.9.0
+line 163). This lets one supervisor pipeline serve multiple end-users
+without re-enrolling the agent identity per user.
+
+`actingForUser` is sensitive: a value that came from an LLM (or any
+input the model can influence) MUST NOT be allowed to silently switch
+the effective user. As of v0.1.0-alpha.2 (H-3 hardening 2026-05-20):
+
+- `HawcxAgent.connect(endpoint, { principalAllowlist: [...] })` is
+  required. The allowlist is a closed set of permitted principal IDs
+  sourced from operator config.
+- `agent.invoke({ actingForUser: ... })` and `agent.invokeFor(...)`
+  validate against the allowlist before any IPC bytes are written.
+  Out-of-list principals throw synchronously with a redacted
+  fingerprint (SHA-256 prefix) instead of echoing the rejected
+  principal back in plaintext.
+- Pass `principalAllowlist: []` to forbid runtime principal switching
+  entirely.
+
+Operator obligations:
+
+1. Source the allowlist from operator-controlled config — never derive
+   from LLM output, request bodies, MCP tool arguments, or any input
+   a model can influence.
+2. If the principal axis spans more than ~100 users, fan out to per-
+   user agents rather than one agent with a wide allowlist; the Cedar
+   policy on the gateway should still gate per-user access, but
+   reducing the SDK-side allowlist closes the blast radius of a
+   compromised supervisor.
+3. The previous code that accepted `acting_for_user` from any caller
+   (without an allowlist) is **deprecated**. See [CHANGELOG.md] for
+   the migration recipe.
+
+[changelog.md]: ../CHANGELOG.md
+
 ## Development
 
 ```bash

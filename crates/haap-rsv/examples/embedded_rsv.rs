@@ -7,7 +7,7 @@
 //! cargo run --example embedded_rsv -p haap-rsv
 //! ```
 
-use haap_rsv::Rsv;
+use haap_rsv::{Rsv, RegistrationScopeAuthorizer};
 use haap_sdk_types::RsvConfig;
 
 #[tokio::main]
@@ -15,7 +15,10 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let config = RsvConfig::from_env()?;
-    let _rsv = Rsv::new(config).await?;
+    // Production embedding pins `RegistrationScopeAuthorizer` (CS v6.8.0
+    // §9.1.X). The constructor takes the authorizer explicitly post-C-2
+    // (2026-05-20) — no silent permissive default.
+    let _rsv = Rsv::new(config, Box::new(RegistrationScopeAuthorizer)).await?;
 
     // In production:
     //   for incoming_request in transport.requests() {

@@ -29,6 +29,7 @@
  *
  *     const agent = await HawcxAgent.connect(
  *       "/var/run/haap/research-u1/agent-assembler-0.sock",
+ *       { principalAllowlist: [] }, // or ["alice", "bob"] for runtime principal switching
  *     );
  *     try {
  *       const response = await agent.invoke({
@@ -54,7 +55,9 @@ export type { HawcxAgentInvokeOptions } from "./agent";
 export {
   AssemblerClient,
   TokenTransport,
+  HAWCX_HAAP_V7_2_5_CAPABILITY,
   encodeFrame,
+  encodeSessionIdForWire,
   MSG_TOOL_CALL_REQUEST,
   MSG_TOOL_CALL_RESPONSE,
   MSG_REQUEST_REJECTED,

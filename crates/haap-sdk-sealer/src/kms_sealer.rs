@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use haap_sdk_types::{SealedBundle, SealerError};
+use zeroize::Zeroizing;
 
 use crate::sealer::AgentIdentitySealer;
 
@@ -26,7 +27,7 @@ impl AgentIdentitySealer for KmsWrappedSealer {
         Err(SealerError::NotImplemented("kms-wrapped seal"))
     }
 
-    async fn unseal(&self, _bundle: &SealedBundle) -> Result<Vec<u8>, SealerError> {
+    async fn unseal(&self, _bundle: &SealedBundle) -> Result<Zeroizing<Vec<u8>>, SealerError> {
         Err(SealerError::NotImplemented("kms-wrapped unseal"))
     }
 }

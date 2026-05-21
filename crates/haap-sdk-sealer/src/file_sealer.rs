@@ -40,10 +40,60 @@ impl FileSealer {
         &self.path
     }
 
+    /// Read the passphrase from configured sources, in priority order:
+    ///
+    /// 1. `${passphrase_env_var}_FILE` — path to a file whose contents
+    ///    are the passphrase. Preferred because the value never lives
+    ///    in the process's `environ`, which is world-readable on Linux
+    ///    via `/proc/<pid>/environ` for the same UID and is included
+    ///    verbatim in `ps -E` output / crash dumps. Trailing newline is
+    ///    stripped (a `printf "secret" > /run/secrets/sealer` is
+    ///    equivalent to the file containing `secret`).
+    /// 2. `${passphrase_env_var}` — direct env var. Emits a warn log on
+    ///    every read so operators see the drift in their logs and can
+    ///    migrate to the `_FILE` variant.
+    ///
+    /// Both sources are mutually exclusive in practice; if both are
+    /// set the `_FILE` form wins and the env var is ignored.
     fn read_passphrase(&self) -> Result<Zeroizing<String>, SealerError> {
-        std::env::var(&self.passphrase_env_var)
-            .map(Zeroizing::new)
-            .map_err(|_| SealerError::MissingPassphrase(self.passphrase_env_var.clone()))
+        let file_var = format!("{}_FILE", self.passphrase_env_var);
+        if let Ok(path) = std::env::var(&file_var) {
+            let bytes = std::fs::read(&path).map_err(|e| {
+                SealerError::MissingPassphrase(format!(
+                    "{file_var}={path}: read failed: {e}"
+                ))
+            })?;
+            let s = String::from_utf8(bytes).map_err(|_| {
+                SealerError::MissingPassphrase(format!(
+                    "{file_var}={path}: contents not UTF-8"
+                ))
+            })?;
+            // Strip a single trailing newline (`printf %s\\n` is the
+            // canonical way to write a secret to a tmpfs file).
+            let trimmed = s.strip_suffix('\n').unwrap_or(&s).to_string();
+            if trimmed.is_empty() {
+                return Err(SealerError::MissingPassphrase(format!(
+                    "{file_var}={path}: empty passphrase file"
+                )));
+            }
+            return Ok(Zeroizing::new(trimmed));
+        }
+
+        match std::env::var(&self.passphrase_env_var) {
+            Ok(v) => {
+                tracing::warn!(
+                    env_var = %self.passphrase_env_var,
+                    "FileSealer reading passphrase from env var; prefer \
+                     {}_FILE (path to a tmpfs/secret-mount file) to keep \
+                     the value out of /proc/<pid>/environ and crash dumps",
+                    self.passphrase_env_var
+                );
+                Ok(Zeroizing::new(v))
+            }
+            Err(_) => Err(SealerError::MissingPassphrase(
+                self.passphrase_env_var.clone(),
+            )),
+        }
     }
 
     fn derive_key(passphrase: &[u8], salt: &[u8]) -> Result<Zeroizing<[u8; 32]>, SealerError> {
@@ -98,7 +148,7 @@ impl AgentIdentitySealer for FileSealer {
         })
     }
 
-    async fn unseal(&self, bundle: &SealedBundle) -> Result<Vec<u8>, SealerError> {
+    async fn unseal(&self, bundle: &SealedBundle) -> Result<Zeroizing<Vec<u8>>, SealerError> {
         if bundle.backend_tag != BACKEND_TAG {
             return Err(SealerError::BackendTagMismatch(
                 bundle.backend_tag.clone(),
@@ -130,7 +180,7 @@ impl AgentIdentitySealer for FileSealer {
             )
             .map_err(|e| SealerError::AeadDecrypt(e.to_string()))?;
 
-        Ok(plaintext)
+        Ok(Zeroizing::new(plaintext))
     }
 }
 
@@ -150,7 +200,7 @@ mod tests {
         let plaintext = b"sample identity bundle bytes".to_vec();
         let bundle = sealer.seal(&plaintext).await.unwrap();
         let recovered = sealer.unseal(&bundle).await.unwrap();
-        assert_eq!(plaintext, recovered);
+        assert_eq!(plaintext.as_slice(), recovered.as_slice());
     }
 
     #[tokio::test]
@@ -166,6 +216,50 @@ mod tests {
         bundle.ciphertext[last] ^= 0xFF;
         let result = sealer.unseal(&bundle).await;
         assert!(matches!(result, Err(SealerError::AeadDecrypt(_))));
+    }
+
+    #[tokio::test]
+    async fn passphrase_file_takes_precedence_over_env() {
+        let dir = TempDir::new().unwrap();
+        let pp_path = dir.path().join("pp");
+        std::fs::write(&pp_path, b"file-mode-secret\n").unwrap();
+        std::env::set_var("HAAP_TEST_PASSPHRASE_F4", "env-mode-secret");
+        std::env::set_var(
+            "HAAP_TEST_PASSPHRASE_F4_FILE",
+            pp_path.to_str().unwrap(),
+        );
+        let sealer = FileSealer::new(
+            dir.path().join("sealed.bin"),
+            "HAAP_TEST_PASSPHRASE_F4".into(),
+        );
+        let bundle = sealer.seal(b"plaintext").await.unwrap();
+
+        // Now flip the env to a wrong value — the _FILE form should
+        // still drive the derivation and unseal should succeed.
+        std::env::set_var("HAAP_TEST_PASSPHRASE_F4", "different-env-value");
+        let recovered = sealer.unseal(&bundle).await.unwrap();
+        assert_eq!(recovered.as_slice(), b"plaintext");
+
+        std::env::remove_var("HAAP_TEST_PASSPHRASE_F4_FILE");
+        std::env::remove_var("HAAP_TEST_PASSPHRASE_F4");
+    }
+
+    #[tokio::test]
+    async fn empty_passphrase_file_is_rejected() {
+        let dir = TempDir::new().unwrap();
+        let pp_path = dir.path().join("pp");
+        std::fs::write(&pp_path, b"").unwrap();
+        std::env::set_var(
+            "HAAP_TEST_PASSPHRASE_F5_FILE",
+            pp_path.to_str().unwrap(),
+        );
+        let sealer = FileSealer::new(
+            dir.path().join("sealed.bin"),
+            "HAAP_TEST_PASSPHRASE_F5".into(),
+        );
+        let err = sealer.seal(b"plaintext").await.unwrap_err();
+        assert!(matches!(err, SealerError::MissingPassphrase(_)));
+        std::env::remove_var("HAAP_TEST_PASSPHRASE_F5_FILE");
     }
 
     #[tokio::test]

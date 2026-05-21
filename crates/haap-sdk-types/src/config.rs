@@ -25,8 +25,18 @@ pub enum SealerConfig {
 pub struct RsvConfig {
     /// Customer Redis connection URL (e.g., redis://customer-redis:6379).
     pub customer_redis_url: String,
-    /// SHA-256 of the audience URL (UTF-8 bytes). Tokens must carry
-    /// this aud_hash to be accepted.
+    /// SHA-256 of the operator's audience URL (UTF-8 bytes). The
+    /// verifier constant-time compares the token's wire-level
+    /// `aud_hash` (CS §7.1 bytes 48–79) against this value as the
+    /// front-line gate, BEFORE any substrate fetch. Tokens minted for
+    /// a different audience are rejected with
+    /// [`crate::VerifyError::AudienceMismatch`] without consuming a
+    /// substrate round-trip.
+    ///
+    /// Enforcement landed 2026-05-20 (H-1). Prior to that the field
+    /// was collected from `HAAP_AUDIENCE_HASH` but never compared — a
+    /// dormant config knob that gave callers a false sense of
+    /// audience scoping.
     pub audience_hash: [u8; 32],
     /// LRU capacity for the in-process replay-check fast path.
     pub replay_lru_capacity: usize,
@@ -63,9 +73,37 @@ impl RsvConfig {
     }
 }
 
+/// Default sealer backend when `HAAP_SEALER_BACKEND` is unset.
+///
+/// On macOS, Windows, and Linux we default to the OS-native keychain
+/// (Keychain Services / Credential Manager / Secret Service). The
+/// `file` backend is still supported but must be opted into explicitly
+/// — defaulting to a passphrase-on-disk store is a footgun (M-1
+/// hardening 2026-05-20): the typical operator who never sets
+/// `HAAP_SEALER_BACKEND` should end up with the keychain-backed sealer,
+/// not a file the wrong process can grep.
+const fn default_sealer_backend() -> &'static str {
+    if cfg!(any(target_os = "macos", target_os = "windows", target_os = "linux")) {
+        "os-keychain"
+    } else {
+        // Other Unix flavours (FreeBSD, illumos, …) have no first-party
+        // keyring-rs backend yet. Force operators to pick explicitly
+        // rather than silently falling back to file mode.
+        ""
+    }
+}
+
 /// Parse SealerConfig from env vars (used by haap-sdk-cli seal/unseal).
 pub fn sealer_config_from_env() -> Result<SealerConfig, ConfigError> {
-    let backend = std::env::var("HAAP_SEALER_BACKEND").unwrap_or_else(|_| "file".to_string());
+    let backend = std::env::var("HAAP_SEALER_BACKEND")
+        .unwrap_or_else(|_| default_sealer_backend().to_string());
+    if backend.is_empty() {
+        return Err(ConfigError::UnknownSealerBackend(
+            "HAAP_SEALER_BACKEND unset and no OS-keychain backend available on this platform; \
+             set HAAP_SEALER_BACKEND to one of: os-keychain, file, kms"
+                .to_string(),
+        ));
+    }
     match backend.as_str() {
         "file" => {
             let path = std::env::var("HAAP_SEALER_FILE_PATH")

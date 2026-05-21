@@ -29,6 +29,8 @@ tracing = { workspace = true }
 zeroize = { workspace = true }
 hex = { workspace = true }
 async-trait = { workspace = true }
+# Constant-time compare for H-1 token aud_hash vs. RsvConfig::audience_hash.
+subtle = { workspace = true }
 
 [features]
 default = []

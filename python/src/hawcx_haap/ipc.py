@@ -27,11 +27,14 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import socket
+import stat
 import struct
 import sys
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from hawcx_haap.errors import HandshakeError, IpcError, RequestRejected
@@ -59,14 +62,43 @@ MAX_MESSAGE_SIZE: int = 64 * 1024
 
 
 class TokenTransport(str, Enum):
-    """Per-call outbound transport selector (CS v6.7.4 §34).
+    """Per-call outbound transport selector.
 
-    ``http_header`` (default): token in ``Authorization: HAAP <b64>`` header.
-    ``mcp_meta``: token in MCP ``params._meta["haap/tbac"].token``.
+    - ``http_header`` (default): token in ``Authorization: HAAP <b64>``
+      HTTP header.
+    - ``mcp_meta``: legacy v6.7.4 §34 carriage. Token placed at
+      ``params._meta["haap/tbac"].token``. Retained for compatibility
+      with MCP servers that have not yet negotiated v7.2.5; will be
+      removed once every shipped server advertises
+      ``experimental.hawcx-haap-v7-2-5``.
+    - ``mcp_meta_v7_2_5``: current carriage per HAAP v7.2.5 §45.7.5.
+      The Assembler places the HAAP token at
+      ``params._meta.hawcx.haap_token`` and any OAuth bridging bearer
+      at ``params._meta.hawcx.oauth_bearer``. RSV strip-on-egress
+      semantics apply: the gateway MUST remove the ``_meta.hawcx``
+      envelope before forwarding to the underlying tool. JSON-RPC
+      error mapping per §45.7.5: rejection codes ``-32000`` …
+      ``-32005`` with ``data.hawcx_reason_code`` carrying the Hawcx
+      reason.
+
+    Wire selector change (M-6, 2026-05-20): ``mcp_meta_v7_2_5`` is a
+    new selector value; callers must opt in explicitly. The Assembler
+    advertises support via the ``experimental.hawcx-haap-v7-2-5``
+    capability at MCP ``initialize``; see
+    :meth:`AssemblerClient.connect`'s ``experimental_capabilities``
+    parameter for the connect-time advertisement.
     """
 
     HTTP_HEADER = "http_header"
     MCP_META = "mcp_meta"
+    MCP_META_V7_2_5 = "mcp_meta_v7_2_5"
+
+
+#: Capability tag advertised at MCP ``initialize`` time when the
+#: Assembler offers the v7.2.5 ``_meta.hawcx`` envelope to an upstream
+#: MCP server. Mirrored verbatim into the JSON-RPC initialize
+#: ``experimental`` map.
+HAWCX_HAAP_V7_2_5_CAPABILITY: str = "hawcx-haap-v7-2-5"
 
 
 @dataclass
@@ -242,7 +274,79 @@ def perform_handshake(sock: socket.socket, local_role: int = ROLE_AGENT) -> int:
 # ── Platform-aware socket connect ────────────────────────────────────
 
 
+def _validate_ipc_socket_path(socket_path: str) -> None:
+    """H-4 (2026-05-20) — validate UID + parent-dir mode before connect.
+
+    Refuses sockets whose owner UID differs from
+    ``HAAP_SDK_EXPECTED_PEER_UID`` (or the socket file's own uid when
+    the env var is unset), and refuses parent directories whose owner
+    UID differs from ``os.getuid()`` or whose mode has any group/other
+    bit set (mask ``0o077``).
+
+    The previous client connected to any socket the kernel let it
+    ``connect(2)`` — which on a shared ``/tmp/hawcx/`` is "any process
+    on the host". This pre-connect stat catches the cross-UID case
+    before any handshake bytes are exchanged.
+
+    No-op on Windows: Named Pipe ACLs are handled by the kernel at
+    ``CreateFileW`` time and surface as ``OSError(EACCES)`` from the
+    pipe-open path; nothing to stat here.
+    """
+    if sys.platform == "win32":
+        return
+
+    sock_path = Path(socket_path)
+    try:
+        sock_stat = sock_path.stat()
+    except OSError as e:
+        raise IpcError(f"stat {socket_path} failed: {e}") from e
+    if not stat.S_ISSOCK(sock_stat.st_mode):
+        raise IpcError(f"{socket_path} is not a Unix domain socket")
+
+    expected_env = os.environ.get("HAAP_SDK_EXPECTED_PEER_UID")
+    if expected_env is not None:
+        try:
+            expected_uid = int(expected_env, 10)
+        except ValueError as e:
+            raise IpcError(
+                f"HAAP_SDK_EXPECTED_PEER_UID={expected_env!r} is not a valid uid"
+            ) from e
+    else:
+        expected_uid = sock_stat.st_uid
+
+    if sock_stat.st_uid != expected_uid:
+        raise IpcError(
+            f"IPC socket {socket_path} is owned by uid {sock_stat.st_uid}, "
+            f"expected {expected_uid}; refusing to connect to a socket "
+            "created by another user"
+        )
+
+    parent = sock_path.parent
+    try:
+        parent_stat = parent.stat()
+    except OSError as e:
+        raise IpcError(f"stat parent dir {parent} failed: {e}") from e
+
+    our_uid = os.getuid()
+    if parent_stat.st_uid != our_uid:
+        raise IpcError(
+            f"IPC parent dir {parent} is owned by uid {parent_stat.st_uid}, "
+            f"this process is uid {our_uid}; refusing to use a dir "
+            "created by another user"
+        )
+    parent_perms = parent_stat.st_mode & 0o777
+    if parent_perms & 0o077 != 0:
+        if os.environ.get("HAAP_SDK_ALLOW_TMP_IPC") != "1":
+            raise IpcError(
+                f"IPC parent dir {parent} has mode {parent_perms:o}; "
+                "refusing to use a dir with group/other bits set. "
+                "chmod 700 the dir, or set HAAP_SDK_ALLOW_TMP_IPC=1 to "
+                "opt into the legacy /tmp/hawcx/ path."
+            )
+
+
 def _connect_unix(path: str, timeout_secs: float | None) -> socket.socket:
+    _validate_ipc_socket_path(path)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     if timeout_secs is not None:
         sock.settimeout(timeout_secs)
@@ -280,8 +384,18 @@ class AssemblerClient:
     the connection is ready for ToolCallRequest / ToolCallResponse round-trips.
     """
 
-    def __init__(self, sock: socket.socket) -> None:
+    def __init__(
+        self,
+        sock: socket.socket,
+        experimental_capabilities: tuple[str, ...] = (),
+    ) -> None:
         self._sock = sock
+        # Experimental MCP capabilities the SDK advertises on this
+        # connection. The Assembler echoes these into the
+        # ``experimental`` field of its outbound MCP ``initialize``
+        # calls so the upstream MCP server can negotiate features.
+        # Today the only entry is ``hawcx-haap-v7-2-5`` (M-6).
+        self._experimental_capabilities = experimental_capabilities
 
     @classmethod
     def connect(
@@ -289,7 +403,16 @@ class AssemblerClient:
         endpoint: str,
         *,
         timeout_secs: float | None = 5.0,
+        experimental_capabilities: tuple[str, ...] = (),
     ) -> AssemblerClient:
+        """Connect, handshake, and return a client.
+
+        ``experimental_capabilities`` is a tuple of capability tags the
+        SDK advertises via the Assembler to upstream MCP servers (HAAP
+        v7.2.5 §45.7.5). Pass ``(HAWCX_HAAP_V7_2_5_CAPABILITY,)`` to
+        enable v7.2.5 payload carriage end-to-end. Empty tuple
+        (default) means legacy v6.7.4 carriage only.
+        """
         sock = connect_assembler(endpoint, timeout_secs=timeout_secs)
         try:
             peer_role = perform_handshake(sock, local_role=ROLE_AGENT)
@@ -307,7 +430,7 @@ class AssemblerClient:
             raise IpcError(
                 f"expected peer role Assembler (0x05), got 0x{peer_role:02x}"
             )
-        return cls(sock)
+        return cls(sock, experimental_capabilities=experimental_capabilities)
 
     def invoke(self, req: ToolCallRequest) -> ToolCallResponse:
         """Send a ToolCallRequest; await ToolCallResponse or RequestRejected.
@@ -315,7 +438,16 @@ class AssemblerClient:
         Raises :class:`RequestRejected` if the Assembler rejects.
         Raises :class:`IpcError` on framing / transport errors.
         """
-        payload = json.dumps(req.to_wire(), separators=(",", ":")).encode("utf-8")
+        wire = req.to_wire()
+        # Forward the connection-level experimental capability list on
+        # every call so the Assembler can re-key its MCP initialize
+        # when a new upstream server is contacted. Wire key matches
+        # the Rust-side serde rename.
+        if self._experimental_capabilities:
+            wire["hawcx_experimental_capabilities"] = list(
+                self._experimental_capabilities
+            )
+        payload = json.dumps(wire, separators=(",", ":")).encode("utf-8")
         write_frame(self._sock, MSG_TOOL_CALL_REQUEST, payload)
 
         msg_type, body = read_frame(self._sock)
