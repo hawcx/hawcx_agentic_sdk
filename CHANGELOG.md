@@ -6,7 +6,7 @@ versions track each language surface independently (Rust crate
 versions in `Cargo.toml`, Node version in `node/package.json`, Python
 version in `python/pyproject.toml`).
 
-## [Unreleased] - 2026-05-20
+## [v0.1.0-alpha.7] - 2026-05-21
 
 ### Security
 
