@@ -13,5 +13,11 @@ tokio = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+# Unix-only: nix + libc back the SO_PEERCRED / LOCAL_PEERCRED peer-cred
+# check and UDS listener surface (CS v7.2.5 §39.12.1). Windows uses the
+# spec-defined Named Pipe + DACL primitives in hx_labs::haap_ipc::win_dacl
+# (§39.12.2); see lib.rs.
+[target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
 libc = { workspace = true }
