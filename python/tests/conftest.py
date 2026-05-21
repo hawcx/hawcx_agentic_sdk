@@ -205,7 +205,17 @@ def mock_assembler_endpoint(mock_assembler: MockAssembler) -> str:
 
 @pytest.fixture
 def short_sock_path() -> Iterator[str]:
-    """Return a temporary short AF_UNIX path that the test should manage."""
+    """Return a temporary short AF_UNIX path that the test should manage.
+
+    Skips on Windows: the path is consumed by raw ``socket.AF_UNIX``
+    server sockets in callers (e.g. ``test_handshake_*``), and Python
+    on the Windows GHA runner image does not expose ``socket.AF_UNIX``.
+    Named-pipe parity for the Python binding's mock harness mirrors
+    the Rust SDK's CS v7.2.5 §39.12.2 implementation and is tracked
+    as a follow-up.
+    """
+    if sys.platform == "win32":
+        pytest.skip("AF_UNIX-based mock not portable on Windows")
     path = _short_socket_path("t")
     yield path
     try:

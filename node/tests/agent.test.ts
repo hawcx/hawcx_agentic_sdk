@@ -15,7 +15,10 @@ import {
 
 import { MockAssembler } from "./mockAssembler";
 
-describe("HawcxAgent", () => {
+// Skips on Windows: MockAssembler binds a Unix domain socket which the
+// Windows GHA runner rejects with EACCES. Named-pipe parity for the
+// Node binding is tracked as a follow-up (see ipc.test.ts comment).
+describe.skipIf(process.platform === "win32")("HawcxAgent", () => {
   let mock: MockAssembler;
 
   beforeEach(async () => {
@@ -147,7 +150,7 @@ describe("defaultEndpointFor", () => {
   });
 });
 
-describe("runtime principal switching (acting_for_user)", () => {
+describe.skipIf(process.platform === "win32")("runtime principal switching (acting_for_user)", () => {
   let mock: MockAssembler;
 
   beforeEach(async () => {
@@ -311,7 +314,7 @@ describe("runtime principal switching (acting_for_user)", () => {
   });
 });
 
-describe("invoke transports", () => {
+describe.skipIf(process.platform === "win32")("invoke transports", () => {
   let mock: MockAssembler;
 
   beforeEach(async () => {
