@@ -109,10 +109,64 @@ impl Drop for IpcServer {
 pub struct IpcClient;
 
 impl IpcClient {
+    /// Connect to the Assembler/peer at `path` and validate the peer's
+    /// effective UID via `SO_PEERCRED` / `LOCAL_PEEREUID`.
+    ///
+    /// H-4 (2026-05-20): the previous implementation called
+    /// `peer_identity` and then ignored the result — any process with
+    /// access to the socket file could connect, including unrelated
+    /// daemons running under a different UID that happened to share
+    /// the same `/tmp/hawcx/` parent directory.
+    ///
+    /// Resolution order for the expected peer UID:
+    ///
+    /// 1. `HAAP_SDK_EXPECTED_PEER_UID` env var (decimal u32). Set this
+    ///    when the operator wires the Assembler under a different UID
+    ///    than the SDK process (e.g., a sandboxed Assembler container
+    ///    with a fixed UID).
+    /// 2. The socket file's owner UID (via `std::fs::metadata`). This
+    ///    is the right default for the typical "supervisor created
+    ///    the socket as itself, SDK runs as the same user" pattern.
+    ///
+    /// Mismatched peers cause the connection to close before any IPC
+    /// bytes are exchanged.
     pub async fn connect(path: &Path) -> Result<IpcConnection, IpcError> {
+        let expected_uid = resolve_expected_peer_uid(path)?;
         let stream = UnixStream::connect(path).await?;
         let peer = peer_identity(&stream)?;
+        if peer.uid != expected_uid {
+            return Err(IpcError::PeerCredMismatch {
+                peer_uid: peer.uid,
+                expected_uid,
+            });
+        }
         Ok(IpcConnection { stream, peer })
+    }
+}
+
+/// Resolve the expected peer UID per the documented precedence in
+/// [`IpcClient::connect`]. Extracted so the policy is unit-testable.
+fn resolve_expected_peer_uid(path: &Path) -> Result<u32, IpcError> {
+    if let Ok(s) = std::env::var("HAAP_SDK_EXPECTED_PEER_UID") {
+        return s.parse::<u32>().map_err(|e| {
+            IpcError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "HAAP_SDK_EXPECTED_PEER_UID={s:?} could not be parsed as u32: {e}"
+                ),
+            ))
+        });
+    }
+    let meta = std::fs::metadata(path).map_err(IpcError::Io)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(meta.uid())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta; // suppress unused
+        Err(IpcError::PeerCredUnsupported)
     }
 }
 

@@ -164,8 +164,21 @@ class MockAssembler:
 
 
 def _short_socket_path(name: str = "mock") -> str:
-    """Generate a short AF_UNIX path; pytest's tmp_path overruns macOS's 104-byte limit."""
-    return os.path.join(tempfile.gettempdir(), f"hx-{name}-{uuid.uuid4().hex[:8]}.sock")
+    """Generate a short AF_UNIX path inside a 0o700 dir.
+
+    Two constraints:
+
+    1. macOS's ``sun_path`` is capped at 104 bytes — pytest's
+       ``tmp_path`` is too deeply nested, hence the bare tempdir.
+    2. H-4 (2026-05-20): the client validates that the socket's
+       parent dir is owned by the current UID and has no group/other
+       bits set. We create a fresh ``mkdtemp`` dir under
+       ``tempfile.gettempdir()``, ``chmod 0o700`` it, and put the
+       socket inside.
+    """
+    parent = tempfile.mkdtemp(prefix=f"hx-{name}-")
+    os.chmod(parent, 0o700)
+    return os.path.join(parent, f"{uuid.uuid4().hex[:8]}.sock")
 
 
 @pytest.fixture

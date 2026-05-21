@@ -20,7 +20,10 @@
  */
 
 import { Buffer } from "node:buffer";
+import * as fs from "node:fs";
 import * as net from "node:net";
+import * as path from "node:path";
+import * as process from "node:process";
 
 import { HandshakeError, IpcError, RequestRejected } from "./errors";
 
@@ -324,6 +327,110 @@ function decodeHandshake(payload: Buffer): DecodedHandshake {
 // ── Connect + AssemblerClient ───────────────────────────────────────
 
 /**
+ * Validate the socket file's owner UID and the parent directory's
+ * mode bits *before* `net.connect` (H-4 2026-05-20).
+ *
+ * Node's `net.createConnection({ path })` happily attaches to any UDS
+ * the current UID can `connect(2)` — which on a shared `/tmp/hawcx/`
+ * directory includes sockets created by entirely different daemons
+ * running under a different UID. Pre-connect validation drops the
+ * mismatched-UID case before any handshake bytes are exchanged.
+ *
+ * Skipped on Windows (Named Pipes have a different ACL model; the
+ * kernel enforces the pipe's DACL at `CreateFileW` time and surfaces
+ * an `EACCES` we'd map to `IpcError` anyway).
+ *
+ * Resolution order for the expected UID:
+ *
+ * 1. `HAAP_SDK_EXPECTED_PEER_UID` env var (decimal). Override for
+ *    cross-UID deployments.
+ * 2. The socket file's `uid` from `fs.statSync` — works for the
+ *    typical "same UID on both ends" pattern.
+ *
+ * Additionally, refuse to use the parent dir if:
+ * - the dir's uid does not equal `process.getuid()`, OR
+ * - the dir's mode has any group/other bit set (mask `0o077`).
+ */
+function validateIpcSocketPath(endpoint: string): void {
+  if (process.platform === "win32") {
+    return; // Named Pipe ACLs handled by the kernel; nothing to stat.
+  }
+  const getuid = process.getuid;
+  if (typeof getuid !== "function") {
+    // Shouldn't happen on a non-Win32 platform, but make the
+    // type-narrowing explicit so a Bun / Deno port doesn't silently
+    // skip the check.
+    throw new IpcError(
+      "process.getuid() is unavailable on this platform; refusing to " +
+        "connect to a UDS without UID validation",
+    );
+  }
+  const ourUid = getuid();
+
+  let sockStat: fs.Stats;
+  try {
+    sockStat = fs.statSync(endpoint);
+  } catch (err) {
+    throw new IpcError(
+      `stat ${endpoint} failed: ${(err as Error).message}`,
+    );
+  }
+  if (!sockStat.isSocket()) {
+    throw new IpcError(`${endpoint} is not a Unix domain socket`);
+  }
+
+  const expectedUidEnv = process.env.HAAP_SDK_EXPECTED_PEER_UID;
+  const expectedUid =
+    expectedUidEnv !== undefined
+      ? Number.parseInt(expectedUidEnv, 10)
+      : sockStat.uid;
+  if (!Number.isFinite(expectedUid) || expectedUid < 0) {
+    throw new IpcError(
+      `HAAP_SDK_EXPECTED_PEER_UID=${expectedUidEnv} is not a valid uid`,
+    );
+  }
+  if (sockStat.uid !== expectedUid) {
+    throw new IpcError(
+      `IPC socket ${endpoint} is owned by uid ${sockStat.uid}, expected ${expectedUid}; ` +
+        "refusing to connect to a socket created by another user",
+    );
+  }
+
+  // Validate the parent directory. The socket's mode is necessarily
+  // 0o600 (set by the supervisor at bind time, per haap-sdk-ipc's
+  // IpcServer::bind), but if the parent dir is world-writable an
+  // attacker can swap the socket for a same-named socket of theirs.
+  const parent = path.dirname(endpoint);
+  let parentStat: fs.Stats;
+  try {
+    parentStat = fs.statSync(parent);
+  } catch (err) {
+    throw new IpcError(
+      `stat parent dir ${parent} failed: ${(err as Error).message}`,
+    );
+  }
+  if (parentStat.uid !== ourUid) {
+    throw new IpcError(
+      `IPC parent dir ${parent} is owned by uid ${parentStat.uid}, this process is uid ${ourUid}; ` +
+        "refusing to use a dir created by another user",
+    );
+  }
+  // Stats.mode in Node includes the file type bits. Mask to permission bits.
+  const parentPerms = parentStat.mode & 0o777;
+  if ((parentPerms & 0o077) !== 0) {
+    // Allow operators to opt out for /tmp/hawcx/ with the same env
+    // flag the Rust side honours, but require explicit opt-in.
+    if (process.env.HAAP_SDK_ALLOW_TMP_IPC !== "1") {
+      throw new IpcError(
+        `IPC parent dir ${parent} has mode ${parentPerms.toString(8)}; ` +
+          "refusing to use a dir with group/other bits set. " +
+          "chmod 700 the dir, or set HAAP_SDK_ALLOW_TMP_IPC=1 to opt into the legacy /tmp/hawcx/ path.",
+      );
+    }
+  }
+}
+
+/**
  * Connect to the Assembler at `endpoint` and return a Node `net.Socket`.
  *
  * On Unix, `endpoint` is a filesystem path to a Unix domain socket.
@@ -335,6 +442,11 @@ export function connectAssembler(
   endpoint: string,
   timeoutMs: number,
 ): Promise<net.Socket> {
+  // H-4: validate UID + parent-dir mode before attaching. Throws
+  // synchronously on mismatch — the Promise constructor's `executor`
+  // call catches it and rejects, so caller's `await` still sees an
+  // IpcError without partial side effects.
+  validateIpcSocketPath(endpoint);
   return new Promise((resolve, reject) => {
     const sock = net.createConnection({ path: endpoint });
     const timer =

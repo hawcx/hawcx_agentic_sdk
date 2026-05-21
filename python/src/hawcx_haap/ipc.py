@@ -27,11 +27,14 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import socket
+import stat
 import struct
 import sys
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from hawcx_haap.errors import HandshakeError, IpcError, RequestRejected
@@ -271,7 +274,79 @@ def perform_handshake(sock: socket.socket, local_role: int = ROLE_AGENT) -> int:
 # ── Platform-aware socket connect ────────────────────────────────────
 
 
+def _validate_ipc_socket_path(socket_path: str) -> None:
+    """H-4 (2026-05-20) — validate UID + parent-dir mode before connect.
+
+    Refuses sockets whose owner UID differs from
+    ``HAAP_SDK_EXPECTED_PEER_UID`` (or the socket file's own uid when
+    the env var is unset), and refuses parent directories whose owner
+    UID differs from ``os.getuid()`` or whose mode has any group/other
+    bit set (mask ``0o077``).
+
+    The previous client connected to any socket the kernel let it
+    ``connect(2)`` — which on a shared ``/tmp/hawcx/`` is "any process
+    on the host". This pre-connect stat catches the cross-UID case
+    before any handshake bytes are exchanged.
+
+    No-op on Windows: Named Pipe ACLs are handled by the kernel at
+    ``CreateFileW`` time and surface as ``OSError(EACCES)`` from the
+    pipe-open path; nothing to stat here.
+    """
+    if sys.platform == "win32":
+        return
+
+    sock_path = Path(socket_path)
+    try:
+        sock_stat = sock_path.stat()
+    except OSError as e:
+        raise IpcError(f"stat {socket_path} failed: {e}") from e
+    if not stat.S_ISSOCK(sock_stat.st_mode):
+        raise IpcError(f"{socket_path} is not a Unix domain socket")
+
+    expected_env = os.environ.get("HAAP_SDK_EXPECTED_PEER_UID")
+    if expected_env is not None:
+        try:
+            expected_uid = int(expected_env, 10)
+        except ValueError as e:
+            raise IpcError(
+                f"HAAP_SDK_EXPECTED_PEER_UID={expected_env!r} is not a valid uid"
+            ) from e
+    else:
+        expected_uid = sock_stat.st_uid
+
+    if sock_stat.st_uid != expected_uid:
+        raise IpcError(
+            f"IPC socket {socket_path} is owned by uid {sock_stat.st_uid}, "
+            f"expected {expected_uid}; refusing to connect to a socket "
+            "created by another user"
+        )
+
+    parent = sock_path.parent
+    try:
+        parent_stat = parent.stat()
+    except OSError as e:
+        raise IpcError(f"stat parent dir {parent} failed: {e}") from e
+
+    our_uid = os.getuid()
+    if parent_stat.st_uid != our_uid:
+        raise IpcError(
+            f"IPC parent dir {parent} is owned by uid {parent_stat.st_uid}, "
+            f"this process is uid {our_uid}; refusing to use a dir "
+            "created by another user"
+        )
+    parent_perms = parent_stat.st_mode & 0o777
+    if parent_perms & 0o077 != 0:
+        if os.environ.get("HAAP_SDK_ALLOW_TMP_IPC") != "1":
+            raise IpcError(
+                f"IPC parent dir {parent} has mode {parent_perms:o}; "
+                "refusing to use a dir with group/other bits set. "
+                "chmod 700 the dir, or set HAAP_SDK_ALLOW_TMP_IPC=1 to "
+                "opt into the legacy /tmp/hawcx/ path."
+            )
+
+
 def _connect_unix(path: str, timeout_secs: float | None) -> socket.socket:
+    _validate_ipc_socket_path(path)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     if timeout_secs is not None:
         sock.settimeout(timeout_secs)

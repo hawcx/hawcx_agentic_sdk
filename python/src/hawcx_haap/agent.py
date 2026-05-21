@@ -30,11 +30,37 @@ from hawcx_haap.ipc import (
 
 
 def _default_ipc_dir() -> Path:
-    """Match ``crates/haap-supervisor/src/paths.rs`` default base directory."""
+    """Resolve the per-user IPC base dir.
+
+    Resolution order (H-4 2026-05-20):
+
+    1. ``$XDG_RUNTIME_DIR/hawcx/`` (preferred — systemd creates this
+       0o700 per UID and tears it down at logout).
+    2. ``$TMPDIR/hawcx/`` (macOS where ``XDG_RUNTIME_DIR`` is unset by
+       default but ``TMPDIR`` is per-UID).
+    3. ``/tmp/hawcx/`` — requires explicit ``HAAP_SDK_ALLOW_TMP_IPC=1``
+       opt-in. The previous code silently fell back here; that
+       fallback let an attacker on the same host symlink-race the
+       socket parent dir. Now the SDK refuses to use ``/tmp/hawcx/``
+       unless the operator opts in.
+
+    Matches the Rust resolver in
+    ``haap-sdk-ipc::paths::ipc_socket_dir``.
+    """
     runtime = os.environ.get("XDG_RUNTIME_DIR")
     if runtime:
         return Path(runtime) / "hawcx"
-    return Path("/tmp/hawcx")
+    tmpdir = os.environ.get("TMPDIR")
+    if tmpdir:
+        return Path(tmpdir) / "hawcx"
+    if os.environ.get("HAAP_SDK_ALLOW_TMP_IPC") == "1":
+        return Path("/tmp/hawcx")
+    raise HawcxError(
+        "no IPC base dir found: set XDG_RUNTIME_DIR (preferred) or "
+        "TMPDIR, or set HAAP_SDK_ALLOW_TMP_IPC=1 to opt into the "
+        "legacy /tmp/hawcx/ path (not recommended — see README "
+        "'Threat model - IPC socket placement')."
+    )
 
 
 def default_endpoint_for(
