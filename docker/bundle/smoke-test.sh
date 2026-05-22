@@ -38,6 +38,37 @@ if [ ! -f .env ]; then
     fi
 fi
 
+# Pre-check: the bundle pulls both the SDK image (built and pushed by this
+# repo's release pipeline) AND the CAA image (built and published by a
+# separate repo, `hx_agent_client_admin_service`, on its own release
+# cadence). When the SDK tags ahead of CAA, the matching `hx-caa:${TAG}`
+# manifest doesn't exist yet — `docker compose pull` would fail with
+# `denied` from GHCR.
+#
+# Skip cleanly with exit 0 in that case so the release CI signal stays
+# meaningful: a red here means a real structural break (compose syntax,
+# entrypoint, env handling), not "we haven't tagged CAA yet."
+CAA_VERSION="${HAAP_VERSION:-v0.1.0-alpha.1}"
+CAA_IMG="ghcr.io/hawcx/hx-caa:${CAA_VERSION}"
+echo "=== Checking matching CAA image: ${CAA_IMG} ==="
+if ! docker manifest inspect "${CAA_IMG}" >/dev/null 2>&1; then
+    cat <<EOF
+
+Skipping bundle smoke test: ${CAA_IMG} is not published.
+
+The HAAP evaluation bundle pulls hx-caa and hx-agent-sdk together at the
+same version tag. hx-caa is released from a separate repository
+(hx_agent_client_admin_service) on its own cadence. When the SDK tags
+ahead, the bundle test waits for the matching CAA tag to appear.
+
+To enable end-to-end bundle verification at this release: tag
+${CAA_VERSION} in hx_agent_client_admin_service and re-run this job.
+EOF
+    exit 0
+fi
+echo "  manifest exists"
+
+echo ""
 echo "=== Pulling images ==="
 docker compose pull
 
