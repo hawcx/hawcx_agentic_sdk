@@ -46,6 +46,11 @@ decrypted response bodies over the local IPC socket.
 """
 
 from hawcx_haap.agent import HawcxAgent
+from hawcx_haap.auth_ipc import (
+    AuthenticatorClient,
+    EnrollmentRejected,
+    EnrollmentResult,
+)
 from hawcx_haap.errors import (
     HandshakeError,
     HawcxError,
@@ -64,6 +69,9 @@ __version__ = "0.1.0a10"
 __all__ = [
     "HawcxAgent",
     "AssemblerClient",
+    "AuthenticatorClient",
+    "EnrollmentResult",
+    "EnrollmentRejected",
     "ToolCallRequest",
     "ToolCallResponse",
     "TokenTransport",

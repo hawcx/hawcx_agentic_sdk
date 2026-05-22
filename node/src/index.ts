@@ -51,7 +51,11 @@
  */
 
 export { HawcxAgent, defaultEndpointFor } from "./agent";
-export type { HawcxAgentInvokeOptions } from "./agent";
+export type {
+  HawcxAgentInvokeOptions,
+  HawcxAgentEnrollOptions,
+  EnrollmentResult,
+} from "./agent";
 export {
   AssemblerClient,
   TokenTransport,

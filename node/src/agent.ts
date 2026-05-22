@@ -125,6 +125,55 @@ export interface HawcxAgentConnectByAgentIdOptions extends HawcxAgentOptions {
 }
 
 /**
+ * Construction options for `HawcxAgent.enroll` — runtime identity
+ * acquisition per HAAP CS v7.2.6 §4.2 (Tier-2 Agent Enrollment) and
+ * §5.2 (X3DH Mode B).
+ *
+ * **Skeleton — wire implementation lands in a follow-up.** The Python
+ * SDK currently ships the canonical client; this interface is here so
+ * Node consumers can type-check their integration code against the
+ * eventual API shape.
+ */
+export interface HawcxAgentEnrollOptions extends HawcxAgentOptions {
+  /** Authenticator slot identifier — e.g. `"researcher"`. */
+  name: string;
+  /**
+   * Single-use org-issued enrollment token from the Hawcx Admin
+   * Console. Treat as a credential — never log or persist on disk.
+   */
+  orgToken: string;
+  /** Optional agent_class (default `"default"`). */
+  agentClass?: string;
+  /**
+   * Override for the Authenticator's UDS/pipe path. Defaults to the
+   * canonical convention `{ipcDir}/{name}/auth-control.sock` (Unix) or
+   * `\\\\.\\pipe\\haap-{name}-auth-control` (Windows). Honors
+   * `HAAP_AUTH_CONTROL_SOCK` env var as well.
+   */
+  authenticatorSocket?: string;
+  index?: number;
+  ipcDir?: string;
+  /** Connect timeout for the post-enroll Assembler socket. */
+  timeoutMs?: number;
+  /** Timeout for the enrollment ceremony (X3DH round-trip to the AS). */
+  enrollTimeoutMs?: number;
+}
+
+/**
+ * Result of a successful `HawcxAgent.enroll` — mirrors the Python
+ * `EnrollmentResult` dataclass and the Rust
+ * `RegisterAgentResult::Enrolled` variant.
+ */
+export interface EnrollmentResult {
+  agentInstanceId: string;
+  clientId: string;
+  ikFingerprint: string;
+  sessionId: string;
+  alreadyEnrolled: boolean;
+  trustLevel?: string;
+}
+
+/**
  * High-level HAAP agent client. Connect once, invoke many times, close.
  *
  *     const agent = await HawcxAgent.connect(
@@ -182,6 +231,35 @@ export class HawcxAgent {
     return HawcxAgent.connect(
       defaultEndpointFor(agentId, options),
       options,
+    );
+  }
+
+  /**
+   * Acquire an agent identity at runtime (HAAP CS v7.2.6 §4.2) and connect
+   * to its Assembler.
+   *
+   * Drives the per-agent Authenticator over its control socket to perform
+   * X3DH Mode B (§5.2) against the configured AS using the supplied
+   * `orgToken`, then opens the Assembler agent socket for the resulting
+   * `agent_instance_id`.
+   *
+   * **Status — 2026-05-22 (v7.2.6 task #11):** the Python SDK ships the
+   * canonical implementation of this surface. The Node SDK exposes the
+   * type contract here so customers using `@hawcx/hawcx-haap` can compile
+   * against the same API; the wire client lands in a follow-up. Until
+   * then this method throws `Error("HawcxAgent.enroll not yet implemented
+   * in Node SDK — use the Python SDK or HawcxAgent.connectByAgentId")`.
+   *
+   * `orgToken` is a single-use bearer credential — do not persist or log.
+   */
+  static async enroll(
+    _options: HawcxAgentEnrollOptions,
+  ): Promise<HawcxAgent> {
+    throw new Error(
+      "HawcxAgent.enroll not yet implemented in Node SDK — " +
+        "use the Python SDK for runtime enrollment, or " +
+        "HawcxAgent.connectByAgentId with a pre-provisioned agent_id. " +
+        "Tracking: v7.2.6 task #11 follow-up.",
     );
   }
 

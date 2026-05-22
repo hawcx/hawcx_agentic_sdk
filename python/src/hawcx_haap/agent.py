@@ -145,6 +145,142 @@ class HawcxAgent:
             timeout_secs=timeout_secs,
         )
 
+    @classmethod
+    def enroll(
+        cls,
+        *,
+        name: str,
+        org_token: str,
+        principal_allowlist: list[str],
+        agent_class: str = "default",
+        authenticator_socket: str | None = None,
+        ipc_dir: Path | None = None,
+        index: int = 0,
+        connect_timeout_secs: float | None = 5.0,
+        enroll_timeout_secs: float | None = 30.0,
+    ) -> HawcxAgent:
+        """Acquire an agent identity at runtime and connect to its Assembler.
+
+        Per HAAP CS v7.2.6 §4.2 (Tier-2 Agent Enrollment) and §5.2 (X3DH
+        Mode B), this drives the per-agent Authenticator process to:
+
+        1. Generate ``IK_i`` (Ristretto255) — or load the supervisor-prepared
+           IK_i if the runtime was pre-staged via ``MSG_REGISTER_PREPARE_REQ``
+           (CS v7.1.1 §4.6.3).
+        2. Perform the X3DH ceremony against the configured AS using the
+           supplied ``org_token``.
+        3. Return the resulting ``agent_instance_id`` / ``session_id``.
+
+        After enrollment succeeds, this method opens the agent-Assembler
+        IPC socket for the new ``agent_instance_id`` and returns a fully
+        connected :class:`HawcxAgent`.
+
+        Parameters
+        ----------
+        name
+            Agent name used to address the Authenticator control socket
+            (default-path resolution: ``{ipc_dir}/{name}/auth-control.sock``).
+            For a supervisor-prepared deployment this MUST equal the
+            ``agent_id`` the supervisor passed to ``MSG_REGISTER_PREPARE_REQ``;
+            in greenfield demos it is any operator-chosen identifier.
+        org_token
+            The §4.2 org-issued enrollment token. Forwarded to the
+            Authenticator on the wire; the Authenticator validates it
+            against the AS during X3DH. Treat as a credential — never log.
+        principal_allowlist
+            Same semantics as :meth:`connect`. Required keyword arg.
+        agent_class
+            Optional agent class string (default ``"default"``); the AS
+            uses this for policy bundle selection.
+        authenticator_socket
+            Override for the Authenticator control-socket path. Defaults
+            to the canonical convention. ``HAAP_AUTH_CONTROL_SOCK`` env
+            var also overrides (matches the Rust supervisor).
+        ipc_dir, index, connect_timeout_secs, enroll_timeout_secs
+            Plumbing. ``enroll_timeout_secs`` is longer than the
+            assembler-connect timeout because §4.2 enrollment includes
+            a full X3DH round-trip to the AS.
+
+        Raises
+        ------
+        EnrollmentRejected
+            The Authenticator returned ``Degraded`` or an error envelope.
+        IpcError, HawcxError
+            Transport / shape failures.
+
+        Security notes
+        --------------
+        ``org_token`` is a single-use bearer credential per §4.2. Do not
+        persist it on disk or include it in log messages. The SDK forwards
+        it directly to the local Authenticator over the per-UID-restricted
+        control socket (UDS owner-uid check + 0o700 parent-dir mode
+        enforced by :func:`hawcx_haap.ipc._validate_ipc_socket_path`).
+
+        Examples
+        --------
+        ::
+
+            agent = HawcxAgent.enroll(
+                name="researcher",
+                org_token=os.environ["HAAP_ORG_TOKEN"],
+                principal_allowlist=["alice@example.com"],
+            )
+        """
+        from hawcx_haap.auth_ipc import (
+            AuthenticatorClient,
+            default_auth_control_socket_for,
+        )
+
+        allowlist = _validate_principal_allowlist(principal_allowlist)
+        if not name:
+            raise HawcxError("HawcxAgent.enroll requires a non-empty `name`")
+        if not org_token:
+            raise HawcxError(
+                "HawcxAgent.enroll requires a non-empty `org_token`; "
+                "obtain one from the Hawcx Admin Console (CS v7.2.6 §4.2)"
+            )
+        auth_endpoint = authenticator_socket or default_auth_control_socket_for(
+            name, ipc_dir=ipc_dir
+        )
+
+        # Phase 1 — Authenticator-driven enrollment ceremony.
+        with AuthenticatorClient.connect(
+            auth_endpoint, timeout_secs=enroll_timeout_secs
+        ) as auth:
+            result = auth.register_agent(
+                agent_class=agent_class,
+                subject_user_id=name,
+                org_token=org_token,
+                prepared_agent_id=name,
+            )
+
+        # Phase 2 — connect to the Assembler agent socket for the
+        # newly-enrolled identity. The supervisor wires the Assembler
+        # against the same agent_id so the default-endpoint convention
+        # resolves correctly.
+        client = AssemblerClient.connect(
+            default_endpoint_for(
+                result.agent_instance_id, index=index, ipc_dir=ipc_dir
+            ),
+            timeout_secs=connect_timeout_secs,
+        )
+        agent = cls(client, allowlist)
+        # Attach enrollment metadata so callers can introspect the
+        # acquired identity (useful for logging + correlation, but the
+        # session keys remain inside the Assembler process).
+        agent._enrollment = result  # type: ignore[attr-defined]
+        return agent
+
+    @property
+    def enrollment(self) -> Any:  # type: ignore[no-untyped-def]
+        """The :class:`EnrollmentResult` set by :meth:`enroll`, or ``None``.
+
+        Returns ``None`` for agents constructed via :meth:`connect` /
+        :meth:`connect_by_agent_id` (the SDK has no enrollment context
+        for pre-provisioned identities).
+        """
+        return getattr(self, "_enrollment", None)
+
     def invoke(
         self,
         *,

@@ -20,13 +20,29 @@ Prerequisites
 -------------
 - The customer-side pipeline must be running (``haap-supervisor`` installed
   via the hx_agentic_sdk release tarball or Docker image).
-- ``HAAP_AGENT_ID`` — pre-provisioned agent identity (Hawcx Admin Console
-  → CAA → Authenticator flow per CS v7.2.5 §4.6.3).
 - ``HAAP_ALLOWED_PRINCIPALS`` — comma-separated list of end-user IDs that
   this agent instance is permitted to act on behalf of.  Example::
 
       export HAAP_ALLOWED_PRINCIPALS="alice@example.com,bob@example.com"
 
+- Identity acquisition (one of):
+
+  * **Runtime enrollment (preferred, v7.2.6 §4.2):** set
+    ``HAAP_ORG_TOKEN`` to a single-use org-issued enrollment token from
+    the Hawcx Admin Console. The SDK calls ``HawcxAgent.enroll()`` to
+    drive the Authenticator through X3DH Mode B and acquire an agent
+    identity at process start.
+  * **Pre-provisioned (legacy / CI):** set ``HAAP_AGENT_ID`` to a
+    previously-enrolled ``agent_instance_id``. The SDK uses
+    ``HawcxAgent.connect_by_agent_id()`` directly. This path is
+    preserved for CI and for operators who provision identity through
+    the Admin Console → CAA → Authenticator flow per CS §4.6.3.
+
+  If both are set, ``HAAP_AGENT_ID`` wins (explicit > inferred).
+
+- ``HAAP_AGENT_NAME`` (optional) — friendly name used as the
+  Authenticator's slot identifier during runtime enrollment. Defaults
+  to ``"researcher"``.
 - ``HAAP_RS_BASE_URL`` (optional) — base URL of the protected resource
   server; defaults to ``https://api.example.com``.
 
@@ -63,7 +79,20 @@ def _require_env(var: str) -> str:
     return val
 
 
-AGENT_ID: str = _require_env("HAAP_AGENT_ID")
+# Identity acquisition: prefer runtime enrollment (v7.2.6 §4.2) when an
+# org_token is available; fall back to the pre-provisioned agent_id path
+# for CI and for operators who use the Admin Console → CAA flow.
+PREPROVISIONED_AGENT_ID: str | None = os.environ.get("HAAP_AGENT_ID")
+ORG_TOKEN: str | None = os.environ.get("HAAP_ORG_TOKEN")
+AGENT_NAME: str = os.environ.get("HAAP_AGENT_NAME", "researcher")
+
+if not PREPROVISIONED_AGENT_ID and not ORG_TOKEN:
+    print(
+        "error: set HAAP_AGENT_ID (legacy/CI) or HAAP_ORG_TOKEN "
+        "(runtime enrollment, preferred)",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 # The allowlist is the closed set of principals this agent may act on behalf of.
 # Populate from an operator-controlled source (env var, secrets manager, etc.).
@@ -163,16 +192,42 @@ def build_research_crew(
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 
+def _open_agent() -> HawcxAgent:
+    """Open a HawcxAgent using whichever identity-acquisition path is wired.
+
+    Order of precedence:
+
+    1. ``HAAP_AGENT_ID`` set → ``connect_by_agent_id`` (legacy / CI path).
+    2. ``HAAP_ORG_TOKEN`` set → ``HawcxAgent.enroll()`` (runtime §4.2
+       enrollment; the preferred path for v7.2.6 demos).
+
+    The two paths produce indistinguishable :class:`HawcxAgent`
+    instances from the caller's perspective; the only difference is
+    where the ``agent_instance_id`` came from.
+    """
+    if PREPROVISIONED_AGENT_ID:
+        return HawcxAgent.connect_by_agent_id(
+            PREPROVISIONED_AGENT_ID,
+            principal_allowlist=ALLOWED_PRINCIPALS,
+        )
+    assert ORG_TOKEN is not None  # guarded at module load
+    return HawcxAgent.enroll(
+        name=AGENT_NAME,
+        org_token=ORG_TOKEN,
+        principal_allowlist=ALLOWED_PRINCIPALS,
+    )
+
+
 def main() -> int:
     # One HawcxAgent for the lifetime of this process — one Assembler connection,
     # all session keys held inside the Assembler binary, never in this process.
-    with HawcxAgent.connect_by_agent_id(
-        AGENT_ID,
-        # principal_allowlist is sourced from operator config above.
-        # The SDK rejects any acting_for_user value not in this set
-        # before a single IPC byte is written.
-        principal_allowlist=ALLOWED_PRINCIPALS,
-    ) as haap_agent:
+    with _open_agent() as haap_agent:
+        if haap_agent.enrollment is not None:
+            print(
+                f"Enrolled new identity: "
+                f"agent_instance_id={haap_agent.enrollment.agent_instance_id} "
+                f"session_id={haap_agent.enrollment.session_id}"
+            )
         for user_id in ALLOWED_PRINCIPALS:
             print(f"\n{'=' * 60}")
             print(f"Running research crew for: {user_id}")
