@@ -42,7 +42,12 @@ describe("framing", () => {
   });
 });
 
-describe("AssemblerClient (UDS)", () => {
+// Skips on Windows: the AssemblerClient transport currently binds Unix
+// domain sockets, which Node on the Windows GHA runner image rejects
+// with EACCES. Named-pipe parity for the Node binding mirrors the Rust
+// SDK's CS v7.2.5 §39.12.2 implementation (hx_labs::haap_ipc::win_dacl)
+// and is tracked as a follow-up.
+describe.skipIf(process.platform === "win32")("AssemblerClient (UDS)", () => {
   let mock: MockAssembler;
 
   beforeEach(async () => {
@@ -124,9 +129,32 @@ describe("AssemblerClient (UDS)", () => {
   });
 });
 
-describe("AssemblerClient handshake validation", () => {
+// Windows: same UDS portability gap as the (UDS) block above.
+// Linux: these tests bind sockets under their own per-test dir (created
+// via mkdtempSync with mode 0o700) rather than dropping straight into
+// /tmp, because the AssemblerClient enforces the H-3/M-3 parent-dir
+// hardening from PR #14 (refuses /tmp because it's owned by uid 0 and
+// world-writable). MockAssembler uses the same per-user-dir pattern.
+describe.skipIf(process.platform === "win32")("AssemblerClient handshake validation", () => {
+  const fs = require("node:fs") as typeof import("node:fs");
+  const os = require("node:os") as typeof import("node:os");
+  const path = require("node:path") as typeof import("node:path");
+
+  let parentDir: string;
+  beforeEach(() => {
+    parentDir = fs.mkdtempSync(path.join(os.tmpdir(), "hawcx-hs-"));
+    fs.chmodSync(parentDir, 0o700);
+  });
+  afterEach(() => {
+    try {
+      fs.rmSync(parentDir, { recursive: true, force: true });
+    } catch {
+      /* best-effort cleanup */
+    }
+  });
+
   it("throws HandshakeError when peer major version is wrong", async () => {
-    const socketPath = `${(await import("node:os")).tmpdir()}/hawcx-wrong-version-${Date.now()}.sock`;
+    const socketPath = path.join(parentDir, `wrong-version-${Date.now()}.sock`);
     const server = net.createServer((sock) => {
       sock.once("data", () => {
         const reply = Buffer.allocUnsafe(9);
@@ -153,7 +181,7 @@ describe("AssemblerClient handshake validation", () => {
   });
 
   it("throws IpcError when peer claims a non-Assembler role", async () => {
-    const socketPath = `${(await import("node:os")).tmpdir()}/hawcx-wrong-role-${Date.now()}.sock`;
+    const socketPath = path.join(parentDir, `wrong-role-${Date.now()}.sock`);
     const server = net.createServer((sock) => {
       sock.once("data", () => {
         const reply = Buffer.allocUnsafe(9);
