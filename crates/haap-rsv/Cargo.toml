@@ -6,11 +6,11 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Hawcx HAAP Verifier — embeddable §9 16-step verification cascade for MCP server operators"
+description = "Hawcx HAAP Verifier — §9 16-step verification cascade (shipped as binary/Docker, not as a library crate)"
 keywords = ["hawcx", "haap", "agent", "auth", "mcp"]
 categories = ["authentication", "cryptography"]
 readme = "README.md"
-publish = true
+publish = false
 
 [dependencies]
 haap-sdk-types = { workspace = true }
