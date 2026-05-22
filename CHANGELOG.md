@@ -6,10 +6,20 @@ versions track each language surface independently (Rust crate
 versions in `Cargo.toml`, Node version in `node/package.json`, Python
 version in `python/pyproject.toml`).
 
-## [v0.1.0-alpha.9] - 2026-05-21
+## [v0.1.0-alpha.10] - 2026-05-22
 
-Release-pipeline polish only. No protocol, SDK API, or runtime
-behavior changes vs. alpha.8.
+Re-tag of the alpha.9 content on top of #18's smoke-test fix.
+
+The `v0.1.0-alpha.9` tag was pushed early (at commit `9c3f557`, the
+merge of #17) **before** #18 was merged. The resulting release run
+succeeded and published 5 tarballs, but those artifacts pre-date the
+smoke-test self-skip fix from #18, so the alpha.9 run still showed
+the bundle smoke test as red (with the old "denied" error). Rather
+than retarget the immutable alpha.9 tag and create an artifact/tag
+mismatch, this release supersedes alpha.9 cleanly.
+
+Contents are identical to what alpha.9 intended to ship: PRs #17 +
+#18. No protocol, SDK API, or runtime behavior changes vs. alpha.8.
 
 ### Build / Release / CI
 
@@ -37,7 +47,7 @@ behavior changes vs. alpha.8.
   failure (compose syntax, entrypoint break, env validation crash,
   port collision) now correctly blocks the release.
 
-Behavioral matrix for the smoke job after alpha.9:
+Behavioral matrix for the smoke job after alpha.10:
 
 | Condition | Smoke job |
 |---|---|
