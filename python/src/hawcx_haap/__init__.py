@@ -60,7 +60,7 @@ from hawcx_haap.ipc import (
     ToolCallResponse,
 )
 
-__version__ = "0.1.0a1"
+__version__ = "0.1.0a10"
 __all__ = [
     "HawcxAgent",
     "AssemblerClient",

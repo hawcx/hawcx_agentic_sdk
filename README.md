@@ -36,15 +36,15 @@ in-process embedding.
 ### Tarball (recommended for customer hosts)
 
 ```bash
-curl -L https://github.com/hawcx/hawcx_agentic_sdk/releases/download/v0.1.0-alpha.7/hx-agent-sdk-v0.1.0-alpha.7-x86_64-unknown-linux-gnu.tar.gz \
+curl -L https://github.com/hawcx/hawcx_agentic_sdk/releases/download/v0.1.0-alpha.10/hx-agent-sdk-v0.1.0-alpha.10-x86_64-unknown-linux-gnu.tar.gz \
     | tar -xz -C /usr/local
-export PATH=/usr/local/hx-agent-sdk-v0.1.0-alpha.7-x86_64-unknown-linux-gnu/bin:$PATH
+export PATH=/usr/local/hx-agent-sdk-v0.1.0-alpha.10-x86_64-unknown-linux-gnu/bin:$PATH
 ```
 
 ### Docker
 
 ```bash
-docker pull ghcr.io/hawcx/hx-agent-sdk:v0.1.0-alpha.7
+docker pull ghcr.io/hawcx/hx-agent-sdk:v0.1.0-alpha.10
 # Default ENTRYPOINT is haap-supervisor; override with --entrypoint for the others.
 ```
 
