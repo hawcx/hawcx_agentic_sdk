@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hawcx-crewai"
+version = "0.1.0a1"
+description = "CrewAI BaseTool adapter for the Hawcx Agent Authentication Protocol (HAAP). Wraps a HAAP-authenticated tool call as a drop-in CrewAI tool with per-user principal tracking and Pattern Y (§47) credential isolation."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Hawcx Inc." }]
+keywords = ["haap", "hawcx", "agent", "authentication", "crewai", "tool", "tbac"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Framework :: Pydantic",
+]
+dependencies = [
+    "hawcx-haap>=0.1.0a10",
+    "crewai>=0.51",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+    "pytest-asyncio>=0.21",
+    "mypy>=1.5",
+    "ruff>=0.4",
+]
+
+[project.urls]
+Homepage = "https://github.com/hawcx/hawcx_agentic_sdk"
+Repository = "https://github.com/hawcx/hawcx_agentic_sdk"
+Issues = "https://github.com/hawcx/hawcx_agentic_sdk/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = false
+ignore_missing_imports = true
+files = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]

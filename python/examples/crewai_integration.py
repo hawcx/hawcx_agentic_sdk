@@ -34,22 +34,20 @@ Install
 -------
 ::
 
-    pip install "crewai>=0.51" "hawcx-haap"
+    pip install "hawcx-crewai"
+
+(The ``hawcx-crewai`` package depends on ``hawcx-haap`` and ``crewai``, so
+no other installs are required.)
 """
 
 from __future__ import annotations
 
-import json
 import os
 import sys
-from typing import Any, Type
 
 from crewai import Agent, Crew, Process, Task
-from crewai.tools import BaseTool
-from pydantic import BaseModel, Field
-
-from hawcx_haap import HawcxAgent, RequestRejected
-from hawcx_haap.errors import HawcxError
+from hawcx_crewai import make_document_tool, make_search_tool
+from hawcx_haap import HawcxAgent
 
 
 # ── Operator config ──────────────────────────────────────────────────────────
@@ -79,98 +77,6 @@ ALLOWED_PRINCIPALS: list[str] = [
 RS_BASE_URL: str = os.environ.get("HAAP_RS_BASE_URL", "https://api.example.com")
 
 
-# ── Tool input schemas ────────────────────────────────────────────────────────
-
-
-class SearchInput(BaseModel):
-    query: str = Field(description="Search query string.")
-    user_principal_id: str = Field(
-        description=(
-            "ID of the end-user on whose behalf the search is performed. "
-            "Must be one of the principals registered for this agent."
-        )
-    )
-
-
-class DocumentInput(BaseModel):
-    document_id: str = Field(description="Opaque document identifier to retrieve.")
-    user_principal_id: str = Field(
-        description="ID of the end-user on whose behalf the document is fetched."
-    )
-
-
-# ── Tool factories (closure pattern avoids Pydantic arbitrary-type issues) ────
-
-
-def make_search_tool(agent: HawcxAgent) -> BaseTool:
-    """Return a CrewAI tool that searches via HAAP for a given user principal."""
-
-    class _HaapSearchTool(BaseTool):
-        name: str = "hawcx_search"
-        description: str = (
-            "Search the organisation's protected knowledge base via Hawcx HAAP. "
-            "Always pass the user_principal_id you were given for this task."
-        )
-        args_schema: Type[BaseModel] = SearchInput
-
-        def _run(self, query: str, user_principal_id: str, **_: Any) -> str:
-            try:
-                resp = agent.invoke_for(
-                    user_principal_id,
-                    target_rs_url=f"{RS_BASE_URL}/search",
-                    http_method="POST",
-                    headers={"Content-Type": "application/json"},
-                    tool="search",
-                    action=["read"],
-                    body=json.dumps({"query": query}).encode(),
-                )
-            except RequestRejected as exc:
-                return f"[search rejected by gateway: {exc.reason}]"
-            except HawcxError as exc:
-                return f"[hawcx error: {exc}]"
-
-            if resp.http_status != 200:
-                return f"[search HTTP {resp.http_status}]"
-            return resp.body.decode("utf-8", errors="replace")
-
-    return _HaapSearchTool()
-
-
-def make_document_tool(agent: HawcxAgent) -> BaseTool:
-    """Return a CrewAI tool that fetches a single document via HAAP."""
-
-    class _HaapDocumentTool(BaseTool):
-        name: str = "hawcx_get_document"
-        description: str = (
-            "Retrieve a specific document by ID from the protected document store. "
-            "Always pass the user_principal_id you were given for this task."
-        )
-        args_schema: Type[BaseModel] = DocumentInput
-
-        def _run(self, document_id: str, user_principal_id: str, **_: Any) -> str:
-            try:
-                resp = agent.invoke_for(
-                    user_principal_id,
-                    target_rs_url=f"{RS_BASE_URL}/documents/{document_id}",
-                    http_method="GET",
-                    tool="documents",
-                    action=["read"],
-                    resource=document_id,
-                )
-            except RequestRejected as exc:
-                return f"[document retrieval rejected: {exc.reason}]"
-            except HawcxError as exc:
-                return f"[hawcx error: {exc}]"
-
-            if resp.http_status == 404:
-                return f"[document {document_id!r} not found or not accessible]"
-            if resp.http_status != 200:
-                return f"[retrieval HTTP {resp.http_status}]"
-            return resp.body.decode("utf-8", errors="replace")
-
-    return _HaapDocumentTool()
-
-
 # ── Crew builder ──────────────────────────────────────────────────────────────
 
 
@@ -190,8 +96,12 @@ def build_research_crew(
     passed when constructing ``haap_agent`` — the SDK enforces this
     synchronously at ``invoke_for`` call time.
     """
-    search_tool = make_search_tool(haap_agent)
-    doc_tool = make_document_tool(haap_agent)
+    # hawcx_crewai provides the CrewAI BaseTool adapter. The factory
+    # helpers preserve the pre-v0.1.0a11 ergonomic surface; new code can
+    # instead construct ``HawcxTool`` directly for finer control over
+    # provider class, tool_id (§47.4 binding), and endpoint.
+    search_tool = make_search_tool(haap_agent, rs_base_url=RS_BASE_URL)
+    doc_tool = make_document_tool(haap_agent, rs_base_url=RS_BASE_URL)
 
     researcher = Agent(
         role="Research Analyst",
