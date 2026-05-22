@@ -6,6 +6,49 @@ versions track each language surface independently (Rust crate
 versions in `Cargo.toml`, Node version in `node/package.json`, Python
 version in `python/pyproject.toml`).
 
+## [v0.1.0-alpha.9] - 2026-05-21
+
+Release-pipeline polish only. No protocol, SDK API, or runtime
+behavior changes vs. alpha.8.
+
+### Build / Release / CI
+
+- **Language-binding test portability** (#17): the `release-node` and
+  `release-python` workflows now go green on Windows and Linux.
+  - Python (`python/tests/conftest.py`): the `short_sock_path`
+    fixture now skips on Windows, matching the existing
+    `mock_assembler` precedent. Closes the
+    `AttributeError: module 'socket' has no attribute 'AF_UNIX'`
+    failures on Windows py3.10–3.13.
+  - Node (`node/tests/ipc.test.ts`, `node/tests/agent.test.ts`):
+    the UDS-using `describe` blocks are wrapped with
+    `describe.skipIf(process.platform === "win32")`, closing the
+    Windows `EACCES` failures. The two `AssemblerClient handshake
+    validation` tests now create their own per-user temp dirs via
+    `fs.mkdtempSync(..., { mode: 0o700 })` instead of dropping
+    sockets into `/tmp`, closing the Linux regression introduced by
+    the H-3 / M-3 parent-dir hardening in alpha.7.
+- **Bundle smoke test signal** (#18): the `bundle_smoke_test` job
+  no longer goes red on every release tag. `docker/bundle/smoke-test.sh`
+  pre-checks `docker manifest inspect ghcr.io/hawcx/hx-caa:${HAAP_VERSION}`
+  before `docker compose pull`. If the matching CAA tag isn't
+  published yet, the script exits 0 with a clear explanation. The
+  workflow drops `continue-on-error: true`, so any OTHER smoke
+  failure (compose syntax, entrypoint break, env validation crash,
+  port collision) now correctly blocks the release.
+
+Behavioral matrix for the smoke job after alpha.9:
+
+| Condition | Smoke job |
+|---|---|
+| SDK tagged; matching `hx-caa` tag not yet published | ✓ (skip message in logs) |
+| SDK + `hx-caa` tagged at same version | runs end-to-end; ✓ on success, ✗ on real failure |
+| Real structural break at any time | ✗ (blocks the release) |
+
+The next time `hx_agent_client_admin_service` publishes a matching
+`hx-caa:v0.1.0-alpha.X` tag and an SDK tag is pushed at the same
+version, the smoke job will exercise the bundle end-to-end.
+
 ## [v0.1.0-alpha.8] - 2026-05-21
 
 Release-pipeline fixes only. No protocol, SDK API, or runtime
