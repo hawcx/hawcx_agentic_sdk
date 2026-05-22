@@ -1,4 +1,4 @@
-# hx_agentic_sdk
+# hawcx_agentic_sdk
 
 Customer-facing distribution of the **Hawcx Agent Authentication
 Protocol** (HAAP Canonical Specification v7.2.0).
@@ -14,18 +14,18 @@ a multi-arch Docker image:
 
 | Binary | Source | Role |
 |---|---|---|
-| `haap-auth-bin` | `hx_labs` | Authenticator — holds IK_i, performs X3DH against AS |
-| `haap-tqs-precompute-bin` | `hx_labs` | TQS pre-compute side — Schnorr commitment pre-minting |
-| `haap-tqs-jit-bin` | `hx_labs` | TQS just-in-time side — request-time token completion |
-| `haap-assembler-bin` | `hx_labs` | Assembler — K_req/K_resp + single-flight |
-| `haap-eib-bin` | `hx_labs` | External Identity Broker — holds OAuth bearer tokens (Pattern Z, §45) |
-| `haap-supervisor` | `hx_labs` | Pipeline orchestrator — spawns the five child processes |
+| `haap-auth-bin` | `hx_agent_client_auth_service` | Authenticator — holds IK_i, performs X3DH against AS |
+| `haap-tqs-precompute-bin` | `hx_agent_client_auth_service` | TQS pre-compute side — Schnorr commitment pre-minting |
+| `haap-tqs-jit-bin` | `hx_agent_client_auth_service` | TQS just-in-time side — request-time token completion |
+| `haap-assembler-bin` | `hx_agent_client_auth_service` | Assembler — K_req/K_resp + single-flight |
+| `haap-eib-bin` | `hx_agent_client_auth_service` | External Identity Broker — holds OAuth bearer tokens (Pattern Z, §45) |
+| `haap-supervisor` | `hx_agent_client_auth_service` | Pipeline orchestrator — spawns the five child processes |
 | `haap-rsv` | SDK (`haap-rsv-bin`) | MCP-server-side HAAP Verifier HTTP API |
 | `haap-sdk` | SDK (`haap-sdk-cli`) | Testing/demo CLI |
 
-Six binaries come from `hx_labs` directly (Option X distribution
-model — the SDK is a distribution source, not a wrapper layer).
-Two binaries come from this repo's library crates.
+Six binaries come from `hx_agent_client_auth_service` directly
+(Option X distribution model — the SDK is a distribution source, not
+a wrapper layer). Two binaries come from this repo's library crates.
 
 In addition, the [`haap-rsv`](https://crates.io/crates/haap-rsv)
 library is publishable to crates.io for Rust MCP servers that want
@@ -36,7 +36,7 @@ in-process embedding.
 ### Tarball (recommended for customer hosts)
 
 ```bash
-curl -L https://github.com/hawcx/hx_agentic_sdk/releases/download/v0.1.0-alpha.7/hx-agent-sdk-v0.1.0-alpha.7-x86_64-unknown-linux-gnu.tar.gz \
+curl -L https://github.com/hawcx/hawcx_agentic_sdk/releases/download/v0.1.0-alpha.7/hx-agent-sdk-v0.1.0-alpha.7-x86_64-unknown-linux-gnu.tar.gz \
     | tar -xz -C /usr/local
 export PATH=/usr/local/hx-agent-sdk-v0.1.0-alpha.7-x86_64-unknown-linux-gnu/bin:$PATH
 ```
@@ -50,13 +50,16 @@ docker pull ghcr.io/hawcx/hx-agent-sdk:v0.1.0-alpha.7
 
 ### From source (development)
 
-Requires `~/Projects/hx_labs/` as a sibling checkout:
+Requires `hx_agent_client_auth_service/` and `hx_agent_crypto_core/`
+as sibling checkouts (the SDK workspace and the client auth service
+both path-dep into `../hx_agent_crypto_core/crates/*`):
 
 ```bash
 cd ~/Projects
-git clone git@github.com:hawcx/hx_labs.git        # private repo
-git clone git@github.com:hawcx/hx_agentic_sdk.git
-cd hx_agentic_sdk
+git clone git@github.com:hawcx/hx_agent_crypto_core.git         # private repo
+git clone git@github.com:hawcx/hx_agent_client_auth_service.git # private repo
+git clone git@github.com:hawcx/hawcx_agentic_sdk.git
+cd hawcx_agentic_sdk
 cargo build --release --workspace
 ```
 
@@ -137,5 +140,5 @@ for the full closure breakdown.
 ## Historical reference
 
 Pre-Option-X work (PR #1, PR #2) is preserved on the
-[`main-legacy-pre-option-x`](https://github.com/hawcx/hx_agentic_sdk/tree/main-legacy-pre-option-x)
+[`main-legacy-pre-option-x`](https://github.com/hawcx/hawcx_agentic_sdk/tree/main-legacy-pre-option-x)
 branch.

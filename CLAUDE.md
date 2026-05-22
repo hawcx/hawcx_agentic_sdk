@@ -1,110 +1,203 @@
 # hawcx_agentic_sdk — Claude Code Context
 
-This is the **Hawcx Agentic Authentication SDK**. The repo is a Cargo
-workspace plus a sibling Node package. Read this before reasoning about
-how the SDK fits into the broader Hawcx HAAP stack.
+The customer-facing **HAAP SDK and distribution channel**. Packages a
+language-binding surface (Node + Python UDS clients), the RSV library +
+binary (`haap-rsv` / `haap-rsv-bin`), and a multi-binary bundle of the
+customer-side MCP host process group as platform tarballs +
+`ghcr.io/hawcx/hx-agent-sdk` OCI image.
 
-## What this repo ships
+**Critical architectural fact:** the Node and Python SDKs are **pure-
+language UDS IPC clients**, not native (NAPI / pyo3 / WASM) modules.
+They speak a framed binary protocol (`[u32 BE len][u8 type][JSON
+payload]`, 64 KiB cap) to the local Assembler binary. No network
+egress. Everything network happens downstream of the supervisor.
 
-| Layer | Path | What it is |
-|---|---|---|
-| Rust workspace | `crates/` | The 5-binary `haap-supervisor` pipeline (Authenticator / TQS-precompute / TQS-jit / Assembler / Supervisor) that runs **customer-side**, co-located with the agent process. |
-| Node SDK | `node/` (npm package `@hawcx/hawcx-haap`) | Thin **local Unix-domain-socket IPC client** that agent code (typically Node.js) imports to talk to the local Assembler binary. **Not** a network client. |
+## Version
 
-## Critical architectural facts (often misunderstood)
+- **HAAP Protocol Spec:** v7.2.5 (§45.7.5 MCP transport bearer carriage,
+  2026-05-20). Canonical at
+  `/Users/raviramaraju/Projects/hx_agent_canonical_spec/spec/canonical/HAAP-Canonical-Specification-v7_2_5.md`.
+  README + CLAUDE + pyproject in this repo currently cite v7.2.0 — bump
+  pending.
+- **SDK version (this repo):** `0.1.0-alpha.7` across crates / npm /
+  PyPI lines. `hx_labs` historically cited "SDK Version: 0.8.0", which
+  referred to the legacy in-monorepo `packages/@hx/*` + `ts/haap-ipc/`
+  versions — independent timeline; resolve before public publish (see
+  blockers).
 
-1. **The Node SDK does NOT make network calls.** It connects to a local
-   Unix socket and speaks a framed binary protocol
-   (`[u32 BE len][u8 type][JSON payload]`, 64 KiB cap) to the local
-   Assembler binary. All "network" happens inside the supervisor
-   pipeline, downstream of the SDK.
+## Repo topology
 
-2. **The 5-binary supervisor pipeline is a separate deployment unit**
-   from any agent. In K8s, it's a sidecar Pod sharing an `emptyDir` UDS
-   with the agent container — analogous to how the CAA runs two
-   containers in one Pod with a shared socket.
+One of 11 sibling repos replacing the retiring `hx_labs` monorepo. Full
+map:
+`/Users/raviramaraju/Projects/hx_agent_canonical_spec/HAAP-TOPOLOGY-MAPPING.md`.
 
-3. **The CAA is upstream of the SDK request path, NOT in it.** The
-   Customer Admin Agent provisions agent identity via Admin Console and
-   writes `SubstrateMaterial` to customer Redis. The supervisor reads
-   that material on startup. After that, agent requests flow
-   `agent code → SDK → Assembler UDS → TQS/Authenticator → RS`. The CAA
-   is offline-path infrastructure, not a peer of the running agent.
+This repo sits on the **customer (data plane) embed-side** of the trust
+boundary — it ships the artifacts customer integrators install. It owns
+SDK ergonomics around **§5.2 session setup**, **§7 token mint API
+surface**, **§9 RSV cascade (via `haap-rsv` crate, publishable to
+crates.io)**, **§24 clarification callbacks**, **§34 MCP gateway client**,
+and the **packaged bundle** of the (planned) `hx_agent_client_auth_service`
+MCP host binaries. Does NOT own the protocol crates themselves — those
+are consumed from `hx_labs` (today) and will move to the planned
+`hx_agent_crypto_core` repo.
 
-## Node SDK API surface
+## Product URLs
 
-```js
-HawcxAgent.connect(endpoint) -> Promise<HawcxAgent>
-HawcxAgent.connectByAgentId(agentId) -> Promise<HawcxAgent>
-agent.invoke({ targetRsUrl, httpMethod, tool, action, body, ... }) -> Promise<ToolCallResponse>
-agent.invokeFor(userPrincipalId, opts) -> Promise<ToolCallResponse>
-agent.sendClarificationAnswer({...}) -> Promise<void>
-agent.close()
-defaultEndpointFor(agentId) -> string
+- **npm:** `@hawcx/hawcx-haap` (NOT yet published; registry 404)
+- **PyPI:** `hawcx-haap` (publish workflow exists; status unconfirmed)
+- **crates.io:** `haap-rsv` (publish flag set, not yet pushed)
+- **OCI:** `ghcr.io/hawcx/hx-agent-sdk` (via `Dockerfile`)
+
+## Structure
+
+7-member Cargo workspace + sibling Node + Python packages:
+
+```
+crates/
+  haap-sdk-types/         Shared SDK types (substrate, errors, IPC payloads)
+  haap-sdk-ipc/           UDS framed protocol; peer-UID verification (SO_PEERCRED)
+  haap-sdk-sealer/        At-rest sealing: Argon2 + AES-GCM + OS keychain
+  haap-substrate-reader/  Redis-backed substrate reader (§40 split)
+  haap-rsv/               §9 cascade library — publish = true (crates.io)
+  haap-rsv-bin/           Standalone haap-rsv HTTP/UDS binary
+  haap-sdk-cli/           haap-sdk operator CLI binary
+node/                     @hawcx/hawcx-haap — pure TypeScript UDS client (no NAPI)
+python/                   hawcx-haap — pure Python UDS client (no pyo3); pipe_win.py for Windows
+docker/bundle/            docker-compose-driven local eval bundle (CAA + RSV + Redis)
+compose/                  docker-compose.dev.yml
+.github/workflows/
+  release.yml             Rust + Docker tarballs
+  release-node.yml        npm publish
+  release-python.yml      PyPI publish
 ```
 
-Errors: `HawcxError` / `IpcError` / `HandshakeError` / `RequestRejected`.
+## Key Commands
 
-## Publishing status (as of 2026-05-20)
+- `cargo build --release` (needs sibling `hx_labs/` — see blockers)
+- `cargo test --workspace`
+- `cargo clippy --workspace -- -D warnings`
+- `pnpm --filter @hawcx/hawcx-haap test` (in `node/`)
+- `pytest` (in `python/`)
+- `cargo bench -p haap-rsv` — cascade perf
 
-`@hawcx/hawcx-haap` is **NOT yet published** to npm — registry returns
-404. Consumers that need it today must:
-- Clone this repo
-- Build `node/`
-- Reference it via `package.json` "file:" or vendor it
+## Conventions
 
-The demo at `/Users/vishwa/workspace/hawcx_agentic_sdk_demo/` uses the
-vendor approach. When publishing happens, that demo should flip its
-dependency.
+- Pure-language SDKs only. No NAPI / pyo3 / WASM in `node/` or
+  `python/`. If you find yourself reaching for `napi-rs`, stop — the
+  design choice is deliberate (local UDS speaks the wire protocol
+  natively in any language).
+- `subtle = "2.6"` hard-pinned for constant-time compare via the
+  vetted hx_labs chain. Preserve.
+- `aes-gcm 0.10` AEAD only; AEAD modes only across the stack. No MD5,
+  no SHA-1, no DIY crypto.
+- `protoc` SHA-pinned in Dockerfile (L-2 hardening, 2026-05-20). Don't
+  swap to apt without re-pinning.
+- Distroless `cc-debian12` runtime. ENTRYPOINT defaults to
+  `haap-supervisor`; the `rsv` compose service explicitly overrides it
+  to run RSV. This composition smell is tracked (F-9).
+- Workspace-level `[workspace.dependencies]` is the single pin-point
+  for third-party crate versions. Add new deps there.
 
-## The full HAAP stack (where this repo fits)
+## Bundle composition
 
-| Repo | Path | Role |
-|---|---|---|
-| `hawcx_agentic_sdk` (this) | `/Users/vishwa/workspace/hawcx_agentic_sdk` | The SDK + supervisor pipeline (customer-side, in-Pod with agent) |
-| `hawcx_agentic_sdk_demo` | `/Users/vishwa/workspace/hawcx_agentic_sdk_demo` | Reference demo (Node/Express, mock-mode by default) |
-| `hx_agent_client_admin_service` (CAA) | `/Users/vishwa/workspace/hx_agent_client_admin_service` | Customer Admin Agent — provisions identity, writes substrate to Redis. Two-binary (Orchestrator + Authenticator) with mandatory trust boundary. |
-| `hx_agent_auth_service` (AS) | `/Users/vishwa/workspace/hx_agent_auth_service` | Hawcx-SaaS-side auth server. Implements HAAP §4.2.1 X3DH cascade. Live at `stage-auth-server.hawcx.com`. |
-| `hx_labs` | `/Users/vishwa/workspace/hx_labs` | Protocol library crates (`haap-core`, `haap-crypto`, `haap-as-client`, etc.) consumed by everyone. |
-| `hx_iac` | `/Users/vishwa/workspace/hx_iac` | All GCP infrastructure as Terraform. |
-| `hx_agent_admin_console` | `/Users/vishwa/workspace/hx_agent_admin_console` | Admin console + Postgres migration owner. |
+| Binary | Source crate | Source repo | Bundled? |
+|---|---|---|---|
+| `haap-authenticator` | `haap-auth-bin` | `hx_labs` (today) → `hx_agent_client_auth_service` (planned) | yes |
+| `haap-tqs-precompute` | `haap-tqs-precompute-bin` | same | yes |
+| `haap-tqs-jit` | `haap-tqs-jit-bin` | same | yes |
+| `haap-assembler` | `haap-assembler-bin` | same | yes |
+| `haap-eib` | `haap-eib-bin` | same | yes |
+| `haap-supervisor` | `haap-supervisor` | same | yes |
+| `haap-rsv` | `haap-rsv-bin` | THIS repo | yes |
+| `haap-sdk` | `haap-sdk-cli` | THIS repo | yes |
+| CAA Admin Authenticator | `haap-admin-auth-bin` | `hx_agent_client_admin_service` | NO (correctly excluded; CAA ships from its own repo) |
 
-## Stage-client cluster (where this SDK would deploy)
+## Cross-repo topology
 
-Vishwa stood up a new GCP project `hawcx-stage-client` (project number
-`612575354704`) on 2026-05-20 with a dedicated GKE Autopilot cluster
-`hx-stage-client-gke` in `us-east1`. The CAA is deployed there in
-namespace `hx-agent-client-admin-service`. A namespace called
-`hx-agentic-sdk-demo` is reserved for SDK-using agent demos.
+| Repo | Relationship |
+|---|---|
+| `hx_agent_canonical_spec` | Spec source of truth (v7.2.5). |
+| `hx_agent_client_auth_service` | (planned) Source of the 6 MCP host binaries bundled here. |
+| `hx_agent_client_admin_service` (CAA) | Reference image `ghcr.io/hawcx/hx-caa` in local-eval bundle. NOT bundled in the main SDK image. |
+| `hx_agent_authorizer` (RSV reference) | Sibling implementation; `haap-rsv` here mirrors the same §9 cascade surface. Diff drift across `domains.rs` is tracked. |
+| `hx_agent_crypto_core` | (planned) Future home for `haap-core`, `haap-crypto`, `haap-ipc`, `haap-wire`, `haap-redis` — the 5 path-deps. |
+| `hx_labs` | **RETIRED (build refs cleared 2026-05-21).** Workspace path-deps now resolve via `hx_agent_crypto_core`; `Dockerfile` + `release.yml` checkout `hx_agent_client_auth_service` + `hx_agent_crypto_core` for the 6 MCP host binaries. Leaked `HX_LABS_READ_TOKEN` PAT no longer referenced by any workflow and is eligible for retirement. |
 
-For a **full integration test** of an SDK-using agent in stage-client,
-all of this needs to be true:
+## Ownership notes (carried forward from hx_labs)
 
-1. Package the 5-binary supervisor pipeline as a K8s sidecar Docker image
-2. Provision agent identity via Admin Console (CAA's
-   `POST /v1/admin/sdk/enroll` flow — uses OTRC + customer's `IK_c`)
-3. Wire customer Redis (`HAAP_CUSTOMER_REDIS_URL` → the Memorystore
-   in stage-client at `10.30.0.3:6379`)
-4. Seal the identity bundle (`HAAP_PINNED_IK_SP`)
-5. Have the AS's `/v3/register_agent` path accept the supervisor's
-   identity assertion
+- The **CAA Admin Authenticator binary is the responsibility of
+  `hx_agent_client_admin_service`**, not bundled here. Don't add it to
+  the SDK image; that bundle's CAA reference (`ghcr.io/hawcx/hx-caa`) is
+  pulled at compose-up, not built here.
+- Postgres migrations for the broader HAAP stack live in
+  `hx_agent_admin_console/backend/crates/haap-console/migrations/`. The
+  SDK does not touch Postgres directly; the supervisor pipeline reads
+  customer KV (Redis) substrate.
+- §38 OAuth Bridge is SUPERSEDED by §45 Pattern Z (v7.2.0). §45.7.5 MCP
+  transport bearer carriage (v7.2.5) impacts the RSV's HTTP/JSON-RPC
+  surface; update `docs/RSV_HTTP_API.md` to cover the
+  `-32001..-32005` mapping.
+- The 30-crate `hx_labs` inventory is being split across 11 repos. SDK
+  is downstream of the protocol crates; do not host protocol logic
+  here. `haap-rsv` is the one exception — it's the cascade library and
+  has to be publish-ready on crates.io.
 
-This is a **week-plus separate workstream** from the SDK + demo work.
-For now, the demo runs in **mock mode** — in-process MockAssembler
-speaking the real wire protocol — proving SDK wiring without the
-supervisor.
+## Known issues / blockers (top of audit, full list in AUDIT.md)
 
-## HAAP spec
+1. **RESOLVED 2026-05-21 — repo build refs to `hx_labs` cleared.**
+   Workspace `Cargo.toml` now path-deps into
+   `../hx_agent_crypto_core/crates/{haap-core,haap-crypto,haap-ipc,haap-wire,haap-redis}`.
+   `Dockerfile` + `release.yml` check out `hx_agent_client_auth_service`
+   (source of the 6 MCP host binaries) and `hx_agent_crypto_core`
+   (sibling-path-dep target) instead of `hx_labs`. The leaked
+   `HX_LABS_READ_TOKEN` PAT is no longer referenced by any workflow in
+   this repo — eligible for retirement at the org level. Remaining
+   F-2 follow-up: replace the sibling-checkout pattern with
+   crates.io-published `hawcx-*` versioned deps so customer-side
+   `cargo build` works without three private-repo checkouts. **F-2
+   (build-ref half resolved; version-pin half remains).**
+2. **HIGH — SDK version skew.** `hx_labs/CLAUDE.md` line "SDK Version:
+   0.8.0" referred to legacy in-monorepo packages, not to this repo.
+   Crates / npm / PyPI here are `0.1.0-alpha.{1,7}`. Customers reading
+   the hx_labs string will hit `@hawcx/hawcx-haap@0.8.0` 404 on npm.
+   Decide: (a) rev this repo to `0.8.0` at first public release, or
+   (b) declare `0.1.0-alpha` authoritative and erase the `0.8.0`
+   reference from `hx_labs` retirement docs. **F-1.**
+3. **MEDIUM — surface mismatch with the migration brief.** The brief
+   frames this repo as the migration target for `crates/haap-napi`,
+   `crates/haap-pyo3`, `crates/haap-wasm`, `crates/haap-cli`,
+   `crates/haap-manager`. Reality: bindings here are pure-language
+   UDS clients — no NAPI, no pyo3, no WASM target. Diff
+   `hx_labs/crates/haap-napi/src/`, `haap-pyo3/src/`, `haap-wasm/src/`
+   against `node/src/` + `python/src/` to confirm zero functional gap.
+   If the legacy crates are unused, mark them dead in the `hx_labs`
+   retirement PR. **F-4.**
 
-The Canonical Specification lives in `hx_labs/tools/spec/canonical/`
-(currently at v7.2.0). Cross-references in this repo's source code use
-section numbers from that spec.
+Smaller blockers (spec refs v7.2.0 not v7.2.5, no PR-level CI workflow,
+local-eval bundle pinned to one CAA image variant, `__pycache__/` +
+`*.egg-info/` build droppings checked in, supervisor + RSV sharing one
+image with entrypoint override) catalogued in [AUDIT.md](AUDIT.md) §8.
 
 ## What NOT to assume
 
-- Don't assume the SDK speaks gRPC, HTTP, or any network protocol. It's
-  local UDS only.
-- Don't assume the SDK talks to the CAA. They never speak directly.
-- Don't assume `@hawcx/hawcx-haap` is on npm. It isn't yet.
-- Don't conflate the SDK (this repo) with the CAA. Different repos,
-  different binaries, different deployment shapes.
+- The Node / Python SDKs do not speak gRPC, HTTP, or any network
+  protocol. Local UDS only.
+- The SDK does not talk to the CAA directly. CAA writes substrate to
+  Redis; supervisor reads it on startup. Different code paths.
+- `@hawcx/hawcx-haap` is not yet on npm. Vendor or use `file:` deps
+  until publish.
+- This repo is the SDK distribution channel, not the protocol home.
+  Protocol logic belongs in the planned `hx_agent_crypto_core` and in
+  `hx_agent_client_auth_service`.
+
+## Quick links
+
+- [AUDIT.md](AUDIT.md) — full 2026-05-21 migration audit
+- [CHANGELOG.md](CHANGELOG.md) — aggregate cross-surface changelog
+- [README.md](README.md)
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+- [docs/INTEGRATION.md](docs/INTEGRATION.md)
+- [docs/RSV_HTTP_API.md](docs/RSV_HTTP_API.md)
+- [docker/bundle/](docker/bundle/) — local-eval CAA + RSV + Redis compose
+- [.github/workflows/release.yml](.github/workflows/release.yml)

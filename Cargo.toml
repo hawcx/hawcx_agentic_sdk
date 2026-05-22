@@ -14,16 +14,16 @@ members = [
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Hawcx Inc."]
-repository = "https://github.com/hawcx/hx_agentic_sdk"
+repository = "https://github.com/hawcx/hawcx_agentic_sdk"
 rust-version = "1.75"
 
 [workspace.dependencies]
-# Path-deps to hx_labs (RSV needs cascade + types; sealer + ipc + substrate-reader are SDK-owned)
-haap-core = { path = "../hx_labs/crates/haap-core", default-features = false, features = ["redis-backend"] }
-haap-crypto = { path = "../hx_labs/crates/haap-crypto" }
-haap-ipc = { path = "../hx_labs/crates/haap-ipc" }
-haap-wire = { path = "../hx_labs/crates/haap-wire" }
-haap-redis = { path = "../hx_labs/crates/haap-redis" }
+# Path-deps to hx_agent_crypto_core (RSV needs cascade + types; sealer + ipc + substrate-reader are SDK-owned)
+haap-core = { path = "../hx_agent_crypto_core/crates/haap-core", default-features = false, features = ["redis-backend"] }
+haap-crypto = { path = "../hx_agent_crypto_core/crates/haap-crypto" }
+haap-ipc = { path = "../hx_agent_crypto_core/crates/haap-ipc" }
+haap-wire = { path = "../hx_agent_crypto_core/crates/haap-wire" }
+haap-redis = { path = "../hx_agent_crypto_core/crates/haap-redis" }
 
 # SDK-internal crates (referenced via workspace = true)
 haap-sdk-types = { path = "crates/haap-sdk-types" }

@@ -1,9 +1,14 @@
 # syntax=docker/dockerfile:1.7
 
-# Multi-stage build: requires hx_labs to be checked out as a sibling
-# of hx_agentic_sdk in the build context. The release.yml workflow
-# arranges this; for local builds run `docker build -f hx_agentic_sdk/Dockerfile .`
-# from the parent directory containing both repos.
+# Multi-stage build: requires hx_agent_client_auth_service AND
+# hx_agent_crypto_core to be checked out as siblings of
+# hawcx_agentic_sdk in the build context. The release.yml workflow
+# arranges this; for local builds run
+#   docker build -f hawcx_agentic_sdk/Dockerfile -t <image> ~/Projects/
+# from the parent directory containing all three repos.
+#
+# (Historical: this build previously sourced the 6 MCP host binaries
+# from the retired hx_labs monorepo. Migrated 2026-05-21.)
 
 FROM rust:1-bookworm AS builder
 
@@ -30,12 +35,15 @@ RUN apt-get update && \
     chmod +x /usr/local/bin/protoc && \
     rm -rf /var/lib/apt/lists/* /tmp/*
 
-# Copy both repos so the SDK's path-deps to ../hx_labs resolve.
-COPY hx_labs /build/hx_labs
-COPY hx_agentic_sdk /build/hx_agentic_sdk
+# Copy all three repos so the relative path-deps resolve:
+#   hx_agent_client_auth_service  -> ../hx_agent_crypto_core/crates/*
+#   hawcx_agentic_sdk             -> ../hx_agent_crypto_core/crates/*
+COPY hx_agent_crypto_core /build/hx_agent_crypto_core
+COPY hx_agent_client_auth_service /build/hx_agent_client_auth_service
+COPY hawcx_agentic_sdk /build/hawcx_agentic_sdk
 
-# Build hx_labs binaries.
-WORKDIR /build/hx_labs
+# Build the 6 MCP host binaries from hx_agent_client_auth_service.
+WORKDIR /build/hx_agent_client_auth_service
 RUN cargo build --release \
     --bin haap-authenticator \
     --bin haap-tqs-precompute \
@@ -45,20 +53,20 @@ RUN cargo build --release \
     --bin haap-supervisor
 
 # Build SDK binaries.
-WORKDIR /build/hx_agentic_sdk
+WORKDIR /build/hawcx_agentic_sdk
 RUN cargo build --release --bin haap-rsv --bin haap-sdk
 
 # Distroless runtime.
 FROM gcr.io/distroless/cc-debian12 AS runtime
 
-COPY --from=builder /build/hx_labs/target/release/haap-authenticator /usr/local/bin/
-COPY --from=builder /build/hx_labs/target/release/haap-tqs-precompute /usr/local/bin/
-COPY --from=builder /build/hx_labs/target/release/haap-tqs-jit /usr/local/bin/
-COPY --from=builder /build/hx_labs/target/release/haap-assembler /usr/local/bin/
-COPY --from=builder /build/hx_labs/target/release/haap-eib /usr/local/bin/
-COPY --from=builder /build/hx_labs/target/release/haap-supervisor /usr/local/bin/
-COPY --from=builder /build/hx_agentic_sdk/target/release/haap-rsv /usr/local/bin/
-COPY --from=builder /build/hx_agentic_sdk/target/release/haap-sdk /usr/local/bin/
+COPY --from=builder /build/hx_agent_client_auth_service/target/release/haap-authenticator /usr/local/bin/
+COPY --from=builder /build/hx_agent_client_auth_service/target/release/haap-tqs-precompute /usr/local/bin/
+COPY --from=builder /build/hx_agent_client_auth_service/target/release/haap-tqs-jit /usr/local/bin/
+COPY --from=builder /build/hx_agent_client_auth_service/target/release/haap-assembler /usr/local/bin/
+COPY --from=builder /build/hx_agent_client_auth_service/target/release/haap-eib /usr/local/bin/
+COPY --from=builder /build/hx_agent_client_auth_service/target/release/haap-supervisor /usr/local/bin/
+COPY --from=builder /build/hawcx_agentic_sdk/target/release/haap-rsv /usr/local/bin/
+COPY --from=builder /build/hawcx_agentic_sdk/target/release/haap-sdk /usr/local/bin/
 
 # Default entrypoint = supervisor (most common customer-side deployment).
 ENTRYPOINT ["/usr/local/bin/haap-supervisor"]

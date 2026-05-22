@@ -31,12 +31,28 @@ jobs:
         with:
           path: hx_agentic_sdk
 
-      - name: Checkout hx_labs (sibling)
+      # The SDK workspace path-deps to ../hx_agent_crypto_core/crates/*
+      # and hx_agent_client_auth_service path-deps to the same sibling.
+      # Both must be checked out at the same level as hx_agentic_sdk so
+      # the relative paths resolve at build time.
+      #
+      # Same-org private repos auto-grant read access to GITHUB_TOKEN;
+      # no separate PAT needed. (The retired HX_LABS_READ_TOKEN PAT
+      # reference was removed 2026-05-21 with the hx_labs migration.)
+      - name: Checkout hx_agent_crypto_core (sibling)
         uses: actions/checkout@v4
         with:
-          repository: hawcx/hx_labs
-          token: ${{ secrets.HX_LABS_READ_TOKEN }}
-          path: hx_labs
+          repository: hawcx/hx_agent_crypto_core
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: hx_agent_crypto_core
+          ref: main
+
+      - name: Checkout hx_agent_client_auth_service (sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: hawcx/hx_agent_client_auth_service
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: hx_agent_client_auth_service
           ref: main
 
       - name: Install Rust toolchain
@@ -63,14 +79,14 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-            hx_labs/target/
+            hx_agent_client_auth_service/target/
             hx_agentic_sdk/target/
-          key: cargo-${{ matrix.target }}-${{ hashFiles('hx_labs/**/Cargo.lock', 'hx_agentic_sdk/**/Cargo.lock') }}
+          key: cargo-${{ matrix.target }}-${{ hashFiles('hx_agent_client_auth_service/**/Cargo.lock', 'hx_agent_crypto_core/**/Cargo.lock', 'hx_agentic_sdk/**/Cargo.lock') }}
           restore-keys: |
             cargo-${{ matrix.target }}-
 
-      - name: Build hx_labs binaries
-        working-directory: hx_labs
+      - name: Build client_auth_service binaries
+        working-directory: hx_agent_client_auth_service
         run: |
           cargo build --release --target ${{ matrix.target }} \
             --bin haap-authenticator \
@@ -105,15 +121,16 @@ jobs:
           mkdir -p dist
           OUT="hx-agent-sdk-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir -p "$OUT/bin"
-          # hx_labs agent-side runtime: supervisor + 5 protected children.
-          # Per CS v7.2.5 §35.6 and §39.12, these run on the agent host
-          # (Linux / macOS / Windows) with platform-native IPC (UDS on
-          # Unix family, named pipes with DACL on Windows).
+          # client_auth_service agent-side runtime: supervisor + 5
+          # protected children. Per CS v7.2.5 §35.6 and §39.12, these
+          # run on the agent host (Linux / macOS / Windows) with
+          # platform-native IPC (UDS on Unix family, named pipes with
+          # DACL on Windows).
           for b in haap-authenticator haap-tqs-precompute haap-tqs-jit haap-assembler haap-eib haap-supervisor; do
             if [[ "${{ runner.os }}" == "Windows" ]]; then
-              cp "hx_labs/target/${{ matrix.target }}/release/$b.exe" "$OUT/bin/"
+              cp "hx_agent_client_auth_service/target/${{ matrix.target }}/release/$b.exe" "$OUT/bin/"
             else
-              cp "hx_labs/target/${{ matrix.target }}/release/$b" "$OUT/bin/"
+              cp "hx_agent_client_auth_service/target/${{ matrix.target }}/release/$b" "$OUT/bin/"
             fi
           done
           # SDK CLI: agent-side, all platforms.
@@ -139,12 +156,12 @@ jobs:
         shell: bash
         run: |
           mkdir -p docker-staging
-          cp hx_labs/target/${{ matrix.target }}/release/haap-authenticator docker-staging/
-          cp hx_labs/target/${{ matrix.target }}/release/haap-tqs-precompute docker-staging/
-          cp hx_labs/target/${{ matrix.target }}/release/haap-tqs-jit docker-staging/
-          cp hx_labs/target/${{ matrix.target }}/release/haap-assembler docker-staging/
-          cp hx_labs/target/${{ matrix.target }}/release/haap-eib docker-staging/
-          cp hx_labs/target/${{ matrix.target }}/release/haap-supervisor docker-staging/
+          cp hx_agent_client_auth_service/target/${{ matrix.target }}/release/haap-authenticator docker-staging/
+          cp hx_agent_client_auth_service/target/${{ matrix.target }}/release/haap-tqs-precompute docker-staging/
+          cp hx_agent_client_auth_service/target/${{ matrix.target }}/release/haap-tqs-jit docker-staging/
+          cp hx_agent_client_auth_service/target/${{ matrix.target }}/release/haap-assembler docker-staging/
+          cp hx_agent_client_auth_service/target/${{ matrix.target }}/release/haap-eib docker-staging/
+          cp hx_agent_client_auth_service/target/${{ matrix.target }}/release/haap-supervisor docker-staging/
           cp hx_agentic_sdk/target/${{ matrix.target }}/release/haap-rsv docker-staging/
           cp hx_agentic_sdk/target/${{ matrix.target }}/release/haap-sdk docker-staging/
           ls -la docker-staging/

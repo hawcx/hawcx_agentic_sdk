@@ -35,6 +35,9 @@ dev = [
     "mypy>=1.5",
     "ruff>=0.4",
 ]
+crewai = [
+    "crewai>=0.51",
+]
 
 [project.urls]
 Homepage = "https://github.com/hawcx/hx_agentic_sdk"

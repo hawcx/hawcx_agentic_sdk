@@ -8,8 +8,8 @@
 
 FROM gcr.io/distroless/cc-debian12
 
-LABEL org.opencontainers.image.source="https://github.com/hawcx/hx_agentic_sdk"
-LABEL org.opencontainers.image.description="HAAP SDK runtime (haap-rsv, haap-sdk, hx_labs supervisor toolkit)"
+LABEL org.opencontainers.image.source="https://github.com/hawcx/hawcx_agentic_sdk"
+LABEL org.opencontainers.image.description="HAAP SDK runtime (haap-rsv, haap-sdk, client auth service supervisor toolkit)"
 
 COPY prebuilt-bins/haap-authenticator   /usr/local/bin/
 COPY prebuilt-bins/haap-tqs-precompute  /usr/local/bin/
