@@ -515,6 +515,13 @@ fn map_cascade_reject(reject: CascadeRejectReason) -> VerifyError {
             VerifyError::CascadeRejected("UserPolicySigInvalid (step 15)".into())
         }
         SignerRoleMismatch => VerifyError::CascadeRejected("SignerRoleMismatch (step 15)".into()),
+        UserPolicySigExpired => VerifyError::CascadeRejected("UserPolicySigExpired (step 15)".into()),
+        // §45 TBAC vs OAuth scope reconciliation + runtime guardrails + TSA timestamp.
+        GuardrailActionDenied => VerifyError::CascadeRejected("GuardrailActionDenied (step 13)".into()),
+        GuardrailScopeInvalid => VerifyError::CascadeRejected("GuardrailScopeInvalid (step 13)".into()),
+        TbacScopeOAuthMismatch => VerifyError::CascadeRejected("TbacScopeOAuthMismatch (§45.7.2)".into()),
+        TsaTokenInvalid => VerifyError::CascadeRejected("TsaTokenInvalid (step 14)".into()),
+        TsaTokenMissing => VerifyError::CascadeRejected("TsaTokenMissing (step 14)".into()),
         ConcurrentConsume => VerifyError::Replay,
     }
 }
