@@ -5,6 +5,8 @@
 
 use crate::error::IpcError;
 use std::os::unix::io::AsRawFd;
+#[cfg(target_os = "linux")]
+use std::os::unix::io::BorrowedFd;
 
 #[derive(Debug, Clone, Copy)]
 pub struct PeerIdentity {
@@ -17,7 +19,13 @@ pub struct PeerIdentity {
 pub fn peer_identity<T: AsRawFd>(stream: &T) -> Result<PeerIdentity, IpcError> {
     use nix::sys::socket::sockopt::PeerCredentials;
     use nix::sys::socket::getsockopt;
-    let creds = getsockopt(&stream.as_raw_fd(), PeerCredentials)?;
+    // nix 0.27 requires `AsFd` (not a raw fd) on getsockopt. Borrow the
+    // raw fd into a BorrowedFd scoped to this function — caller's
+    // `&T` (typically &UnixStream) guarantees the fd is open for the
+    // duration of this borrow.
+    // SAFETY: stream borrows the fd for the duration of this call.
+    let fd = unsafe { BorrowedFd::borrow_raw(stream.as_raw_fd()) };
+    let creds = getsockopt(&fd, PeerCredentials)?;
     Ok(PeerIdentity {
         pid: creds.pid(),
         uid: creds.uid(),

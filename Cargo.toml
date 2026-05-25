@@ -18,12 +18,22 @@ repository = "https://github.com/hawcx/hawcx_agentic_sdk"
 rust-version = "1.75"
 
 [workspace.dependencies]
-# Path-deps to hx_agent_crypto_core (RSV needs cascade + types; sealer + ipc + substrate-reader are SDK-owned)
-haap-core = { path = "../hx_agent_crypto_core/crates/haap-core", default-features = false, features = ["redis-backend"] }
-haap-crypto = { path = "../hx_agent_crypto_core/crates/haap-crypto" }
-haap-ipc = { path = "../hx_agent_crypto_core/crates/haap-ipc" }
-haap-wire = { path = "../hx_agent_crypto_core/crates/haap-wire" }
-haap-redis = { path = "../hx_agent_crypto_core/crates/haap-redis" }
+# Registry-deps to hx_agent_crypto_core. Resolved from the private
+# Kellnr at cargo.hawcx.com (see [registries.hawcx] in
+# ~/.cargo/config.toml — onboarding doc in README). Replaces the
+# previous sibling-clone path-deps; no more `../hx_agent_crypto_core/`
+# requirement on disk for either CI or local development.
+#
+# Engineers who want side-by-side editing of crypto-core can add a
+# personal `[patch."registry+https://cargo.hawcx.com/api/v1/crates/"]`
+# block to their own `.cargo/config.toml` pointing back at a sibling
+# checkout. That pattern is not checked in because the registry is
+# the source of truth for CI and external customers.
+haap-core = { version = "0.8", registry = "hawcx", default-features = false, features = ["redis-backend"] }
+haap-crypto = { version = "0.8", registry = "hawcx" }
+haap-ipc = { version = "0.8", registry = "hawcx" }
+haap-wire = { version = "0.8", registry = "hawcx" }
+haap-redis = { version = "0.8", registry = "hawcx" }
 
 # SDK-internal crates (referenced via workspace = true)
 haap-sdk-types = { path = "crates/haap-sdk-types" }
