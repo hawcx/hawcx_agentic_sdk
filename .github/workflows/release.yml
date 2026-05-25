@@ -39,13 +39,25 @@ jobs:
       # Same-org private repos auto-grant read access to GITHUB_TOKEN;
       # no separate PAT needed. (The retired HX_LABS_READ_TOKEN PAT
       # reference was removed 2026-05-21 with the hx_labs migration.)
+      # Pin crypto-core to a tag matching the SDK tag being released.
+      # Process for cutting v0.1.0-alpha.N:
+      #   1. Tag hx_agent_crypto_core v0.1.0-alpha.N at the SHA you've
+      #      built + tested the SDK against (typically tip-of-main of
+      #      crypto-core at release-prep time).
+      #   2. Push the SDK tag v0.1.0-alpha.N here.
+      # The matching crypto-core tag must exist before the SDK tag is
+      # pushed, otherwise this checkout fails. That's the point — it
+      # forces the lockstep tagging discipline.
+      # (TODO: apply the same pattern to hx_agent_client_auth_service
+      # below in a follow-up; left on ref: main for now since the auth
+      # service has not yet been tagged for the alpha line.)
       - name: Checkout hx_agent_crypto_core (sibling)
         uses: actions/checkout@v4
         with:
           repository: hawcx/hx_agent_crypto_core
           token: ${{ secrets.GITHUB_TOKEN }}
           path: hx_agent_crypto_core
-          ref: main
+          ref: ${{ github.ref_name }}
 
       - name: Checkout hx_agent_client_auth_service (sibling)
         uses: actions/checkout@v4
