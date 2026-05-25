@@ -1,0 +1,74 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+# Cancel in-flight runs when a PR is force-pushed.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  rust:
+    name: rust workspace (ubuntu-22.04)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout hx_agentic_sdk
+        uses: actions/checkout@v4
+        with:
+          path: hx_agentic_sdk
+
+      # Workspace path-deps resolve to ../hx_agent_crypto_core/crates/*.
+      # PR-level CI pulls main of the sibling — the goal here is exactly
+      # to surface cross-repo drift as a red PR check, so unpinning is
+      # intentional (release.yml does the pinned-by-tag checkout).
+      - name: Checkout hx_agent_crypto_core (sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: hawcx/hx_agent_crypto_core
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: hx_agent_crypto_core
+          ref: main
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: '25.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install libdbus (keyring linkage)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            hx_agentic_sdk/target/
+          key: ci-cargo-${{ hashFiles('hx_agentic_sdk/**/Cargo.toml', 'hx_agent_crypto_core/**/Cargo.toml') }}
+          restore-keys: |
+            ci-cargo-
+
+      - name: cargo build
+        working-directory: hx_agentic_sdk
+        run: cargo build --workspace --all-targets
+
+      - name: cargo clippy
+        working-directory: hx_agentic_sdk
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test
+        working-directory: hx_agentic_sdk
+        run: cargo test --workspace
