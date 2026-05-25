@@ -21,17 +21,10 @@ jobs:
         with:
           path: hx_agentic_sdk
 
-      # Workspace path-deps resolve to ../hx_agent_crypto_core/crates/*.
-      # PR-level CI pulls main of the sibling — the goal here is exactly
-      # to surface cross-repo drift as a red PR check, so unpinning is
-      # intentional (release.yml does the pinned-by-tag checkout).
-      - name: Checkout hx_agent_crypto_core (sibling)
-        uses: actions/checkout@v4
-        with:
-          repository: hawcx/hx_agent_crypto_core
-          token: ${{ secrets.GITHUB_TOKEN }}
-          path: hx_agent_crypto_core
-          ref: main
+      # Sibling-checkout of hx_agent_crypto_core has been removed —
+      # crypto-core crates are now resolved from the private Kellnr at
+      # cargo.hawcx.com (see workspace.dependencies in Cargo.toml +
+      # Configure hawcx cargo registry step below).
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -57,7 +50,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             hx_agentic_sdk/target/
-          key: ci-cargo-${{ hashFiles('hx_agentic_sdk/**/Cargo.toml', 'hx_agent_crypto_core/**/Cargo.toml') }}
+          key: ci-cargo-${{ hashFiles('hx_agentic_sdk/**/Cargo.toml') }}
           restore-keys: |
             ci-cargo-
 
