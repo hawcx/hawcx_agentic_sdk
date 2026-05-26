@@ -44,6 +44,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
+          registry-url: "https://registry.npmjs.org/"
+      - name: Clear stale _authToken so OIDC publish path activates
+        run: |
+          npm config delete //registry.npmjs.org/:_authToken --location=user 2>/dev/null || true
+          npm config delete //registry.npmjs.org/:_authToken --location=project 2>/dev/null || true
       - name: Install + build
         working-directory: node
         run: |
