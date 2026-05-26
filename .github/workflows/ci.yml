@@ -6,91 +6,48 @@ on:
     branches:
       - main
 
-# Cancel in-flight runs when a PR is force-pushed.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  rust:
-    name: rust workspace (ubuntu-22.04)
-    runs-on: ubuntu-22.04
+  node:
+    name: node ${{ matrix.node }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+        node: ["18", "20", "22"]
     steps:
-      - name: Checkout hx_agentic_sdk
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          path: hx_agentic_sdk
-
-      # Sibling-checkout of hx_agent_crypto_core has been removed —
-      # crypto-core crates are now resolved from the private Kellnr at
-      # cargo.hawcx.com (see workspace.dependencies in Cargo.toml +
-      # Configure hawcx cargo registry step below).
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - name: Install protoc
-        uses: arduino/setup-protoc@v3
-        with:
-          version: '25.x'
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install libdbus (keyring linkage)
+          node-version: ${{ matrix.node }}
+      - name: Install + typecheck + test
+        working-directory: node
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev pkg-config
+          npm ci
+          npm run typecheck
+          npm test
 
-      - name: Cache cargo registry + target
-        uses: actions/cache@v4
+  python:
+    name: python ${{ matrix.python }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            hx_agentic_sdk/target/
-          key: ci-cargo-${{ hashFiles('hx_agentic_sdk/**/Cargo.toml') }}
-          restore-keys: |
-            ci-cargo-
-
-      # Configure the private Kellnr registry so cargo can resolve any
-      # crates published from hx_agent_crypto_core (haap-core etc.) once
-      # the Cargo.toml migration from path-deps to version-deps lands in
-      # a follow-up PR. Today's path-deps don't reference the registry,
-      # so this is a no-op at build time — but landing the config
-      # ahead of the migration keeps that future PR a 1-line Cargo.toml
-      # change instead of a workflow-plus-Cargo.toml change.
-      #
-      # Kellnr expects the raw token in the Authorization header (NOT
-      # "Bearer <token>"). cargo passes the credentials.toml value
-      # verbatim, so do not add a prefix.
-      - name: Configure hawcx cargo registry
-        env:
-          CARGO_HAWCX_TOKEN: ${{ secrets.CARGO_HAWCX_TOKEN }}
+          python-version: ${{ matrix.python }}
+      - name: Install + test
+        working-directory: python
+        shell: bash
         run: |
-          mkdir -p ~/.cargo
-          cat >> ~/.cargo/config.toml <<'EOF'
-          [registries.hawcx]
-          index = "sparse+https://cargo.hawcx.com/api/v1/crates/"
-
-          [registry]
-          global-credential-providers = ["cargo:token"]
-          EOF
-          cat > ~/.cargo/credentials.toml <<EOF
-          [registries.hawcx]
-          token = "${CARGO_HAWCX_TOKEN}"
-          EOF
-          chmod 600 ~/.cargo/credentials.toml
-
-      - name: cargo build
-        working-directory: hx_agentic_sdk
-        run: cargo build --workspace --all-targets
-
-      - name: cargo clippy
-        working-directory: hx_agentic_sdk
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: cargo test
-        working-directory: hx_agentic_sdk
-        run: cargo test --workspace
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+          pytest -v
