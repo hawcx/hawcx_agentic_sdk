@@ -1,24 +1,39 @@
 # syntax=docker/dockerfile:1.7
 
-# Multi-stage build: requires hx_agent_client_auth_service AND
-# hx_agent_crypto_core to be checked out as siblings of
-# hawcx_agentic_sdk in the build context. The release.yml workflow
-# arranges this; for local builds run
-#   docker build -f hawcx_agentic_sdk/Dockerfile -t <image> ~/Projects/
-# from the parent directory containing all three repos.
+# hawcx_agentic_sdk image — customer-side release/distribution image.
 #
-# (Historical: this build previously sourced the 6 MCP host binaries
-# from the retired hx_labs monorepo. Migrated 2026-05-21.)
+# Topology note (2026-05-21): this repo is a release-only scaffold and
+# hosts no Rust source code of its own. The image is built from sibling
+# repos that ARE checked out as part of the build context:
+#
+#   hawcx_agentic_sdk/             (this file; only Dockerfile + workflow + docs)
+#   hx_agent_crypto_core/          (shared crypto / wire / haap-sdk-types)
+#   hx_agent_client_auth_service/  (the multi-call `hawcx-manager` binary)
+#
+# The companion `haap-rsv` MCP-server-side verifier binary is shipped from
+# its own image at ghcr.io/hawcx/haap-rsv — built out of
+# hx_agent_authorizer where the cascade core (haap-core §45.7-ahead)
+# lives. See hx_agent_authorizer/Dockerfile.
+#
+# Phases 3-5 cutover (2026-05-22): this image previously built and shipped
+# 7 individual binaries (haap-authenticator, haap-tqs-precompute,
+# haap-tqs-jit, haap-assembler, haap-eib, haap-supervisor, haap-sdk).
+# It now builds ONE binary, `hawcx-manager`, and installs 7 symlinks
+# under the legacy names so existing supervisor fork/exec call sites
+# continue to work via argv0 dispatch. See
+# /hx_agent_canonical_spec/DESIGN-MEMO-MULTICALL-BINARY.md and
+# /hx_agent_canonical_spec/SDK-BUILD-WITH-HAWCX-MANAGER.md.
+#
+# The release.yml workflow in .github/ arranges the sibling checkout; for
+# local builds run from the parent dir containing all three repos:
+#   docker build -f hawcx_agentic_sdk/Dockerfile -t hawcx-sdk ~/Projects/
 
 FROM rust:1-bookworm AS builder
 
 WORKDIR /build
 
-# Build dependencies: protoc (tonic-build needs it for code generation).
-#
-# protoc is pinned to a specific release artifact + SHA-256. The official
-# checksum for protoc-25.1-linux-x86_64.zip is published on the upstream
-# release page:
+# protoc — tonic-build needs it for code generation. Pinned to a specific
+# release artifact + SHA-256. The official checksum is published at
 #   https://github.com/protocolbuffers/protobuf/releases/tag/v25.1
 # Bumping the version REQUIRES updating PROTOC_SHA256 in lockstep. Without
 # the hash a compromised mirror or release-asset swap silently slips
@@ -35,38 +50,44 @@ RUN apt-get update && \
     chmod +x /usr/local/bin/protoc && \
     rm -rf /var/lib/apt/lists/* /tmp/*
 
-# Copy all three repos so the relative path-deps resolve:
-#   hx_agent_client_auth_service  -> ../hx_agent_crypto_core/crates/*
-#   hawcx_agentic_sdk             -> ../hx_agent_crypto_core/crates/*
+# Sibling checkout: the `hawcx-manager` multi-call binary builds out of
+# hx_agent_client_auth_service, which path-deps into hx_agent_crypto_core.
+# This SDK repo carries no source so there is no `COPY hawcx_agentic_sdk`.
 COPY hx_agent_crypto_core /build/hx_agent_crypto_core
 COPY hx_agent_client_auth_service /build/hx_agent_client_auth_service
-COPY hawcx_agentic_sdk /build/hawcx_agentic_sdk
 
-# Build the 6 MCP host binaries from hx_agent_client_auth_service.
+# Phase 3-5 cutover: ONE binary replaces the prior 7-bin build. The
+# multi-call binary dispatches by argv[0] (basename) → role; symlinks
+# below preserve every legacy exec call site without changing the
+# supervisor child-spawn code path.
 WORKDIR /build/hx_agent_client_auth_service
-RUN cargo build --release \
-    --bin haap-authenticator \
-    --bin haap-tqs-precompute \
-    --bin haap-tqs-jit \
-    --bin haap-assembler \
-    --bin haap-eib \
-    --bin haap-supervisor
+RUN cargo build --release --bin hawcx-manager
 
-# Build SDK binaries.
-WORKDIR /build/hawcx_agentic_sdk
-RUN cargo build --release --bin haap-rsv --bin haap-sdk
+# Staging stage: place hawcx-manager + legacy symlinks under
+# /staging/usr/local/bin so the final distroless COPY brings the
+# whole tree across in one shot. Distroless has no shell, so the
+# symlinks MUST be generated in the builder (which has bash) and
+# COPY-preserved into runtime.
+RUN mkdir -p /staging/usr/local/bin && \
+    cp /build/hx_agent_client_auth_service/target/release/hawcx-manager \
+       /staging/usr/local/bin/hawcx-manager && \
+    cd /staging/usr/local/bin && \
+    for n in haap-authenticator haap-tqs-precompute haap-tqs-jit \
+             haap-assembler haap-eib haap-supervisor haap-sdk; do \
+        ln -sf hawcx-manager "$n"; \
+    done && \
+    ls -la /staging/usr/local/bin/
 
 # Distroless runtime.
 FROM gcr.io/distroless/cc-debian12 AS runtime
 
-COPY --from=builder /build/hx_agent_client_auth_service/target/release/haap-authenticator /usr/local/bin/
-COPY --from=builder /build/hx_agent_client_auth_service/target/release/haap-tqs-precompute /usr/local/bin/
-COPY --from=builder /build/hx_agent_client_auth_service/target/release/haap-tqs-jit /usr/local/bin/
-COPY --from=builder /build/hx_agent_client_auth_service/target/release/haap-assembler /usr/local/bin/
-COPY --from=builder /build/hx_agent_client_auth_service/target/release/haap-eib /usr/local/bin/
-COPY --from=builder /build/hx_agent_client_auth_service/target/release/haap-supervisor /usr/local/bin/
-COPY --from=builder /build/hawcx_agentic_sdk/target/release/haap-rsv /usr/local/bin/
-COPY --from=builder /build/hawcx_agentic_sdk/target/release/haap-sdk /usr/local/bin/
+# Single COPY brings the binary + 7 symlinks across as one tree.
+# `COPY --from=builder DIR/ DIR/` preserves symlinks per the OCI
+# spec and Docker COPY semantics (verified in Buildx >=0.10).
+COPY --from=builder /staging/usr/local/bin/ /usr/local/bin/
 
-# Default entrypoint = supervisor (most common customer-side deployment).
+# Default entrypoint = haap-supervisor, which is now a symlink to
+# hawcx-manager. argv[0] = "haap-supervisor" routes to supervisor mode
+# via the multi-call dispatcher. Behavior is byte-identical to the
+# pre-cutover supervisor binary.
 ENTRYPOINT ["/usr/local/bin/haap-supervisor"]

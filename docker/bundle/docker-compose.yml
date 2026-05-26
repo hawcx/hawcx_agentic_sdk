@@ -74,11 +74,13 @@ services:
       - hawcx-net
 
   rsv:
-    image: ghcr.io/hawcx/hx-agent-sdk:${HAAP_VERSION:-v0.1.0-alpha.1}
+    # 2026-05-21: haap-rsv carved out of the SDK image and now ships
+    # from hx_agent_authorizer's own release pipeline at
+    # ghcr.io/hawcx/haap-rsv. The image's ENTRYPOINT is already
+    # /usr/local/bin/haap-rsv, so no override is needed.
+    image: ghcr.io/hawcx/haap-rsv:${HAAP_VERSION:-v0.1.0-alpha.1}
     container_name: hawcx-rsv
     restart: unless-stopped
-    # Override SDK image's default entrypoint (haap-supervisor) to run RSV instead.
-    entrypoint: ["/usr/local/bin/haap-rsv"]
     environment:
       - HAAP_RSV_LISTEN=0.0.0.0:8443
       - HAAP_AUDIENCE_HASH=${HAAP_AUDIENCE_HASH}

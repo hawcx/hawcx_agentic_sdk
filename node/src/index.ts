@@ -71,3 +71,4 @@ export {
 } from "./ipc";
 export type { ToolCallRequest, ToolCallResponse } from "./ipc";
 export { HawcxError, IpcError, HandshakeError, RequestRejected } from "./errors";
+export { getBinaryPath } from "./binary";

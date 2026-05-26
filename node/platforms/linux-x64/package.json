@@ -1,0 +1,12 @@
+{
+  "name": "@hawcx/hawcx-haap-linux-x64",
+  "version": "0.1.0-alpha.11",
+  "description": "hawcx-manager binary for linux-x64 (bundled with @hawcx/hawcx-haap)",
+  "license": "Apache-2.0",
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "files": ["hawcx-manager"],
+  "publishConfig": {
+    "access": "public"
+  }
+}

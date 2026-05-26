@@ -40,6 +40,13 @@
     "lint": "tsc --noEmit -p tsconfig.json",
     "clean": "rm -rf dist coverage"
   },
+  "optionalDependencies": {
+    "@hawcx/hawcx-haap-linux-x64": "0.1.0-alpha.11",
+    "@hawcx/hawcx-haap-linux-arm64": "0.1.0-alpha.11",
+    "@hawcx/hawcx-haap-darwin-arm64": "0.1.0-alpha.11",
+    "@hawcx/hawcx-haap-win32-x64": "0.1.0-alpha.11",
+    "@hawcx/hawcx-haap-win32-arm64": "0.1.0-alpha.11"
+  },
   "devDependencies": {
     "@types/node": "^20.11.0",
     "typescript": "^5.4.0",

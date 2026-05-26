@@ -11,6 +11,105 @@ on:
         required: true
 
 jobs:
+  build-binary:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            platform_pkg: linux-x64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+            platform_pkg: linux-arm64
+          - target: aarch64-apple-darwin
+            os: macos-14
+            platform_pkg: darwin-arm64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            platform_pkg: win32-x64
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            platform_pkg: win32-arm64
+
+    steps:
+      - name: Checkout hawcx_agentic_sdk
+        uses: actions/checkout@v4
+        with:
+          path: hx_agentic_sdk
+
+      - name: Checkout hx_agent_client_auth_service (sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: hawcx/hx_agent_client_auth_service
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: hx_agent_client_auth_service
+          ref: main
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: '25.x'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            hx_agent_client_auth_service/target/
+          key: cargo-node-${{ matrix.target }}-${{ hashFiles('hx_agent_client_auth_service/**/Cargo.lock') }}
+          restore-keys: |
+            cargo-node-${{ matrix.target }}-
+
+      - name: Configure hawcx cargo registry
+        shell: bash
+        env:
+          CARGO_HAWCX_TOKEN: ${{ secrets.CARGO_HAWCX_TOKEN }}
+        run: |
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml <<'EOF'
+          [registries.hawcx]
+          index = "sparse+https://cargo.hawcx.com/api/v1/crates/"
+
+          [registry]
+          global-credential-providers = ["cargo:token"]
+          EOF
+          cat > ~/.cargo/credentials.toml <<EOF
+          [registries.hawcx]
+          token = "${CARGO_HAWCX_TOKEN}"
+          EOF
+          chmod 600 ~/.cargo/credentials.toml
+
+      - name: Build hawcx-manager
+        working-directory: hx_agent_client_auth_service
+        shell: bash
+        run: cargo build --release --target ${{ matrix.target }} --bin hawcx-manager
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.platform_pkg }}
+          path: |
+            hx_agent_client_auth_service/target/${{ matrix.target }}/release/hawcx-manager
+            hx_agent_client_auth_service/target/${{ matrix.target }}/release/hawcx-manager.exe
+          if-no-files-found: warn
+
   test-matrix:
     name: test node ${{ matrix.node }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -31,13 +130,62 @@ jobs:
           npm run typecheck
           npm test
 
-  publish:
-    name: publish to npm
-    needs: test-matrix
+  publish-platform-packages:
+    name: publish ${{ matrix.platform_pkg }}
+    needs: [build-binary, test-matrix]
     runs-on: ubuntu-latest
     environment: npm-production
     permissions:
-      id-token: write   # required for npm provenance
+      id-token: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform_pkg: linux-x64
+            binary_name: hawcx-manager
+          - platform_pkg: linux-arm64
+            binary_name: hawcx-manager
+          - platform_pkg: darwin-arm64
+            binary_name: hawcx-manager
+          - platform_pkg: win32-x64
+            binary_name: hawcx-manager.exe
+          - platform_pkg: win32-arm64
+            binary_name: hawcx-manager.exe
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org/"
+      - uses: actions/download-artifact@v4
+        with:
+          name: binary-${{ matrix.platform_pkg }}
+          path: binary/
+      - name: Stage binary into platform package
+        shell: bash
+        run: |
+          BINARY_SRC="binary/${{ matrix.binary_name }}"
+          if [[ ! -f "$BINARY_SRC" ]]; then
+            echo "Binary not found: $BINARY_SRC"
+            exit 1
+          fi
+          cp "$BINARY_SRC" "node/platforms/${{ matrix.platform_pkg }}/${{ matrix.binary_name }}"
+          chmod +x "node/platforms/${{ matrix.platform_pkg }}/${{ matrix.binary_name }}" || true
+      - name: Publish platform package
+        working-directory: node/platforms/${{ matrix.platform_pkg }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public
+
+  publish-main:
+    name: publish @hawcx/hawcx-haap
+    needs: [publish-platform-packages]
+    runs-on: ubuntu-latest
+    environment: npm-production
+    permissions:
+      id-token: write
       contents: read
     steps:
       - uses: actions/checkout@v4

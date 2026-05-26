@@ -5,11 +5,10 @@ Per CS v6.7.4 §39, Profile E uses a five-process customer-side pipeline
 the Python entry point: it connects to a customer-deployed ``haap-supervisor``
 via the Assembler's agent IPC socket and proxies tool calls through it.
 
-The SDK does **not** spawn the supervisor — that's a separate operational
-concern (Docker / systemd / SCM). Customers install the supervisor via the
-``hx_agentic_sdk`` release tarball or Docker image (see the top-level
-``hx_agentic_sdk`` README); this SDK connects to its already-running
-Assembler over the agent socket.
+The ``hawcx-manager`` binary (supervisor, authenticator, assembler, and all
+pipeline components) is bundled with this package and installed automatically
+via pip. Use ``hawcx_haap.get_binary_path()`` to obtain its path for
+subprocess invocation or supervisor management.
 
 Prerequisites:
 
@@ -45,6 +44,7 @@ Assembler process; the SDK exchanges only plaintext request bodies and
 decrypted response bodies over the local IPC socket.
 """
 
+from hawcx_haap._binary import get_binary_path
 from hawcx_haap.agent import HawcxAgent
 from hawcx_haap.auth_ipc import (
     AuthenticatorClient,
@@ -65,8 +65,9 @@ from hawcx_haap.ipc import (
     ToolCallResponse,
 )
 
-__version__ = "0.1.0a10"
+__version__ = "0.1.0a11"
 __all__ = [
+    "get_binary_path",
     "HawcxAgent",
     "AssemblerClient",
     "AuthenticatorClient",

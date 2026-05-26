@@ -85,15 +85,6 @@ jobs:
           restore-keys: |
             cargo-${{ matrix.target }}-
 
-      # Configure the private Kellnr registry so cargo can resolve any
-      # crates published from hx_agent_crypto_core (haap-core etc.) once
-      # the Cargo.toml migration from path-deps to version-deps lands in
-      # a follow-up PR. Until that migration ships, this is a no-op at
-      # build time — Cargo.toml still references sibling-checkout paths.
-      #
-      # Kellnr expects the raw token in the Authorization header (NOT
-      # "Bearer <token>"). cargo passes the credentials.toml value
-      # verbatim, so do not add a prefix.
       - name: Configure hawcx cargo registry
         shell: bash
         env:
@@ -113,61 +104,46 @@ jobs:
           EOF
           chmod 600 ~/.cargo/credentials.toml
 
-      - name: Build client_auth_service binaries
+      - name: Build hawcx-manager (single multi-call binary, all platforms)
         working-directory: hx_agent_client_auth_service
         run: |
-          cargo build --release --target ${{ matrix.target }} \
-            --bin haap-authenticator \
-            --bin haap-tqs-precompute \
-            --bin haap-tqs-jit \
-            --bin haap-assembler \
-            --bin haap-eib \
-            --bin haap-supervisor
-        shell: bash
-
-      - name: Build SDK binary (haap-sdk; all platforms)
-        working-directory: hx_agentic_sdk
-        run: |
-          cargo build --release --target ${{ matrix.target }} --bin haap-sdk
-        shell: bash
-
-      # haap-rsv is the MCP-server-side verifier sidecar (sits in front of
-      # the resource server). It uses Unix domain sockets + SO_PEERCRED
-      # for the local-sidecar trust model (CS v7.2.5 §39.12.1), so it is
-      # Unix-only by design. Server operators deploy it as a Linux
-      # container; Windows does not need a haap-rsv binary.
-      - name: Build SDK binary (haap-rsv; Unix only)
-        if: runner.os != 'Windows'
-        working-directory: hx_agentic_sdk
-        run: |
-          cargo build --release --target ${{ matrix.target }} --bin haap-rsv
+          cargo build --release --target ${{ matrix.target }} --bin hawcx-manager
         shell: bash
 
       - name: Package distribution tarball
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p dist
           OUT="hx-agent-sdk-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir -p "$OUT/bin"
           # client_auth_service agent-side runtime: supervisor + 5
-          # protected children. Per CS v7.2.5 §35.6 and §39.12, these
-          # run on the agent host (Linux / macOS / Windows) with
-          # platform-native IPC (UDS on Unix family, named pipes with
-          # DACL on Windows).
-          for b in haap-authenticator haap-tqs-precompute haap-tqs-jit haap-assembler haap-eib haap-supervisor; do
-            if [[ "${{ runner.os }}" == "Windows" ]]; then
-              cp "hx_agent_client_auth_service/target/${{ matrix.target }}/release/$b.exe" "$OUT/bin/"
-            else
-              cp "hx_agent_client_auth_service/target/${{ matrix.target }}/release/$b" "$OUT/bin/"
-            fi
-          done
-          # SDK CLI: agent-side, all platforms.
+          # protected children + the haap-sdk demo CLI all dispatched
+          # off a single multi-call binary (hawcx-manager) per CS
+          # v7.2.5 §35.6 + §39.12 and the Phase 3-5 cutover memo at
+          # /hx_agent_canonical_spec/DESIGN-MEMO-MULTICALL-BINARY.md.
+          #
+          # 2026-05-21: haap-rsv removed from this tarball. The MCP-side
+          # verifier ships from hx_agent_authorizer/.github/workflows/
+          # release.yml as a separate Docker image + tarball at
+          # ghcr.io/hawcx/haap-rsv.
+          #
+          # 2026-05-22 (Phase 3-5): one real binary + 7 legacy aliases.
+          # On Unix targets the aliases are symlinks (cheap, ~40 MB
+          # tarball). On Windows we copy the .exe under each name
+          # (~320 MB; symlinks require admin/dev-mode and are not
+          # MDM-friendly).
+          LEGACY_NAMES="haap-authenticator haap-tqs-precompute haap-tqs-jit haap-assembler haap-eib haap-supervisor haap-sdk"
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cp "hx_agentic_sdk/target/${{ matrix.target }}/release/haap-sdk.exe" "$OUT/bin/"
+            cp "hx_agent_client_auth_service/target/${{ matrix.target }}/release/hawcx-manager.exe" "$OUT/bin/"
+            for n in $LEGACY_NAMES; do
+              cp "$OUT/bin/hawcx-manager.exe" "$OUT/bin/$n.exe"
+            done
           else
-            cp "hx_agentic_sdk/target/${{ matrix.target }}/release/haap-sdk" "$OUT/bin/"
-            # haap-rsv: MCP-server-side, Unix-only (see §39.12.1).
-            cp "hx_agentic_sdk/target/${{ matrix.target }}/release/haap-rsv" "$OUT/bin/"
+            cp "hx_agent_client_auth_service/target/${{ matrix.target }}/release/hawcx-manager" "$OUT/bin/"
+            (cd "$OUT/bin" && for n in $LEGACY_NAMES; do
+              ln -sf hawcx-manager "$n"
+            done)
           fi
           cp hx_agentic_sdk/README.md "$OUT/" 2>/dev/null || true
           cp -r hx_agentic_sdk/docs "$OUT/" 2>/dev/null || true
@@ -183,15 +159,18 @@ jobs:
         if: contains(matrix.target, 'linux-gnu')
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p docker-staging
-          cp hx_agent_client_auth_service/target/${{ matrix.target }}/release/haap-authenticator docker-staging/
-          cp hx_agent_client_auth_service/target/${{ matrix.target }}/release/haap-tqs-precompute docker-staging/
-          cp hx_agent_client_auth_service/target/${{ matrix.target }}/release/haap-tqs-jit docker-staging/
-          cp hx_agent_client_auth_service/target/${{ matrix.target }}/release/haap-assembler docker-staging/
-          cp hx_agent_client_auth_service/target/${{ matrix.target }}/release/haap-eib docker-staging/
-          cp hx_agent_client_auth_service/target/${{ matrix.target }}/release/haap-supervisor docker-staging/
-          cp hx_agentic_sdk/target/${{ matrix.target }}/release/haap-rsv docker-staging/
-          cp hx_agentic_sdk/target/${{ matrix.target }}/release/haap-sdk docker-staging/
+          # Phase 3-5 cutover (2026-05-22): only the real binary
+          # (hawcx-manager) is uploaded as the docker-bins artifact.
+          # actions/upload-artifact@v4 zips the path and DEREFERENCES
+          # symlinks (turns them back into full file copies), defeating
+          # the multi-call binary's size win. Solution: symlinks are
+          # generated on the docker job runner AFTER download-artifact
+          # but BEFORE the docker build context is assembled. The
+          # docker runner is Linux too, so symlink semantics are
+          # identical.
+          cp hx_agent_client_auth_service/target/${{ matrix.target }}/release/hawcx-manager docker-staging/
           ls -la docker-staging/
 
       - name: Upload Linux binaries for Docker (linux only)
@@ -227,8 +206,22 @@ jobs:
           name: docker-bins-${{ matrix.target }}
           path: ./prebuilt-bins
 
-      - name: Make binaries executable
-        run: chmod +x ./prebuilt-bins/*
+      - name: Make binaries executable + generate legacy symlinks
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x ./prebuilt-bins/hawcx-manager
+          # Phase 3-5 cutover (2026-05-22): regenerate the 7 legacy-name
+          # symlinks here because actions/upload-artifact@v4 dereferences
+          # symlinks when zipping (so they couldn't survive the matrix-job
+          # → docker-job artifact roundtrip). Building them here means
+          # the Dockerfile.fast `COPY prebuilt-bins/ /usr/local/bin/`
+          # step lands a real binary + 7 symlinks under one COPY, and
+          # distroless never needs to run a shell.
+          (cd ./prebuilt-bins && for n in haap-authenticator haap-tqs-precompute haap-tqs-jit haap-assembler haap-eib haap-supervisor haap-sdk; do
+            ln -sf hawcx-manager "$n"
+          done)
+          ls -la ./prebuilt-bins/
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -348,29 +341,35 @@ jobs:
 
             ## Contents
 
-            **Agent-side runtime** (all platforms — Linux, macOS, Windows):
-            the supervisor and the 5 protected child processes that form
-            the per-agent runtime per CS v7.2.5 §35.6:
+            **Multi-call binary** (Phase 3-5 cutover, 2026-05-22): the
+            tarball / image now ships ONE real binary, `hawcx-manager`,
+            with 7 legacy-name symlinks (Unix) or .exe copies (Windows)
+            that dispatch by argv[0] to the corresponding role:
 
-            - `haap-supervisor` — lifecycle, zero crypto material
-            - `haap-authenticator` — holds IK_i, performs X3DH (§4.2.1)
-            - `haap-tqs-precompute` — session-scoped, holds K_session_root (§40)
-            - `haap-tqs-jit` — request-scoped, paired 1:1 with Assembler
-            - `haap-assembler` — single-flight crypto-proxy (§39)
-            - `haap-eib` — External Identity Broker, OAuth bearer isolation (§45)
+            - `haap-supervisor` → `hawcx-manager supervisor` (lifecycle, zero crypto material)
+            - `haap-authenticator` → `hawcx-manager authenticator` (holds IK_i, X3DH per §4.2.1)
+            - `haap-tqs-precompute` → `hawcx-manager tqs-precompute` (session-scoped K_session_root per §40)
+            - `haap-tqs-jit` → `hawcx-manager tqs-jit` (request-scoped, paired 1:1 with Assembler)
+            - `haap-assembler` → `hawcx-manager assembler` (single-flight crypto-proxy per §39)
+            - `haap-eib` → `hawcx-manager eib` (External Identity Broker, OAuth bearer per §45)
+            - `haap-sdk` → `hawcx-manager sdk` (demo / debug CLI)
+
+            Existing customer scripts that invoke `haap-supervisor`,
+            `haap-authenticator`, etc. continue to work unchanged — the
+            symlinks preserve every legacy call site. Direct invocation
+            via `hawcx-manager <subcommand>` is also supported.
 
             On Windows, supervisor↔child IPC uses Named Pipes with DACL
             restricting access to the current user SID + SYSTEM, per
             CS v7.2.5 §39.12.2. On Linux / macOS, IPC uses Unix domain
             sockets with `SO_PEERCRED` / `LOCAL_PEERCRED`, per §39.12.1.
 
-            **SDK CLI** (all platforms): `haap-sdk`
-
-            **MCP server-side sidecar** (Linux / macOS only): `haap-rsv`
-            sits in front of the resource server and is deployed by MCP
-            server operators (typically as a Linux container). It is
-            Unix-only by design (UDS + peer-credential checks for the
-            local-sidecar trust model).
+            **MCP server-side sidecar** (`haap-rsv`) ships from a
+            separate image as of 2026-05-21:
+            `ghcr.io/hawcx/haap-rsv:${{ github.ref_name }}`. Source lives
+            in `hx_agent_authorizer/crates/haap-rsv-bin`. It is Unix-only
+            by design (UDS + peer-credential checks for the
+            local-sidecar trust model per §39.12.1).
 
             ## Evaluation bundle
 
