@@ -45,10 +45,16 @@ jobs:
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org/"
-      - name: Clear stale _authToken so OIDC publish path activates
+      - name: Diagnostics — npm CLI + OIDC env
         run: |
-          npm config delete //registry.npmjs.org/:_authToken --location=user 2>/dev/null || true
-          npm config delete //registry.npmjs.org/:_authToken --location=project 2>/dev/null || true
+          echo "--- npm/node versions ---"
+          npm --version
+          node --version
+          echo "--- .npmrc contents (auth lines redacted) ---"
+          cat ~/.npmrc 2>/dev/null | sed 's/_authToken=.*/_authToken=<redacted>/' || echo "no ~/.npmrc"
+          echo "--- OIDC env vars present? ---"
+          test -n "$ACTIONS_ID_TOKEN_REQUEST_URL" && echo "ACTIONS_ID_TOKEN_REQUEST_URL: set" || echo "ACTIONS_ID_TOKEN_REQUEST_URL: MISSING"
+          test -n "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" && echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN: set" || echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN: MISSING"
       - name: Install + build
         working-directory: node
         run: |
@@ -56,4 +62,6 @@ jobs:
           npm run build
       - name: Publish
         working-directory: node
-        run: npm publish --provenance --access public --tag alpha
+        env:
+          NPM_CONFIG_PROVENANCE: "true"
+        run: npm publish --provenance --access public --tag alpha --loglevel verbose
