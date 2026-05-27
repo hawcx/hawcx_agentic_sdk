@@ -1,10 +1,10 @@
 [build-system]
-requires = ["maturin>=1.5,<2.0"]
-build-backend = "maturin"
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
 
 [project]
 name = "hawcx-haap"
-version = "0.1.0a11"
+version = "0.1.0a12"
 description = "Customer SDK for the Hawcx Agent Authentication Protocol (HAAP). Connects to a customer-deployed haap-supervisor and proxies tool calls through the Assembler per CS v7.2.5 Profile E."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -34,7 +34,8 @@ dev = [
     "pytest-asyncio>=0.21",
     "mypy>=1.5",
     "ruff>=0.4",
-    "maturin>=1.5",
+    "build>=1.2",
+    "wheel>=0.43",
 ]
 crewai = [
     "crewai>=0.51",
@@ -46,14 +47,32 @@ Repository = "https://github.com/hawcx/hawcx_agentic_sdk"
 Issues = "https://github.com/hawcx/hawcx_agentic_sdk/issues"
 
 
-[tool.maturin]
-bindings = "bin"
-# The Rust source lives in the sibling hx_agent_client_auth_service repo.
-# Pass --manifest-path at build time:
-#   maturin build --release \
-#     --manifest-path ../../hx_agent_client_auth_service/crates/hawcx-manager/Cargo.toml
-# CI handles this via the release-python.yml workflow.
-python-source = "src"
+[tool.hatch.build.targets.wheel]
+packages = ["src/hawcx_haap"]
+# The platform-specific hawcx-manager binary is staged into
+# src/hawcx_haap/_bin/ by the release workflow before building each
+# platform-tagged wheel. A custom build hook (hatch_build.py) maps it into
+# the package ONLY when present, so dev/editable installs and pure-Python
+# builds (no binary staged) still work. Build platform wheels with
+# `python -m build --wheel` (NOT via sdist, which strips the binary).
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
+
+[tool.hatch.build.targets.sdist]
+# The sdist is pure-Python: it never carries the binary. Source builds
+# (pip install from sdist) still work for dev; get_binary_path() then
+# raises a clear "install from a platform wheel" error.
+include = [
+    "src/hawcx_haap",
+    "tests",
+    "examples",
+    "README.md",
+    "pyproject.toml",
+    "hatch_build.py",
+]
+exclude = [
+    "src/hawcx_haap/_bin",
+]
 
 [tool.mypy]
 python_version = "3.10"

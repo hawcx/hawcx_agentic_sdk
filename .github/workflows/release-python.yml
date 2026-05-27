@@ -11,7 +11,10 @@ on:
         required: true
 
 jobs:
-  build:
+  # Build the platform-specific hawcx-manager binary from the private hawcx
+  # Kellnr cargo registry (same source as release-node). Each target's binary
+  # is uploaded as an artifact for the wheel-build job to stage in.
+  build-binary:
     name: build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -20,29 +23,21 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
+            plat_tag: manylinux2014_x86_64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-22.04-arm
+            plat_tag: manylinux2014_aarch64
           - target: aarch64-apple-darwin
             os: macos-14
+            plat_tag: macosx_11_0_arm64
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+            plat_tag: win_amd64
           - target: aarch64-pc-windows-msvc
             os: windows-latest
+            plat_tag: win_arm64
 
     steps:
-      - name: Checkout hawcx_agentic_sdk
-        uses: actions/checkout@v4
-        with:
-          path: hx_agentic_sdk
-
-      - name: Checkout hx_agent_client_auth_service (sibling)
-        uses: actions/checkout@v4
-        with:
-          repository: hawcx/hx_agent_client_auth_service
-          token: ${{ secrets.GITHUB_TOKEN }}
-          path: hx_agent_client_auth_service
-          ref: main
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -59,18 +54,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libdbus-1-dev pkg-config
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            hx_agent_client_auth_service/target/
-          key: cargo-py-${{ matrix.target }}-${{ hashFiles('hx_agent_client_auth_service/**/Cargo.lock') }}
-          restore-keys: |
-            cargo-py-${{ matrix.target }}-
 
       - name: Configure hawcx cargo registry
         shell: bash
@@ -91,30 +74,113 @@ jobs:
           EOF
           chmod 600 ~/.cargo/credentials.toml
 
+      - name: Install hawcx-manager from hawcx registry
+        shell: bash
+        run: |
+          cargo install hawcx-manager \
+            --registry hawcx \
+            --target ${{ matrix.target }} \
+            --root "${RUNNER_TEMP}/staging" \
+            --locked
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.plat_tag }}
+          path: |
+            ${{ runner.temp }}/staging/bin/hawcx-manager
+            ${{ runner.temp }}/staging/bin/hawcx-manager.exe
+          if-no-files-found: warn
+
+  # Per-platform: stage the binary into python/src/hawcx_haap/_bin/, build a
+  # py3-none-any wheel, then retag it to the platform tag so PyPI serves the
+  # right wheel per platform. The binary lives inside the wheel as package
+  # data (hawcx_haap/_bin/hawcx-manager[.exe]).
+  build-wheels:
+    name: wheel ${{ matrix.plat_tag }}
+    needs: [build-binary]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - plat_tag: manylinux2014_x86_64
+            binary_name: hawcx-manager
+          - plat_tag: manylinux2014_aarch64
+            binary_name: hawcx-manager
+          - plat_tag: macosx_11_0_arm64
+            binary_name: hawcx-manager
+          - plat_tag: win_amd64
+            binary_name: hawcx-manager.exe
+          - plat_tag: win_arm64
+            binary_name: hawcx-manager.exe
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install maturin
-        run: pip install "maturin>=1.5,<2.0"
+      - name: Install build tooling
+        run: python -m pip install --upgrade pip build wheel
 
-      - name: Build wheel
-        working-directory: hx_agentic_sdk/python
+      - uses: actions/download-artifact@v4
+        with:
+          name: binary-${{ matrix.plat_tag }}
+          path: binary/
+
+      - name: Stage binary into package
         shell: bash
         run: |
-          maturin build \
-            --release \
-            --target ${{ matrix.target }} \
-            --manifest-path ../../hx_agent_client_auth_service/crates/hawcx-manager/Cargo.toml \
-            --out dist/
+          BINARY_SRC="binary/${{ matrix.binary_name }}"
+          if [[ ! -f "$BINARY_SRC" ]]; then
+            echo "Binary not found: $BINARY_SRC"
+            exit 1
+          fi
+          mkdir -p python/src/hawcx_haap/_bin
+          cp "$BINARY_SRC" "python/src/hawcx_haap/_bin/${{ matrix.binary_name }}"
+          chmod +x "python/src/hawcx_haap/_bin/${{ matrix.binary_name }}" || true
+
+      - name: Build + retag platform wheel
+        working-directory: python
+        shell: bash
+        run: |
+          # Build the wheel directly from the tree (NOT via sdist, which
+          # strips the binary). The custom hatch hook force-includes _bin/.
+          python -m build --wheel --outdir dist_raw/
+          # Retag the py3-none-any wheel to this platform.
+          python -m wheel tags \
+            --platform-tag ${{ matrix.plat_tag }} \
+            --remove \
+            dist_raw/*.whl
+          mkdir -p dist
+          mv dist_raw/*.whl dist/
+          ls -la dist/
+
+      - name: Verify binary is bundled in wheel
+        working-directory: python
+        shell: bash
+        run: |
+          python - <<'PY'
+          import glob, zipfile, sys
+          whl = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(whl).namelist()
+          bins = [n for n in names if n.startswith("hawcx_haap/_bin/")]
+          if not bins:
+              print("FAIL: no binary bundled in", whl)
+              sys.exit(1)
+          print("OK bundled:", bins)
+          PY
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
         with:
-          name: python-wheel-${{ matrix.target }}
-          path: hx_agentic_sdk/python/dist/*.whl
+          name: python-wheel-${{ matrix.plat_tag }}
+          path: python/dist/*.whl
           if-no-files-found: error
 
+  # Pure-Python sdist (no binary). Lets `pip install` from source succeed for
+  # dev; get_binary_path() then raises a clear "install from a platform wheel"
+  # error at call time.
   build-sdist:
     name: build sdist
     runs-on: ubuntu-latest
@@ -123,60 +189,69 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install maturin
-        run: pip install "maturin>=1.5,<2.0"
+      - name: Install build tooling
+        run: python -m pip install --upgrade pip build
       - name: Build sdist
         working-directory: python
-        run: maturin sdist --out dist/
+        run: python -m build --sdist --outdir dist/
+      - name: Verify sdist carries no binary
+        working-directory: python
+        shell: bash
+        run: |
+          if tar tzf dist/*.tar.gz | grep -q 'hawcx_haap/_bin/'; then
+            echo "FAIL: binary leaked into sdist"; exit 1
+          fi
+          echo "OK: sdist is pure-Python"
       - uses: actions/upload-artifact@v4
         with:
           name: python-sdist
           path: python/dist/*.tar.gz
           if-no-files-found: error
 
-  test-matrix:
-    name: test py${{ matrix.python }} on ${{ matrix.os }}
-    needs: [build]
+  # Smoke-test each platform wheel where a matching runner exists (linux-x64,
+  # darwin-arm64, windows-x64). Installs the wheel and the test deps, runs the
+  # pure-Python test suite, and confirms get_binary_path() resolves.
+  test-wheels:
+    name: test ${{ matrix.plat_tag }}
+    needs: [build-wheels]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14, windows-latest]
-        python: ["3.10", "3.11", "3.12", "3.13"]
+        include:
+          - plat_tag: manylinux2014_x86_64
+            os: ubuntu-latest
+          - plat_tag: macosx_11_0_arm64
+            os: macos-14
+          - plat_tag: win_amd64
+            os: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python }}
-      - name: Resolve target for this runner
-        id: target
-        shell: bash
-        run: |
-          case "${{ runner.os }}-${{ runner.arch }}" in
-            Linux-X64)     echo "target=x86_64-unknown-linux-gnu"  >> $GITHUB_OUTPUT ;;
-            Linux-ARM64)   echo "target=aarch64-unknown-linux-gnu" >> $GITHUB_OUTPUT ;;
-            macOS-ARM64)   echo "target=aarch64-apple-darwin"      >> $GITHUB_OUTPUT ;;
-            Windows-X64)   echo "target=x86_64-pc-windows-msvc"    >> $GITHUB_OUTPUT ;;
-            Windows-ARM64) echo "target=aarch64-pc-windows-msvc"   >> $GITHUB_OUTPUT ;;
-            *) echo "Unsupported runner: ${{ runner.os }}-${{ runner.arch }}"; exit 1 ;;
-          esac
+          python-version: "3.12"
       - uses: actions/download-artifact@v4
         with:
-          name: python-wheel-${{ steps.target.outputs.target }}
+          name: python-wheel-${{ matrix.plat_tag }}
           path: dist/
       - name: Install wheel + test deps
         shell: bash
         run: |
-          pip install --upgrade pip
-          pip install dist/*.whl
-          pip install pytest pytest-asyncio
+          python -m pip install --upgrade pip
+          python -m pip install dist/*.whl
+          python -m pip install pytest pytest-asyncio
+      - name: Resolve bundled binary (outside source tree)
+        shell: bash
+        run: |
+          cd "${RUNNER_TEMP}"
+          python -c "import hawcx_haap, os; p=hawcx_haap.get_binary_path(); assert os.path.isfile(p), p; print('binary:', p)"
       - name: Run tests
         working-directory: python
         run: pytest -v
 
   publish:
     name: publish to PyPI
-    needs: [build, build-sdist, test-matrix]
+    needs: [build-wheels, build-sdist, test-wheels]
     runs-on: ubuntu-latest
     environment: pypi-production
     permissions:
@@ -191,6 +266,8 @@ jobs:
         with:
           name: python-sdist
           path: dist/
+      - name: List artifacts
+        run: ls -la dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
