@@ -1,6 +1,6 @@
 {
   "name": "@hawcx/hawcx-haap-win32-arm64",
-  "version": "0.1.0-alpha.11",
+  "version": "0.1.0-alpha.12",
   "description": "hawcx-manager binary for win32-arm64 (bundled with @hawcx/hawcx-haap)",
   "license": "Apache-2.0",
   "os": ["win32"],

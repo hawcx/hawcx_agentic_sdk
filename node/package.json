@@ -1,6 +1,6 @@
 {
   "name": "@hawcx/hawcx-haap",
-  "version": "0.1.0-alpha.11",
+  "version": "0.1.0-alpha.12",
   "description": "Customer SDK for the Hawcx Agent Authentication Protocol (HAAP). Connects to a customer-deployed haap-supervisor and proxies tool calls through the Assembler per CS v7.2.5 Profile E.",
   "keywords": [
     "haap",
@@ -41,11 +41,11 @@
     "clean": "rm -rf dist coverage"
   },
   "optionalDependencies": {
-    "@hawcx/hawcx-haap-linux-x64": "0.1.0-alpha.11",
-    "@hawcx/hawcx-haap-linux-arm64": "0.1.0-alpha.11",
-    "@hawcx/hawcx-haap-darwin-arm64": "0.1.0-alpha.11",
-    "@hawcx/hawcx-haap-win32-x64": "0.1.0-alpha.11",
-    "@hawcx/hawcx-haap-win32-arm64": "0.1.0-alpha.11"
+    "@hawcx/hawcx-haap-linux-x64": "0.1.0-alpha.12",
+    "@hawcx/hawcx-haap-linux-arm64": "0.1.0-alpha.12",
+    "@hawcx/hawcx-haap-darwin-arm64": "0.1.0-alpha.12",
+    "@hawcx/hawcx-haap-win32-x64": "0.1.0-alpha.12",
+    "@hawcx/hawcx-haap-win32-arm64": "0.1.0-alpha.12"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
