@@ -157,7 +157,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org/"
       - uses: actions/download-artifact@v4
         with:
@@ -175,9 +175,7 @@ jobs:
           chmod +x "node/platforms/${{ matrix.platform_pkg }}/${{ matrix.binary_name }}" || true
       - name: Publish platform package
         working-directory: node/platforms/${{ matrix.platform_pkg }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --provenance --access public
+        run: npm publish --provenance --access public --tag alpha
 
   publish-main:
     name: publish @hawcx/hawcx-haap
@@ -193,16 +191,6 @@ jobs:
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org/"
-      - name: Diagnostics — npm CLI + OIDC env
-        run: |
-          echo "--- npm/node versions ---"
-          npm --version
-          node --version
-          echo "--- .npmrc contents (auth lines redacted) ---"
-          cat ~/.npmrc 2>/dev/null | sed 's/_authToken=.*/_authToken=<redacted>/' || echo "no ~/.npmrc"
-          echo "--- OIDC env vars present? ---"
-          test -n "$ACTIONS_ID_TOKEN_REQUEST_URL" && echo "ACTIONS_ID_TOKEN_REQUEST_URL: set" || echo "ACTIONS_ID_TOKEN_REQUEST_URL: MISSING"
-          test -n "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" && echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN: set" || echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN: MISSING"
       - name: Install + build
         working-directory: node
         run: |
@@ -210,6 +198,4 @@ jobs:
           npm run build
       - name: Publish
         working-directory: node
-        env:
-          NPM_CONFIG_PROVENANCE: "true"
-        run: npm publish --provenance --access public --tag alpha --loglevel verbose
+        run: npm publish --provenance --access public --tag alpha
