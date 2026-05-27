@@ -144,7 +144,7 @@ jobs:
       - name: Install + typecheck + test
         working-directory: node
         run: |
-          npm ci
+          npm install --omit=optional --no-package-lock
           npm run typecheck
           npm test
 
@@ -218,7 +218,7 @@ jobs:
       - name: Install + build
         working-directory: node
         run: |
-          npm ci
+          npm install --omit=optional --no-package-lock
           npm run build
       - name: Publish
         working-directory: node
