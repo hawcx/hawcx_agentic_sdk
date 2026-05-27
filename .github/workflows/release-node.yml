@@ -35,24 +35,52 @@ jobs:
             platform_pkg: win32-arm64
 
     steps:
+      # ── Cache key resolution ────────────────────────────────────────────────
+      # For tag pushes  : key = "node-v0.1.0-alpha.12"  (the tag name)
+      # For workflow_dispatch: key = the `version` input
+      # Same key → same hawcx-manager release → skip the full Rust build.
+      - name: Resolve binary cache key
+        id: ver
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "key=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "key=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Binary cache restore ────────────────────────────────────────────────
+      # Exact-match only — no restore-keys fallback so a stale binary from a
+      # prior version is never silently reused for a new release.
+      - name: Restore cached hawcx-manager binary
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/staging/bin
+          key: hawcx-manager-${{ matrix.target }}-${{ steps.ver.outputs.key }}
+
+      # ── Build (skipped entirely on cache hit) ───────────────────────────────
       - name: Install Rust toolchain
+        if: steps.cache.outputs.cache-hit != 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
       - name: Install protoc
+        if: steps.cache.outputs.cache-hit != 'true'
         uses: arduino/setup-protoc@v3
         with:
           version: '25.x'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Linux system deps
-        if: runner.os == 'Linux'
+        if: steps.cache.outputs.cache-hit != 'true' && runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libdbus-1-dev pkg-config
 
       - name: Configure hawcx cargo registry
+        if: steps.cache.outputs.cache-hit != 'true'
         shell: bash
         env:
           CARGO_HAWCX_TOKEN: ${{ secrets.CARGO_HAWCX_TOKEN }}
@@ -72,6 +100,7 @@ jobs:
           chmod 600 ~/.cargo/credentials.toml
 
       - name: Install hawcx-manager from hawcx registry
+        if: steps.cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           cargo install hawcx-manager \
@@ -80,6 +109,16 @@ jobs:
             --root "${RUNNER_TEMP}/staging" \
             --locked
 
+      # Save only on a successful fresh build — a failed build must not
+      # poison the cache for subsequent retries.
+      - name: Save hawcx-manager binary to cache
+        if: steps.cache.outputs.cache-hit != 'true' && success()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/staging/bin
+          key: hawcx-manager-${{ matrix.target }}-${{ steps.ver.outputs.key }}
+
+      # ── Always upload artifact (whether from cache or fresh build) ──────────
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
