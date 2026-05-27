@@ -144,7 +144,7 @@ jobs:
       - name: Install + typecheck + test
         working-directory: node
         run: |
-          npm install --omit=optional --no-package-lock
+          npm install --no-package-lock
           npm run typecheck
           npm test
 
