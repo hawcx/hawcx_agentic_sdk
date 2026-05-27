@@ -154,6 +154,8 @@ jobs:
           chmod +x "node/platforms/${{ matrix.platform_pkg }}/${{ matrix.binary_name }}" || true
       - name: Publish platform package
         working-directory: node/platforms/${{ matrix.platform_pkg }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --provenance --access public --tag alpha
 
   publish-main:
@@ -177,4 +179,6 @@ jobs:
           npm run build
       - name: Publish
         working-directory: node
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --provenance --access public --tag alpha
