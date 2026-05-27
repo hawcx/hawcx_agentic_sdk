@@ -2,10 +2,22 @@
   "name": "@hawcx/hawcx-haap-darwin-arm64",
   "version": "0.1.0-alpha.13",
   "description": "hawcx-manager binary for darwin-arm64 (bundled with @hawcx/hawcx-haap)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hawcx/hawcx_agentic_sdk.git",
+    "directory": "node/platforms/darwin-arm64"
+  },
   "license": "SEE LICENSE IN LICENSE",
-  "os": ["darwin"],
-  "cpu": ["arm64"],
-  "files": ["hawcx-manager", "LICENSE"],
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "hawcx-manager",
+    "LICENSE"
+  ],
   "publishConfig": {
     "access": "public"
   }
