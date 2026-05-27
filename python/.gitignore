@@ -11,3 +11,6 @@ wheelhouse/
 .mypy_cache/
 .venv/
 venv/
+
+# Bundled platform binary — staged in by the release workflow, never committed.
+src/hawcx_haap/_bin/

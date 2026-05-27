@@ -44,6 +44,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      # The Python package is pure-Python (hatchling backend). The bundled
+      # hawcx-manager binary ships only in the release platform wheels, so the
+      # editable dev install needs NO Rust toolchain and NO cargo registry.
       - name: Install + test
         working-directory: python
         shell: bash
