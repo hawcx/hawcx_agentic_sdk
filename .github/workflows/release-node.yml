@@ -222,5 +222,14 @@ jobs:
           npm run build
       - name: Publish
         working-directory: node
+        # --tag alpha publishes under the `alpha` dist-tag only; it does NOT
+        # move `latest`. `latest` is set once on a package's first publish
+        # and stays put. While pre-stable we keep moving `latest` to the
+        # newest alpha MANUALLY so bare `npm install @hawcx/hawcx-haap`
+        # isn't stuck on an old version:
+        #     npm dist-tag add @hawcx/hawcx-haap@<version> latest
+        # When a real stable ships, drop the manual step and let stable own
+        # `latest` (alphas stay under `alpha`). Only the main package's
+        # `latest` matters — platform packages resolve by exact version.
         run: npm publish --provenance --access public --tag alpha
         # Authentication via npm Trusted Publishing (OIDC) — same as above.
