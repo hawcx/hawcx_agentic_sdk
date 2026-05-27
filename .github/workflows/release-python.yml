@@ -84,7 +84,7 @@ jobs:
             --locked
 
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: binary-${{ matrix.plat_tag }}
           path: |
@@ -115,15 +115,15 @@ jobs:
           - plat_tag: win_arm64
             binary_name: hawcx-manager.exe
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
       - name: Install build tooling
         run: python -m pip install --upgrade pip build wheel
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: binary-${{ matrix.plat_tag }}
           path: binary/
@@ -172,7 +172,7 @@ jobs:
           PY
 
       - name: Upload wheel artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: python-wheel-${{ matrix.plat_tag }}
           path: python/dist/*.whl
@@ -185,8 +185,8 @@ jobs:
     name: build sdist
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Install build tooling
@@ -202,7 +202,7 @@ jobs:
             echo "FAIL: binary leaked into sdist"; exit 1
           fi
           echo "OK: sdist is pure-Python"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: python-sdist
           path: python/dist/*.tar.gz
@@ -226,11 +226,11 @@ jobs:
           - plat_tag: win_amd64
             os: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: python-wheel-${{ matrix.plat_tag }}
           path: dist/
@@ -257,12 +257,12 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: python-wheel-*
           path: dist/
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: python-sdist
           path: dist/

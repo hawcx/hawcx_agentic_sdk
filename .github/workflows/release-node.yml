@@ -54,7 +54,7 @@ jobs:
       # prior version is never silently reused for a new release.
       - name: Restore cached hawcx-manager binary
         id: cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: ${{ runner.temp }}/staging/bin
           key: hawcx-manager-${{ matrix.target }}-${{ steps.ver.outputs.key }}
@@ -113,14 +113,14 @@ jobs:
       # poison the cache for subsequent retries.
       - name: Save hawcx-manager binary to cache
         if: steps.cache.outputs.cache-hit != 'true' && success()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: ${{ runner.temp }}/staging/bin
           key: hawcx-manager-${{ matrix.target }}-${{ steps.ver.outputs.key }}
 
       # ── Always upload artifact (whether from cache or fresh build) ──────────
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: binary-${{ matrix.platform_pkg }}
           path: |
@@ -137,8 +137,8 @@ jobs:
         os: [ubuntu-latest, macos-14, windows-latest]
         node: ["18", "20", "22"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node }}
       - name: Install + typecheck + test
@@ -172,12 +172,12 @@ jobs:
             binary_name: hawcx-manager.exe
 
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org/"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: binary-${{ matrix.platform_pkg }}
           path: binary/
@@ -210,8 +210,8 @@ jobs:
       id-token: write
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org/"

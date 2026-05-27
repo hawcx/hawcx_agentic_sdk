@@ -27,7 +27,7 @@ jobs:
 
     steps:
       - name: Checkout hx_agentic_sdk
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: hx_agentic_sdk
 
@@ -48,7 +48,7 @@ jobs:
       # cadence and the SDK pins to whatever version it depends on.
 
       - name: Checkout hx_agent_client_auth_service (sibling)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: hawcx/hx_agent_client_auth_service
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -73,7 +73,7 @@ jobs:
           sudo apt-get install -y libdbus-1-dev pkg-config
 
       - name: Cache cargo registry + target dirs
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry/index/
@@ -150,7 +150,7 @@ jobs:
           tar -czf "dist/$OUT.tar.gz" "$OUT"
 
       - name: Upload distribution artifact (release asset)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hx-agent-sdk-${{ matrix.target }}
           path: dist/*
@@ -163,7 +163,7 @@ jobs:
           mkdir -p docker-staging
           # Phase 3-5 cutover (2026-05-22): only the real binary
           # (hawcx-manager) is uploaded as the docker-bins artifact.
-          # actions/upload-artifact@v4 zips the path and DEREFERENCES
+          # actions/upload-artifact@v7 zips the path and DEREFERENCES
           # symlinks (turns them back into full file copies), defeating
           # the multi-call binary's size win. Solution: symlinks are
           # generated on the docker job runner AFTER download-artifact
@@ -175,7 +175,7 @@ jobs:
 
       - name: Upload Linux binaries for Docker (linux only)
         if: contains(matrix.target, 'linux-gnu')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: docker-bins-${{ matrix.target }}
           path: docker-staging/
@@ -198,10 +198,10 @@ jobs:
             runner: ubuntu-22.04-arm
     steps:
       - name: Checkout hx_agentic_sdk
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Download pre-built Linux binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: docker-bins-${{ matrix.target }}
           path: ./prebuilt-bins
@@ -212,7 +212,7 @@ jobs:
           set -euo pipefail
           chmod +x ./prebuilt-bins/hawcx-manager
           # Phase 3-5 cutover (2026-05-22): regenerate the 7 legacy-name
-          # symlinks here because actions/upload-artifact@v4 dereferences
+          # symlinks here because actions/upload-artifact@v7 dereferences
           # symlinks when zipping (so they couldn't survive the matrix-job
           # → docker-job artifact roundtrip). Building them here means
           # the Dockerfile.fast `COPY prebuilt-bins/ /usr/local/bin/`
@@ -224,17 +224,17 @@ jobs:
           ls -la ./prebuilt-bins/
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build + push single-arch image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile.fast
@@ -252,7 +252,7 @@ jobs:
     needs: docker
     steps:
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -282,10 +282,10 @@ jobs:
     # entrypoint, env handling) — NOT "we haven't tagged CAA yet."
     if: startsWith(github.ref, 'refs/tags/')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -308,7 +308,7 @@ jobs:
       contents: write
     steps:
       - name: Download all distribution artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: ./release-assets
           pattern: "hx-agent-sdk-*"
@@ -318,7 +318,7 @@ jobs:
         run: ls -lah ./release-assets/
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
