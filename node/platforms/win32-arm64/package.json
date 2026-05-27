@@ -1,11 +1,11 @@
 {
   "name": "@hawcx/hawcx-haap-win32-arm64",
-  "version": "0.1.0-alpha.12",
+  "version": "0.1.0-alpha.13",
   "description": "hawcx-manager binary for win32-arm64 (bundled with @hawcx/hawcx-haap)",
   "license": "SEE LICENSE IN LICENSE",
   "os": ["win32"],
   "cpu": ["arm64"],
-  "files": ["hawcx-manager.exe"],
+  "files": ["hawcx-manager.exe", "LICENSE"],
   "publishConfig": {
     "access": "public"
   }
