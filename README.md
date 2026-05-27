@@ -167,7 +167,7 @@ docker run -e HAAP_AUDIENCE_HASH=<sha256 hex> \
 
 ## License
 
-Apache-2.0.
+Hawcx Proprietary License. See [LICENSE](LICENSE).
 
 ## Status / known limitations
 

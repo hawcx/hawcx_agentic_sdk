@@ -215,6 +215,6 @@ alpha-2 closure of the RSV cascade adapter; see the closure report at
 
 ## License
 
-Apache-2.0. See the top-level [LICENSE](../LICENSE).
+Hawcx Proprietary License. See the top-level [LICENSE](../LICENSE).
 
 [cs]: https://github.com/hawcx/hx_agentic_sdk

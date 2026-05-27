@@ -98,4 +98,4 @@ migrating from the pre-`hawcx-crewai` example. New code should construct
 
 ## License
 
-Apache-2.0. See `LICENSE`.
+Hawcx Proprietary License. See [LICENSE](LICENSE).

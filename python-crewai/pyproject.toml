@@ -8,7 +8,7 @@ version = "0.1.0a1"
 description = "CrewAI BaseTool adapter for the Hawcx Agent Authentication Protocol (HAAP). Wraps a HAAP-authenticated tool call as a drop-in CrewAI tool with per-user principal tracking and Pattern Y (§47) credential isolation."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+license = { text = "Hawcx Proprietary License" }
 authors = [{ name = "Hawcx Inc." }]
 keywords = ["haap", "hawcx", "agent", "authentication", "crewai", "tool", "tbac"]
 classifiers = [
@@ -19,7 +19,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
-    "License :: OSI Approved :: Apache Software License",
+    "License :: Other/Proprietary License",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS :: MacOS X",
     "Operating System :: Microsoft :: Windows",

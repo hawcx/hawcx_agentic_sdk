@@ -174,4 +174,4 @@ Operator obligations:
 
 ## License
 
-Apache-2.0.
+Hawcx Proprietary License. See [LICENSE](../LICENSE).
