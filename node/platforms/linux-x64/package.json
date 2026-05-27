@@ -2,10 +2,22 @@
   "name": "@hawcx/hawcx-haap-linux-x64",
   "version": "0.1.0-alpha.13",
   "description": "hawcx-manager binary for linux-x64 (bundled with @hawcx/hawcx-haap)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hawcx/hawcx_agentic_sdk.git",
+    "directory": "node/platforms/linux-x64"
+  },
   "license": "SEE LICENSE IN LICENSE",
-  "os": ["linux"],
-  "cpu": ["x64"],
-  "files": ["hawcx-manager", "LICENSE"],
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "hawcx-manager",
+    "LICENSE"
+  ],
   "publishConfig": {
     "access": "public"
   }
