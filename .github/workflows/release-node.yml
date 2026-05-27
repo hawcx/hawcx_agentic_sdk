@@ -35,19 +35,6 @@ jobs:
             platform_pkg: win32-arm64
 
     steps:
-      - name: Checkout hawcx_agentic_sdk
-        uses: actions/checkout@v4
-        with:
-          path: hx_agentic_sdk
-
-      - name: Checkout hx_agent_client_auth_service (sibling)
-        uses: actions/checkout@v4
-        with:
-          repository: hawcx/hx_agent_client_auth_service
-          token: ${{ secrets.GITHUB_TOKEN }}
-          path: hx_agent_client_auth_service
-          ref: main
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -64,18 +51,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libdbus-1-dev pkg-config
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            hx_agent_client_auth_service/target/
-          key: cargo-node-${{ matrix.target }}-${{ hashFiles('hx_agent_client_auth_service/**/Cargo.lock') }}
-          restore-keys: |
-            cargo-node-${{ matrix.target }}-
 
       - name: Configure hawcx cargo registry
         shell: bash
@@ -96,18 +71,22 @@ jobs:
           EOF
           chmod 600 ~/.cargo/credentials.toml
 
-      - name: Build hawcx-manager
-        working-directory: hx_agent_client_auth_service
+      - name: Install hawcx-manager from hawcx registry
         shell: bash
-        run: cargo build --release --target ${{ matrix.target }} --bin hawcx-manager
+        run: |
+          cargo install hawcx-manager \
+            --registry hawcx \
+            --target ${{ matrix.target }} \
+            --root "${RUNNER_TEMP}/staging" \
+            --locked
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: binary-${{ matrix.platform_pkg }}
           path: |
-            hx_agent_client_auth_service/target/${{ matrix.target }}/release/hawcx-manager
-            hx_agent_client_auth_service/target/${{ matrix.target }}/release/hawcx-manager.exe
+            ${{ runner.temp }}/staging/bin/hawcx-manager
+            ${{ runner.temp }}/staging/bin/hawcx-manager.exe
           if-no-files-found: warn
 
   test-matrix:
