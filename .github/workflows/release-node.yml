@@ -193,9 +193,13 @@ jobs:
           chmod +x "node/platforms/${{ matrix.platform_pkg }}/${{ matrix.binary_name }}" || true
       - name: Publish platform package
         working-directory: node/platforms/${{ matrix.platform_pkg }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --provenance --access public --tag alpha
+        # Authentication via npm Trusted Publishing (OIDC). No stored token
+        # needed — npm exchanges the GitHub id-token for a publish credential
+        # at runtime. Trusted publisher must be configured on npmjs.com for
+        # each @hawcx/* package (Settings → Publishing Access → Add Trusted
+        # Publisher: owner=hawcx repo=hawcx_agentic_sdk workflow=release-node.yml
+        # environment=npm-production).
 
   publish-main:
     name: publish @hawcx/hawcx-haap
@@ -218,6 +222,5 @@ jobs:
           npm run build
       - name: Publish
         working-directory: node
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --provenance --access public --tag alpha
+        # Authentication via npm Trusted Publishing (OIDC) — same as above.
