@@ -1,0 +1,671 @@
+% HAAP SDK — Binary Distribution & CrewAI Integration Guide
+% Compile with: pdflatex DISTRIBUTION.tex  (twice for TOC)
+% Requires: listings, booktabs, geometry, hyperref, xcolor, fancyhdr, mdframed
+
+\documentclass[11pt, a4paper]{article}
+
+% ── Page geometry ────────────────────────────────────────────────────────────
+\usepackage[
+  top=2.5cm, bottom=2.5cm,
+  left=2.8cm, right=2.8cm,
+  headheight=14pt
+]{geometry}
+
+% ── Fonts & encoding ─────────────────────────────────────────────────────────
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+
+% ── Colour ───────────────────────────────────────────────────────────────────
+\usepackage[dvipsnames]{xcolor}
+\definecolor{hawcxblue}{HTML}{1A56DB}
+\definecolor{hawcxgray}{HTML}{F3F4F6}
+\definecolor{codered}{HTML}{C0392B}
+\definecolor{codegreen}{HTML}{1E8449}
+\definecolor{codegray}{HTML}{7F8C8D}
+\definecolor{codebg}{HTML}{F8F9FA}
+\definecolor{frameborder}{HTML}{D1D5DB}
+
+% ── Tables ───────────────────────────────────────────────────────────────────
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+
+% ── Code listings ────────────────────────────────────────────────────────────
+\usepackage{listings}
+\lstset{
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  breakatwhitespace=true,
+  captionpos=b,
+  commentstyle=\color{codegray}\itshape,
+  frame=single,
+  framesep=4pt,
+  framerule=0.4pt,
+  rulecolor=\color{frameborder},
+  keywordstyle=\color{hawcxblue}\bfseries,
+  numberstyle=\tiny\color{codegray},
+  numbers=left,
+  numbersep=8pt,
+  showstringspaces=false,
+  stringstyle=\color{codered},
+  tabsize=4,
+  xleftmargin=1.5em,
+  xrightmargin=0.5em,
+}
+\lstdefinelanguage{TOML}{
+  morestring=[b]",
+  morestring=[b]',
+  morecomment=[l]{\#},
+  keywords={true, false},
+  sensitive=false,
+}
+\lstdefinelanguage{JSON}{
+  morestring=[b]",
+  literate=
+    *{:}{{{\color{codegray}{:}}}}{1}
+     {,}{{{\color{codegray}{,}}}}{1}
+     {\{}{{{\color{codegray}{\{}}}}{1}
+     {\}}{{{\color{codegray}{\}}}}}{1}
+     {[}{{{\color{codegray}{[}}}}{1}
+     {]}{{{\color{codegray}{]}}}}{1},
+}
+
+% ── Frames / boxes ───────────────────────────────────────────────────────────
+\usepackage{mdframed}
+\mdfdefinestyle{notebox}{
+  backgroundcolor=hawcxgray,
+  linecolor=hawcxblue,
+  linewidth=2pt,
+  leftline=true,
+  rightline=false,
+  topline=false,
+  bottomline=false,
+  innerleftmargin=10pt,
+  innerrightmargin=10pt,
+  innertopmargin=6pt,
+  innerbottommargin=6pt,
+}
+
+% ── Hyperlinks & PDF metadata ────────────────────────────────────────────────
+\usepackage[
+  colorlinks=true,
+  linkcolor=hawcxblue,
+  urlcolor=hawcxblue,
+  citecolor=hawcxblue,
+  pdftitle={HAAP SDK — Binary Distribution \& CrewAI Integration Guide},
+  pdfauthor={Hawcx Inc.},
+  pdfsubject={HAAP SDK v0.1.0-alpha.11},
+]{hyperref}
+
+% ── Headers & footers ────────────────────────────────────────────────────────
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\color{codegray}HAAP SDK — Distribution \& CrewAI Guide}
+\fancyhead[R]{\small\color{codegray}v0.1.0-alpha.11}
+\fancyfoot[C]{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\headrule}{\color{frameborder}\hrule width\headwidth height\headrulewidth}
+
+% ── Section title formatting ─────────────────────────────────────────────────
+\usepackage{titlesec}
+\titleformat{\section}
+  {\large\bfseries\color{hawcxblue}}{\thesection}{0.8em}{}[\vspace{-4pt}\color{frameborder}\hrule\vspace{2pt}]
+\titleformat{\subsection}
+  {\normalsize\bfseries}{\thesubsection}{0.6em}{}
+\titleformat{\subsubsection}
+  {\normalsize\itshape}{\thesubsubsection}{0.6em}{}
+
+% ── Misc utilities ───────────────────────────────────────────────────────────
+\usepackage{enumitem}
+\setlist[itemize]{leftmargin=1.5em, itemsep=2pt, topsep=4pt}
+\setlist[enumerate]{leftmargin=1.5em, itemsep=2pt, topsep=4pt}
+
+\newcommand{\pkg}[1]{\texttt{#1}}
+\newcommand{\code}[1]{\texttt{#1}}
+
+% ─────────────────────────────────────────────────────────────────────────────
+
+\begin{document}
+
+% ── Title ────────────────────────────────────────────────────────────────────
+\begin{center}
+  {\LARGE\bfseries\color{hawcxblue} HAAP SDK}\\[6pt]
+  {\large Binary Distribution \& CrewAI Integration Guide}\\[10pt]
+  {\small SDK version \texttt{0.1.0-alpha.11} \quad|\quad
+   Protocol: HAAP Canonical Specification v7.2.5 \quad|\quad
+   2026-05-26}\\[4pt]
+  {\small\color{codered}\itshape Pre-product alpha. Customer evaluation only.}
+\end{center}
+
+\vspace{4pt}
+\tableofcontents
+\vspace{8pt}
+
+% ── 1. What Is Distributed ───────────────────────────────────────────────────
+\section{What Is Distributed}
+
+The HAAP SDK ships \textbf{one real binary} --- \pkg{hawcx-manager} ---
+packaged into platform-specific wheels (PyPI) and scoped npm packages (npm).
+The binary implements the complete customer-side pipeline described in HAAP
+CS~v7.2.5~§39 (Profile~E, five-process pipeline).
+
+\begin{table}[h!]
+\centering
+\caption{Components dispatched by \texttt{hawcx-manager}}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabularx}{\linewidth}{@{} l l X @{}}
+\toprule
+\textbf{Role} & \textbf{Subcommand / Legacy name} & \textbf{Spec reference} \\
+\midrule
+Supervisor          & \code{supervisor} / \code{haap-supervisor}           & §39.1 — lifecycle orchestrator \\
+Authenticator       & \code{authenticator} / \code{haap-authenticator}     & §4.2.1 — holds \code{IK\_i}, runs X3DH \\
+TQS Precompute      & \code{tqs-precompute} / \code{haap-tqs-precompute}   & §40 — session-scoped \code{K\_session\_root} \\
+TQS JIT             & \code{tqs-jit} / \code{haap-tqs-jit}                 & §40 — request-scoped, 1:1 with Assembler \\
+Assembler           & \code{assembler} / \code{haap-assembler}             & §39, §47 — single-flight crypto-proxy \\
+EIB                 & \code{eib} / \code{haap-eib}                         & §45 — External Identity Broker, OAuth bearer \\
+SDK CLI             & \code{sdk} / \code{haap-sdk}                         & debug / operator CLI \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Seven legacy names (\pkg{haap-supervisor}, \pkg{haap-authenticator}, etc.)\ are
+preserved as symlinks (Unix) or \texttt{.exe} copies (Windows) so existing
+deployment scripts continue to work unchanged.
+
+\begin{mdframed}[style=notebox]
+\textbf{Not in this package:} \pkg{haap-rsv} (MCP-server-side verifier) ships
+from a separate image \texttt{ghcr.io/hawcx/haap-rsv} built from
+\texttt{hx\_agent\_authorizer}. It is Unix-only by design (UDS + peer-credential
+checks per §39.12.1).
+\end{mdframed}
+
+% ── 2. PyPI Distribution ─────────────────────────────────────────────────────
+\section{PyPI Distribution (\texttt{hawcx-haap})}
+
+\subsection{Install}
+
+\begin{lstlisting}[language=bash, numbers=none, frame=none, backgroundcolor=\color{codebg}]
+pip install hawcx-haap
+\end{lstlisting}
+
+On \code{pip install}, pip selects the wheel matching the current platform.
+\pkg{hawcx-manager} lands in \code{venv/bin/hawcx-manager} (Unix) or
+\code{venv\textbackslash Scripts\textbackslash hawcx-manager.exe} (Windows).
+
+\subsection{Build backend: maturin \texttt{bindings = "bin"}}
+
+The build backend is \href{https://www.maturin.rs/}{maturin} configured with
+\code{bindings = "bin"}. This packages a Rust binary --- not a Python
+extension --- into a platform-specific wheel. The same mechanism is used by
+\pkg{ruff}, \pkg{uv}, and \pkg{black}.
+
+\begin{lstlisting}[language=TOML, caption={python/pyproject.toml (relevant section)}]
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+bindings = "bin"
+# Rust source lives in sibling hx_agent_client_auth_service repo.
+# CI passes --manifest-path at build time via release-python.yml.
+python-source = "src"
+\end{lstlisting}
+
+\subsection{Supported platforms}
+
+\begin{table}[h!]
+\centering
+\caption{PyPI wheel platform tags}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{} l l l @{}}
+\toprule
+\textbf{Wheel tag suffix} & \textbf{OS} & \textbf{Architecture} \\
+\midrule
+\code{linux\_x86\_64}           & Linux   & x86-64  \\
+\code{manylinux\_*\_aarch64}    & Linux   & ARM64   \\
+\code{macosx\_*\_arm64}         & macOS   & ARM64 (Apple Silicon) \\
+\code{win\_amd64}               & Windows & x86-64  \\
+\code{win\_arm64}               & Windows & ARM64   \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Locating the binary at runtime}
+
+\begin{lstlisting}[language=Python, caption={Resolving the bundled binary path}]
+from hawcx_haap import get_binary_path
+
+binary = get_binary_path()
+# Unix:    "/path/to/venv/bin/hawcx-manager"
+# Windows: "C:\...\venv\Scripts\hawcx-manager.exe"
+\end{lstlisting}
+
+\code{get\_binary\_path()} raises \code{RuntimeError} if the binary is absent
+(e.g., installed from source without maturin). The error message explains the
+local development workflow.
+
+\subsection{PyPI packages}
+
+\begin{table}[h!]
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{} l X @{}}
+\toprule
+\textbf{Package} & \textbf{Role} \\
+\midrule
+\pkg{hawcx-haap}   & Core IPC client + bundled \pkg{hawcx-manager} binary \\
+\pkg{hawcx-crewai} & CrewAI \code{BaseTool} adapter (depends on \pkg{hawcx-haap}) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ── 3. npm Distribution ──────────────────────────────────────────────────────
+\section{npm Distribution (\texttt{@hawcx/hawcx-haap})}
+
+\subsection{Install}
+
+\begin{lstlisting}[language=bash, numbers=none, frame=none, backgroundcolor=\color{codebg}]
+npm install @hawcx/hawcx-haap
+\end{lstlisting}
+
+npm installs only the platform package matching the current OS and CPU.
+
+\subsection{optionalDependencies pattern}
+
+The main package declares \code{optionalDependencies} pointing at five scoped
+packages, each tagged with \code{os} and \code{cpu} fields. npm skips packages
+for non-matching platforms. The pattern is identical to \pkg{@biomejs/biome}
+and \pkg{esbuild}.
+
+\begin{lstlisting}[language=JSON, caption={node/package.json (optionalDependencies)}]
+"optionalDependencies": {
+  "@hawcx/hawcx-haap-linux-x64":    "0.1.0-alpha.11",
+  "@hawcx/hawcx-haap-linux-arm64":  "0.1.0-alpha.11",
+  "@hawcx/hawcx-haap-darwin-arm64": "0.1.0-alpha.11",
+  "@hawcx/hawcx-haap-win32-x64":    "0.1.0-alpha.11",
+  "@hawcx/hawcx-haap-win32-arm64":  "0.1.0-alpha.11"
+}
+\end{lstlisting}
+
+\subsection{Supported platforms}
+
+\begin{table}[h!]
+\centering
+\caption{npm platform packages}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{} l l l @{}}
+\toprule
+\textbf{npm package} & \textbf{OS} & \textbf{CPU} \\
+\midrule
+\code{@hawcx/hawcx-haap-linux-x64}    & linux  & x64   \\
+\code{@hawcx/hawcx-haap-linux-arm64}  & linux  & arm64 \\
+\code{@hawcx/hawcx-haap-darwin-arm64} & darwin & arm64 \\
+\code{@hawcx/hawcx-haap-win32-x64}    & win32  & x64   \\
+\code{@hawcx/hawcx-haap-win32-arm64}  & win32  & arm64 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Locating the binary at runtime}
+
+\begin{lstlisting}[language={}  , caption={TypeScript --- resolving the bundled binary}]
+import { getBinaryPath } from "@hawcx/hawcx-haap";
+
+const binary = getBinaryPath();
+// -> "/path/to/.../node_modules/@hawcx/hawcx-haap-linux-x64/hawcx-manager"
+\end{lstlisting}
+
+% ── 4. CI Build Matrix ───────────────────────────────────────────────────────
+\section{CI Build Matrix}
+
+Both \code{release-python.yml} and \code{release-node.yml} run the same
+five-target Rust build matrix. The binary is checked out from
+\code{hx\_agent\_client\_auth\_service} and built against the private Kellnr
+registry at \code{cargo.hawcx.com}.
+
+\begin{table}[h!]
+\centering
+\caption{Rust build targets and CI runners}
+\renewcommand{\arraystretch}{1.25}
+\begin{tabular}{@{} l l l l @{}}
+\toprule
+\textbf{Rust target} & \textbf{CI runner} & \textbf{PyPI tag} & \textbf{npm pkg} \\
+\midrule
+\code{x86\_64-unknown-linux-gnu}   & \code{ubuntu-22.04}     & \code{linux\_x86\_64}        & \code{linux-x64}    \\
+\code{aarch64-unknown-linux-gnu}   & \code{ubuntu-22.04-arm} & \code{*\_aarch64}            & \code{linux-arm64}  \\
+\code{aarch64-apple-darwin}        & \code{macos-14}         & \code{macosx\_*\_arm64}      & \code{darwin-arm64} \\
+\code{x86\_64-pc-windows-msvc}     & \code{windows-latest}   & \code{win\_amd64}            & \code{win32-x64}    \\
+\code{aarch64-pc-windows-msvc}     & \code{windows-latest}   & \code{win\_arm64}            & \code{win32-arm64}  \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Releases are triggered by pushing version tags:
+
+\begin{lstlisting}[language=bash, numbers=none, frame=none, backgroundcolor=\color{codebg}]
+git tag python-v0.1.0-alpha.11 && git push origin python-v0.1.0-alpha.11
+git tag node-v0.1.0-alpha.11   && git push origin node-v0.1.0-alpha.11
+\end{lstlisting}
+
+% ── 5. CrewAI Integration ────────────────────────────────────────────────────
+\section{Getting Started with CrewAI}
+
+\subsection{Prerequisites}
+
+\begin{enumerate}
+  \item The \pkg{hawcx-manager} supervisor pipeline must be running on the
+        agent host. The Assembler's socket follows the convention:\\
+        \code{\$XDG\_RUNTIME\_DIR/hawcx/\{agent\_id\}/agent-assembler-0.sock}
+        (Linux) or\\
+        \code{\textbackslash\textbackslash.\textbackslash pipe\textbackslash haap-\{agent\_id\}-agent-assembler-0}
+        (Windows).
+  \item The agent identity must be pre-provisioned via the Hawcx Admin Console
+        (CAA \textrightarrow\ Authenticator flow per CS~§4.6.3).
+\end{enumerate}
+
+\subsection{Install}
+
+\begin{lstlisting}[language=bash, numbers=none, frame=none, backgroundcolor=\color{codebg}]
+pip install hawcx-haap hawcx-crewai crewai
+\end{lstlisting}
+
+\subsection{Package roles}
+
+\begin{table}[h!]
+\centering
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{} l X @{}}
+\toprule
+\textbf{Package} & \textbf{Role} \\
+\midrule
+\pkg{hawcx-haap}   & IPC client + bundled binary. Core SDK. \\
+\pkg{hawcx-crewai} & \code{HawcxTool} --- a \code{crewai.tools.BaseTool} subclass. \\
+\pkg{crewai}       & Multi-agent orchestration framework. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ── 6. Annotated CrewAI Example ──────────────────────────────────────────────
+\section{Annotated CrewAI Example}
+
+The following end-to-end example shows the idiomatic pattern for a
+HAAP-authenticated CrewAI crew. Annotations explain every security-relevant
+decision.
+
+\subsubsection*{Step 1 — Define typed argument schemas}
+
+CrewAI surfaces the \code{args\_schema} to the LLM for argument validation and
+tool-selection prompting. The \code{user\_principal\_id} field is the per-call
+identity axis: the LLM supplies it, and the SDK enforces that it is in the
+operator-controlled allowlist before writing any IPC bytes (HAAP CS~v7.2.5
+H-3 hardening).
+
+\begin{lstlisting}[language=Python, caption={Pydantic schemas for tool arguments}]
+from pydantic import BaseModel, Field
+
+class SearchInput(BaseModel):
+    query: str = Field(
+        description="Search query against the NIM knowledge base."
+    )
+    user_principal_id: str = Field(
+        description=(
+            "End-user on whose behalf the search runs. "
+            "Must be a principal registered for this agent."
+        )
+    )
+
+class DocsInput(BaseModel):
+    document_id: str = Field(
+        description="Opaque document ID to retrieve."
+    )
+    user_principal_id: str = Field(
+        description="End-user on whose behalf the document is fetched."
+    )
+\end{lstlisting}
+
+\subsubsection*{Step 2 --- Connect to the Assembler}
+
+\code{HawcxAgent.connect\_by\_agent\_id()} resolves the conventional UDS path
+and performs the §7 capability handshake synchronously. \code{principal\_allowlist}
+is a required, \emph{operator-controlled} closed set. Never derive it from LLM
+output or request bodies.
+
+\begin{lstlisting}[language=Python, caption={Opening the Assembler IPC connection}]
+from hawcx_haap import HawcxAgent
+
+ALLOWED_USERS = ["alice@example.com", "bob@example.com"]
+
+with HawcxAgent.connect_by_agent_id(
+    "research-u1",
+    principal_allowlist=ALLOWED_USERS,  # required; enforced before any IPC write
+) as agent:
+    ...
+\end{lstlisting}
+
+\subsubsection*{Step 3 --- Construct \texttt{HawcxTool} instances}
+
+One \code{HawcxTool} per logical tool. All instances share the same
+\code{agent} (one Assembler connection per process). Construction is cheap ---
+no IPC at this point.
+
+Key fields:
+
+\begin{itemize}
+  \item \textbf{\code{provider}} --- §47.2 provider class. Routes the §47.8
+        \code{GetExternalCredential} IPC to the correct sidecar
+        (\code{haap-nim-provider}, \code{haap-anthropic-provider}, etc.).
+  \item \textbf{\code{tool\_id}} --- §47.4 tool identity binding. The sidecar
+        refuses to disclose a credential unless the requesting \code{tool\_id}
+        matches the bound value. Two tools with different \code{tool\_id}s
+        cannot share credentials even within the same pipeline.
+  \item \textbf{\code{endpoint}} --- Destination URL. The Assembler constructs
+        the outbound HTTPS request; the Python process never sees the bearer
+        token.
+  \item \textbf{\code{action}} --- TBAC action list for Cedar policy evaluation.
+\end{itemize}
+
+\begin{lstlisting}[language=Python, caption={Constructing HawcxTool instances}]
+from hawcx_crewai import HawcxTool
+
+nim_search_tool = HawcxTool(
+    name="nim_search",
+    description=(
+        "Search the organisation's private knowledge base via NVIDIA NIM. "
+        "Always supply the user_principal_id you were given."
+    ),
+    hawcx_agent=agent,
+    provider="nim",                          # routes to haap-nim-provider sidecar
+    tool_id="nim-search-v1",                 # credential binding key (sec. 47.4)
+    endpoint="https://api.nim.nvidia.com/v1/search",
+    method="POST",
+    action=["read"],                         # Cedar policy action
+    args_schema=SearchInput,
+)
+
+docs_tool = HawcxTool(
+    name="docs_reader",
+    description=(
+        "Retrieve a document from the internal store by ID. "
+        "Always supply the user_principal_id you were given."
+    ),
+    hawcx_agent=agent,
+    provider="generic-bearer",               # generic bearer sidecar
+    tool_id="docs-reader-v1",               # separate credential from nim_search
+    endpoint="https://docs.internal.example.com/v1/documents",
+    method="GET",
+    action=["read"],
+    args_schema=DocsInput,
+)
+\end{lstlisting}
+
+\subsubsection*{Step 4 --- Define CrewAI Agents}
+
+Each CrewAI \code{Agent} receives the relevant \code{HawcxTool}(s) in its
+\code{tools} list. The LLM backing the agent sees only the tool's name,
+description, and \code{args\_schema} --- never provider keys, HAAP session
+tokens, or IPC internals.
+
+\begin{lstlisting}[language=Python, caption={Defining CrewAI agents}]
+from crewai import Agent
+
+researcher = Agent(
+    role="Research Analyst",
+    goal=(
+        "Find and retrieve the most relevant technical documents "
+        "answering the user's question."
+    ),
+    backstory=(
+        "A meticulous analyst with access to a private knowledge base. "
+        "Always cites sources by document ID."
+    ),
+    tools=[nim_search_tool, docs_tool],
+    verbose=True,
+)
+
+summarizer = Agent(
+    role="Technical Writer",
+    goal="Synthesize research findings into a concise technical summary.",
+    backstory=(
+        "Turns raw research into polished summaries. "
+        "Does not call external tools."
+    ),
+    tools=[],          # no HAAP tools needed for summarisation
+    verbose=True,
+)
+\end{lstlisting}
+
+\subsubsection*{Step 5 --- Define Tasks}
+
+The \code{user\_principal\_id} is injected into the task description so the
+LLM learns to pass it through every tool call. The principal is sourced from
+the authenticated session --- never from LLM output.
+
+\begin{lstlisting}[language=Python, caption={Task definitions with per-call principal}]
+from crewai import Task
+
+user_id  = "alice@example.com"    # from authenticated session
+question = "What are the performance characteristics of the HAAP TQS pipeline?"
+
+research_task = Task(
+    description=(
+        f"Answer: {question}\n\n"
+        f"IMPORTANT: For every tool call, pass "
+        f"user_principal_id='{user_id}'. Do not omit this field."
+    ),
+    expected_output=(
+        "List of relevant document IDs with key findings and direct quotes."
+    ),
+    agent=researcher,
+)
+
+summarize_task = Task(
+    description=(
+        "Using the research findings above, write a 3-paragraph technical "
+        "summary for a developer audience. Include document IDs as citations."
+    ),
+    expected_output="Concise 3-paragraph technical summary with citations.",
+    agent=summarizer,
+    context=[research_task],      # receives researcher's output as context
+)
+\end{lstlisting}
+
+\subsubsection*{Step 6 --- Assemble and run the Crew}
+
+\begin{lstlisting}[language=Python, caption={Assembling and running the Crew}]
+from crewai import Crew, Process
+
+crew = Crew(
+    agents=[researcher, summarizer],
+    tasks=[research_task, summarize_task],
+    process=Process.sequential,   # tasks run in order; use hierarchical
+    verbose=True,                  # for manager-agent architecture
+)
+
+result = crew.kickoff()
+print(result)
+# The `with` block closes the Assembler IPC socket on exit.
+# Keep the agent open for the lifetime of the process to avoid
+# the ~5 ms per-reconnect handshake latency.
+\end{lstlisting}
+
+% ── 7. Multi-Tenant Pattern ──────────────────────────────────────────────────
+\section{Multi-Tenant Pattern}
+
+When one agent process serves many end-users, two patterns are supported:
+
+\subsubsection*{A. Per-call principal via \texttt{args\_schema} (recommended)}
+
+Declare \code{user\_principal\_id} in the tool's \code{args\_schema}. The LLM
+supplies it on each call; the SDK enforces it against \code{principal\_allowlist}
+before any IPC.
+
+\begin{lstlisting}[language=Python, caption={Per-call principal in args\_schema}]
+# SearchInput / DocsInput in Step 1 already include user_principal_id.
+# No extra code is needed; the SDK extracts it from kwargs in HawcxTool._run.
+\end{lstlisting}
+
+\subsubsection*{B. Per-user tool instance via \texttt{for\_user}}
+
+For flows that materialise one tool per user request:
+
+\begin{lstlisting}[language=Python, caption={for\_user sugar}]
+# Cheap -- shares the underlying HawcxAgent (one IPC connection).
+alice_search = nim_search_tool.for_user("alice@example.com")
+bob_search   = nim_search_tool.for_user("bob@example.com")
+
+# alice_search always calls invoke_for("alice@example.com", ...)
+# bob_search   always calls invoke_for("bob@example.com",   ...)
+\end{lstlisting}
+
+% ── 8. Security Model ────────────────────────────────────────────────────────
+\section{Security Model}
+
+\begin{table}[h!]
+\centering
+\caption{HAAP SDK security properties}
+\renewcommand{\arraystretch}{1.35}
+\begin{tabularx}{\linewidth}{@{} p{4.5cm} X @{}}
+\toprule
+\textbf{Property} & \textbf{How it is achieved} \\
+\midrule
+Credentials never reach the LLM process &
+  \code{HawcxTool.\_run} calls \code{HawcxAgent.invoke} over local UDS only.
+  The Assembler fetches provider credentials internally (§47.8
+  \code{GetExternalCredential}) and attaches them to the outbound HTTPS
+  request. The credential value never returns to Python. \\
+\addlinespace
+HAAP session keys never reach the LLM process &
+  All crypto (\code{K\_session\_root}, \code{K\_req}, \code{K\_resp}) lives
+  inside the Assembler process. The SDK exchanges only plaintext request
+  bodies and decrypted response bodies. \\
+\addlinespace
+LLM-supplied principals are sandboxed &
+  \code{principal\_allowlist} is a closed, operator-controlled set validated
+  synchronously at \code{HawcxAgent.connect()} time. A compromised or
+  hallucinating LLM cannot escalate to an out-of-list principal. \\
+\addlinespace
+Per-tool credential binding &
+  \code{tool\_id} (§47.4) prevents one tool from borrowing another tool's
+  credentials even within the same pipeline. \\
+\addlinespace
+IPC socket isolation &
+  Sockets are placed under \code{\$XDG\_RUNTIME\_DIR/hawcx/} (0o700, per-UID,
+  systemd-managed). The SDK refuses to fall back to
+  \code{/tmp/hawcx/} without an explicit
+  \code{HAAP\_SDK\_ALLOW\_TMP\_IPC=1} opt-in. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\vspace{8pt}
+\noindent\rule{\linewidth}{0.4pt}\\[4pt]
+{\small\color{codegray}
+Generated 2026-05-26. Source: \texttt{hawcx\_agentic\_sdk} \texttt{0.1.0-alpha.11},
+HAAP Canonical Specification v7.2.5. Copyright \textcopyright\ 2026 Hawcx Inc.
+All rights reserved.}
+
+\end{document}
