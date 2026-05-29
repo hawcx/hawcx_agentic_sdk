@@ -28,33 +28,13 @@ jobs:
     steps:
       - name: Checkout hx_agentic_sdk
         uses: actions/checkout@v6
-        with:
-          path: hx_agentic_sdk
 
-      # The SDK workspace path-deps to ../hx_agent_crypto_core/crates/*
-      # and hx_agent_client_auth_service path-deps to the same sibling.
-      # Both must be checked out at the same level as hx_agentic_sdk so
-      # the relative paths resolve at build time.
-      #
-      # Same-org private repos auto-grant read access to GITHUB_TOKEN;
-      # no separate PAT needed. (The retired HX_LABS_READ_TOKEN PAT
-      # reference was removed 2026-05-21 with the hx_labs migration.)
-      # Sibling-checkout of hx_agent_crypto_core has been removed —
-      # crypto-core crates are now resolved from the private Kellnr at
-      # cargo.hawcx.com (see workspace.dependencies in Cargo.toml +
-      # Configure hawcx cargo registry step below). The lockstep
-      # crypto-core tagging discipline added in #20 is no longer
-      # required for SDK releases; crypto-core publishes on its own
-      # cadence and the SDK pins to whatever version it depends on.
-
-      - name: Checkout hx_agent_client_auth_service (sibling)
-        uses: actions/checkout@v6
-        with:
-          repository: hawcx/hx_agent_client_auth_service
-          token: ${{ secrets.GITHUB_TOKEN }}
-          path: hx_agent_client_auth_service
-          ref: main
-
+      # F-2 sibling-checkout migration (2026-05-27): hawcx-manager is
+      # no longer built in-pipeline from a sibling clone of
+      # hx_agent_client_auth_service. It's published to the private
+      # Kellnr at cargo.hawcx.com on tag push and installed here via
+      # `cargo install hawcx-manager --registry hawcx --locked`. This
+      # mirrors release-node.yml's build-binary job.
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -71,19 +51,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libdbus-1-dev pkg-config
-
-      - name: Cache cargo registry + target dirs
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            hx_agent_client_auth_service/target/
-            hx_agentic_sdk/target/
-          key: cargo-${{ matrix.target }}-${{ hashFiles('hx_agent_client_auth_service/**/Cargo.lock', 'hx_agentic_sdk/**/Cargo.lock') }}
-          restore-keys: |
-            cargo-${{ matrix.target }}-
 
       - name: Configure hawcx cargo registry
         shell: bash
@@ -104,11 +71,32 @@ jobs:
           EOF
           chmod 600 ~/.cargo/credentials.toml
 
-      - name: Build hawcx-manager (single multi-call binary, all platforms)
-        working-directory: hx_agent_client_auth_service
-        run: |
-          cargo build --release --target ${{ matrix.target }} --bin hawcx-manager
+      # Exact-match binary cache, keyed by tag + target. No restore-keys
+      # fallback — a stale binary from a prior tag must never be
+      # silently reused for a new release.
+      - name: Restore cached hawcx-manager binary
+        id: cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ runner.temp }}/staging/bin
+          key: hawcx-manager-${{ matrix.target }}-${{ github.ref_name }}
+
+      - name: Install hawcx-manager from hawcx registry
+        if: steps.cache.outputs.cache-hit != 'true'
         shell: bash
+        run: |
+          cargo install hawcx-manager \
+            --registry hawcx \
+            --target ${{ matrix.target }} \
+            --root "${RUNNER_TEMP}/staging" \
+            --locked
+
+      - name: Save hawcx-manager binary to cache
+        if: steps.cache.outputs.cache-hit != 'true' && success()
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ runner.temp }}/staging/bin
+          key: hawcx-manager-${{ matrix.target }}-${{ github.ref_name }}
 
       - name: Package distribution tarball
         shell: bash
@@ -123,30 +111,24 @@ jobs:
           # v7.2.5 §35.6 + §39.12 and the Phase 3-5 cutover memo at
           # /hx_agent_canonical_spec/DESIGN-MEMO-MULTICALL-BINARY.md.
           #
-          # 2026-05-21: haap-rsv removed from this tarball. The MCP-side
-          # verifier ships from hx_agent_authorizer/.github/workflows/
-          # release.yml as a separate Docker image + tarball at
-          # ghcr.io/hawcx/haap-rsv.
-          #
           # 2026-05-22 (Phase 3-5): one real binary + 7 legacy aliases.
-          # On Unix targets the aliases are symlinks (cheap, ~40 MB
-          # tarball). On Windows we copy the .exe under each name
-          # (~320 MB; symlinks require admin/dev-mode and are not
-          # MDM-friendly).
+          # Unix → symlinks; Windows → .exe copies (symlinks require
+          # admin/dev-mode and are not MDM-friendly).
           LEGACY_NAMES="haap-authenticator haap-tqs-precompute haap-tqs-jit haap-assembler haap-eib haap-supervisor haap-sdk"
+          BIN_DIR="${RUNNER_TEMP}/staging/bin"
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cp "hx_agent_client_auth_service/target/${{ matrix.target }}/release/hawcx-manager.exe" "$OUT/bin/"
+            cp "$BIN_DIR/hawcx-manager.exe" "$OUT/bin/"
             for n in $LEGACY_NAMES; do
               cp "$OUT/bin/hawcx-manager.exe" "$OUT/bin/$n.exe"
             done
           else
-            cp "hx_agent_client_auth_service/target/${{ matrix.target }}/release/hawcx-manager" "$OUT/bin/"
+            cp "$BIN_DIR/hawcx-manager" "$OUT/bin/"
             (cd "$OUT/bin" && for n in $LEGACY_NAMES; do
               ln -sf hawcx-manager "$n"
             done)
           fi
-          cp hx_agentic_sdk/README.md "$OUT/" 2>/dev/null || true
-          cp -r hx_agentic_sdk/docs "$OUT/" 2>/dev/null || true
+          cp README.md "$OUT/" 2>/dev/null || true
+          cp -r docs "$OUT/" 2>/dev/null || true
           tar -czf "dist/$OUT.tar.gz" "$OUT"
 
       - name: Upload distribution artifact (release asset)
@@ -163,14 +145,10 @@ jobs:
           mkdir -p docker-staging
           # Phase 3-5 cutover (2026-05-22): only the real binary
           # (hawcx-manager) is uploaded as the docker-bins artifact.
-          # actions/upload-artifact@v7 zips the path and DEREFERENCES
-          # symlinks (turns them back into full file copies), defeating
-          # the multi-call binary's size win. Solution: symlinks are
-          # generated on the docker job runner AFTER download-artifact
-          # but BEFORE the docker build context is assembled. The
-          # docker runner is Linux too, so symlink semantics are
-          # identical.
-          cp hx_agent_client_auth_service/target/${{ matrix.target }}/release/hawcx-manager docker-staging/
+          # actions/upload-artifact@v7 dereferences symlinks when
+          # zipping; the 7 legacy aliases are regenerated on the docker
+          # job runner BEFORE the build context is assembled.
+          cp "${RUNNER_TEMP}/staging/bin/hawcx-manager" docker-staging/
           ls -la docker-staging/
 
       - name: Upload Linux binaries for Docker (linux only)
