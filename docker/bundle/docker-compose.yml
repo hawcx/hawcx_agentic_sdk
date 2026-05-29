@@ -25,7 +25,7 @@ name: hawcx-haap-eval
 
 services:
   caa-admin-auth:
-    image: ghcr.io/hawcx/hx-caa:${HAAP_VERSION:-v0.1.0-alpha.1}
+    image: ghcr.io/hawcx/hx-caa:${HAAP_VERSION:-v0.1.0-alpha.13}
     container_name: hawcx-caa-admin-auth
     restart: unless-stopped
     entrypoint: ["/usr/local/bin/haap-admin-auth"]
@@ -46,7 +46,7 @@ services:
       - hawcx-net
 
   caa:
-    image: ghcr.io/hawcx/hx-caa:${HAAP_VERSION:-v0.1.0-alpha.1}
+    image: ghcr.io/hawcx/hx-caa:${HAAP_VERSION:-v0.1.0-alpha.13}
     container_name: hawcx-caa
     restart: unless-stopped
     environment:
@@ -78,12 +78,18 @@ services:
     # from hx_agent_authorizer's own release pipeline at
     # ghcr.io/hawcx/haap-rsv. The image's ENTRYPOINT is already
     # /usr/local/bin/haap-rsv, so no override is needed.
-    image: ghcr.io/hawcx/haap-rsv:${HAAP_VERSION:-v0.1.0-alpha.1}
+    image: ghcr.io/hawcx/haap-rsv:${HAAP_VERSION:-v0.1.0-alpha.13}
     container_name: hawcx-rsv
     restart: unless-stopped
+    # Force TCP transport; default is UDS at /tmp/hawcx/rsv.sock which makes
+    # the port mapping below dead. The auth token must be set in .env (the
+    # smoke-test generates a random one if absent).
+    command: ["--transport", "tcp"]
     environment:
       - HAAP_RSV_LISTEN=0.0.0.0:8443
+      - HAAP_RSV_AUTH_TOKEN=${HAAP_RSV_AUTH_TOKEN}
       - HAAP_AUDIENCE_HASH=${HAAP_AUDIENCE_HASH}
+      - HAAP_RSV_ORG_ID=${HAWCX_ORG_ID}
       - HAAP_CUSTOMER_REDIS_URL=redis://redis:6379
       - HAAP_REPLAY_LRU_CAPACITY=${HAAP_REPLAY_LRU_CAPACITY:-10000}
       - RUST_LOG=${LOG_LEVEL:-info}
