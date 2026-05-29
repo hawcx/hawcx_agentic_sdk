@@ -258,17 +258,53 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Compute the moving dist-tag for this release: prereleases
+      # (alpha/beta/rc) move the matching channel tag (e.g. `alpha`),
+      # GA releases move `latest`. This mirrors the npm dist-tag
+      # discipline in release-node.yml so a customer pulling
+      # `ghcr.io/hawcx/hx-agent-sdk:alpha` always lands on the latest
+      # alpha image. NEVER point `:latest` at a prerelease — that's
+      # how an evaluator accidentally ships unreleased code.
+      - name: Compute moving dist-tag
+        id: dist
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          case "$REF_NAME" in
+            *alpha*) echo "moving_tag=alpha" >> "$GITHUB_OUTPUT" ;;
+            *beta*)  echo "moving_tag=beta"  >> "$GITHUB_OUTPUT" ;;
+            *rc*)    echo "moving_tag=rc"    >> "$GITHUB_OUTPUT" ;;
+            *)       echo "moving_tag=latest" >> "$GITHUB_OUTPUT" ;;
+          esac
+
       - name: Create + push multi-arch manifest
         run: |
           docker buildx imagetools create \
             -t ghcr.io/hawcx/hx-agent-sdk:${{ github.ref_name }} \
-            -t ghcr.io/hawcx/hx-agent-sdk:latest \
+            -t ghcr.io/hawcx/hx-agent-sdk:${{ steps.dist.outputs.moving_tag }} \
             ghcr.io/hawcx/hx-agent-sdk:${{ github.ref_name }}-amd64 \
             ghcr.io/hawcx/hx-agent-sdk:${{ github.ref_name }}-arm64
 
-      - name: Verify manifest
+      - name: Verify manifest (per-tag + multi-arch platforms)
         run: |
+          set -euo pipefail
           docker buildx imagetools inspect ghcr.io/hawcx/hx-agent-sdk:${{ github.ref_name }}
+          # Fail loudly if either platform is missing from the
+          # multi-arch index — alpha.10 silently shipped without this
+          # check, and an arm64 regression would be invisible until a
+          # customer on Apple Silicon hit `exec format error`.
+          platforms=$(docker buildx imagetools inspect \
+            ghcr.io/hawcx/hx-agent-sdk:${{ github.ref_name }} \
+            --format '{{range .Manifest.Manifests}}{{.Platform.OS}}/{{.Platform.Architecture}} {{end}}')
+          echo "platforms: $platforms"
+          for p in linux/amd64 linux/arm64; do
+            case " $platforms " in
+              *" $p "*) ;;
+              *) echo "::error::manifest missing platform $p"; exit 1 ;;
+            esac
+          done
 
   bundle_smoke_test:
     name: bundle smoke test
@@ -332,12 +368,14 @@ jobs:
             - macOS aarch64 (Apple Silicon)
             - Windows x86_64 / aarch64
 
-            **Multi-arch Docker image**:
+            **Multi-arch Docker image** (supports `linux/amd64` and
+            `linux/arm64`):
             ```
             ghcr.io/hawcx/hx-agent-sdk:${{ github.ref_name }}
-            ghcr.io/hawcx/hx-agent-sdk:latest
             ```
-            Supports `linux/amd64` and `linux/arm64`.
+            Prereleases (alpha/beta/rc) also move the matching channel
+            tag (`:alpha`, `:beta`, `:rc`). `:latest` is reserved for
+            GA releases.
 
             ## Contents
 
