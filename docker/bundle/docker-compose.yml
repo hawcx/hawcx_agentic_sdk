@@ -49,6 +49,10 @@ services:
     image: ghcr.io/hawcx/hx-caa:${HAAP_VERSION:-v0.1.0-alpha.13}
     container_name: hawcx-caa
     restart: unless-stopped
+    # alpha.13 ships with an empty default ENTRYPOINT (regression from the
+    # arm64 rebuild — upstream Dockerfile needs the default restored).
+    # Set explicitly here so the orchestrator process launches.
+    entrypoint: ["/usr/local/bin/haap-customer-admin-agent"]
     environment:
       - HAWCX_ORG_ID=${HAWCX_ORG_ID}
       - HAAP_CAA_PRINCIPAL_ID=${HAAP_CAA_PRINCIPAL_ID:-}
