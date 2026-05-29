@@ -8,6 +8,14 @@ publish = false
 name = "stage-rsv-mint"
 path = "src/main.rs"
 
+# Sibling helper used by `stage-mcp-sidecar-test.sh`: takes a
+# response-key hex + session_id + base64 wire bytes from a prior
+# `/encrypt-response` call and prints the decrypted plaintext. Kept in
+# the same crate so the `haap-core` registry pin stays in one place.
+[[bin]]
+name = "stage-rsv-decrypt"
+path = "src/decrypt.rs"
+
 # Pinned to the same registry versions the authorizer + SDK pipeline use
 # (cargo.hawcx.com). Mirrors `hx_agent_authorizer/Cargo.toml`'s
 # [workspace.dependencies] block so this binary mints tokens whose
