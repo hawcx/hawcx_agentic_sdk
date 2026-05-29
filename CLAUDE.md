@@ -1,8 +1,9 @@
 # hawcx_agentic_sdk — Claude Code Context
 
 The customer-facing **HAAP release/distribution channel**. As of
-2026-05-21 this repo is **release-only**: it hosts no Rust source code,
-no `Cargo.toml`, no `crates/` directory. What lives here:
+2026-05-21 this repo is **release-only** for the customer-facing
+distribution channel: no `crates/` directory, no workspace `Cargo.toml`,
+no Rust source for any artifact shipped to customers. What lives here:
 
 - `Dockerfile` + `Dockerfile.fast` — image build
 - `.github/workflows/release.yml` + `release-node.yml` + `release-python.yml` — packaging
@@ -10,6 +11,14 @@ no `Cargo.toml`, no `crates/` directory. What lives here:
 - `docs/`, `README.md`, `CHANGELOG.md`, `AUDIT.md`, `CLAUDE.md`
 - `node/`, `python/` — pure-language SDK clients (no NAPI / pyo3 /
   WASM — design choice; do not change without spec review)
+- `scripts/` — **operator tooling only.** Small Rust helpers (their own
+  `Cargo.toml`, `target/` and `Cargo.lock` gitignored) are permitted
+  here when they enable wire-level testing against deployed images
+  (e.g., `scripts/mint-helper/` for the stage RSV wire test). These
+  binaries are NEVER bundled into any release artifact, NEVER published
+  to npm/PyPI/GHCR/`cargo.hawcx.com`, and NEVER referenced by any
+  workflow that ships to customers. If a helper needs broader reuse,
+  promote it to a sibling repo and publish to `cargo.hawcx.com`.
 
 The binaries assembled into the SDK image, npm platform packages, and
 release tarballs are pulled from the private Kellnr registry at
@@ -124,10 +133,15 @@ but not yet published (alpha.13+ uses hatchling, not maturin).
 
 ## Conventions
 
-- This repo has no Rust source. Do NOT add `crates/`, `Cargo.toml`, or
-  `Cargo.lock`. If you need to make a source-level change, it goes in a
-  sibling repo, gets published to `cargo.hawcx.com`, and this repo's
-  workflows install it via `cargo install --registry hawcx`.
+- This repo has no Rust source **in any release artifact**. Do NOT add
+  `crates/`, a workspace `Cargo.toml`, or any `Cargo.lock` that ships.
+  If you need source for the SDK, image, or any published surface, it
+  goes in a sibling repo, gets published to `cargo.hawcx.com`, and
+  this repo's workflows install it via `cargo install --registry hawcx`.
+  Narrow exception: `scripts/` may carry operator tooling (small Rust
+  helpers with their own `Cargo.toml`, `target/` and `Cargo.lock`
+  gitignored, NEVER referenced by a release workflow). See the
+  "What lives here" intro for the full carve-out.
 - Pure-language SDK *clients*. No NAPI / pyo3 / WASM in `node/src` or
   `python/src`. The TS/Python code only opens UDS and speaks the framed
   wire protocol — design choice; do not introduce native bindings. The
