@@ -264,16 +264,19 @@ jobs:
           npm run build
       - name: Publish
         working-directory: node
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          out=$(npm publish --provenance --access public --tag alpha 2>&1) && echo "$out" || {
+          out=$(npm publish --access public --tag alpha 2>&1) && echo "$out" || {
             echo "$out"
             echo "$out" | grep -q "cannot publish over the previously published versions" \
               && echo "Already published — skipping." \
               || exit 1
           }
-        # Authentication via npm Trusted Publishing (OIDC) — same as above.
       - name: Move latest tag
         working-directory: node
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           PKG=$(node -p "require('./package.json').name")
           VER=$(node -p "require('./package.json').version")
