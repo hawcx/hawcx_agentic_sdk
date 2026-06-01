@@ -211,7 +211,13 @@ jobs:
           "
       - name: Publish platform package
         working-directory: node/platforms/${{ matrix.platform_pkg }}
-        run: npm publish --provenance --access public --tag alpha
+        run: |
+          out=$(npm publish --provenance --access public --tag alpha 2>&1) && echo "$out" || {
+            echo "$out"
+            echo "$out" | grep -q "cannot publish over the previously published versions" \
+              && echo "Already published — skipping." \
+              || exit 1
+          }
         # Authentication via npm Trusted Publishing (OIDC). No stored token
         # needed — npm exchanges the GitHub id-token for a publish credential
         # at runtime. Trusted publisher must be configured on npmjs.com for
@@ -255,7 +261,13 @@ jobs:
           npm run build
       - name: Publish
         working-directory: node
-        run: npm publish --provenance --access public --tag alpha
+        run: |
+          out=$(npm publish --provenance --access public --tag alpha 2>&1) && echo "$out" || {
+            echo "$out"
+            echo "$out" | grep -q "cannot publish over the previously published versions" \
+              && echo "Already published — skipping." \
+              || exit 1
+          }
         # Authentication via npm Trusted Publishing (OIDC) — same as above.
       - name: Move latest tag
         working-directory: node
