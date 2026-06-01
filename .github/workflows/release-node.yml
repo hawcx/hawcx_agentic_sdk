@@ -250,6 +250,8 @@ jobs:
           fi
       - name: Stamp version + install + build
         working-directory: node
+        env:
+          NODE_AUTH_TOKEN: ""
         run: |
           node -e "
             const fs = require('fs');
