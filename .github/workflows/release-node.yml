@@ -181,6 +181,14 @@ jobs:
         with:
           name: binary-${{ matrix.platform_pkg }}
           path: binary/
+      - name: Resolve publish version
+        id: ver
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME#node-v}" >> "$GITHUB_OUTPUT"
+          fi
       - name: Stage binary into platform package
         shell: bash
         run: |
@@ -191,6 +199,16 @@ jobs:
           fi
           cp "$BINARY_SRC" "node/platforms/${{ matrix.platform_pkg }}/${{ matrix.binary_name }}"
           chmod +x "node/platforms/${{ matrix.platform_pkg }}/${{ matrix.binary_name }}" || true
+          # Stamp the resolved version into the platform package.json so npm
+          # publishes the right version rather than whatever is committed in git.
+          node -e "
+            const fs = require('fs');
+            const p = 'node/platforms/${{ matrix.platform_pkg }}/package.json';
+            const pkg = JSON.parse(fs.readFileSync(p));
+            pkg.version = '${{ steps.ver.outputs.version }}';
+            fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + '\n');
+            console.log('Stamped', p, 'to', pkg.version);
+          "
       - name: Publish platform package
         working-directory: node/platforms/${{ matrix.platform_pkg }}
         run: npm publish --provenance --access public --tag alpha
@@ -215,9 +233,24 @@ jobs:
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org/"
-      - name: Install + build
+      - name: Resolve publish version
+        id: ver
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME#node-v}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Stamp version + install + build
         working-directory: node
         run: |
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json'));
+            pkg.version = '${{ steps.ver.outputs.version }}';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+            console.log('Stamped package.json to', pkg.version);
+          "
           npm install --omit=optional --no-package-lock
           npm run build
       - name: Publish
