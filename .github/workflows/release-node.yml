@@ -105,6 +105,7 @@ jobs:
         run: |
           cargo install hawcx-manager \
             --registry hawcx \
+            --version 0.8.1 \
             --target ${{ matrix.target }} \
             --root "${RUNNER_TEMP}/staging" \
             --locked
