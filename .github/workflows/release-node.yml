@@ -58,12 +58,15 @@ jobs:
       # ── Binary cache restore ────────────────────────────────────────────────
       # Exact-match only — no restore-keys fallback so a stale binary from a
       # prior version is never silently reused for a new release.
+      # The `-bins2` suffix bumps the cache layout: caches now hold BOTH
+      # hawcx-manager and haap-unseal-orch, so old manager-only entries must
+      # not be reused (they would yield an artifact missing the orchestrator).
       - name: Restore cached hawcx-manager binary
         id: cache
         uses: actions/cache/restore@a7833574556fa59680c1b7cb190c1735db73ebf0 # v5.0.0
         with:
           path: ${{ runner.temp }}/staging/bin
-          key: hawcx-manager-${{ matrix.target }}-${{ steps.ver.outputs.key }}
+          key: hawcx-manager-bins2-${{ matrix.target }}-${{ steps.ver.outputs.key }}
 
       # ── Build (skipped entirely on cache hit) ───────────────────────────────
       - name: Install Rust toolchain
@@ -108,12 +111,24 @@ jobs:
       # INF-01: exact-version pin (=X.Y.Z) + --locked so the binary bundled
       # into the npm platform packages is deterministically tied to one
       # hawcx-manager source version.
-      - name: Install hawcx-manager from hawcx registry
+      - name: Install hawcx-manager + haap-unseal-orch from hawcx registry
         if: steps.cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
+          # hawcx-manager: the multi-call binary (all 5 daemon roles via
+          # argv0/subcommand dispatch) + enroll/status/run-pipeline.
           cargo install hawcx-manager \
+            --registry hawcx \
+            --version "=${HAWCX_MANAGER_VERSION}" \
+            --target ${{ matrix.target }} \
+            --root "${RUNNER_TEMP}/staging" \
+            --locked
+          # haap-unseal-orch: the separate orchestrator binary the supervisor
+          # spawns by name from PATH (graph.rs `Command::new("haap-unseal-orch")`).
+          # Same workspace version as hawcx-manager. Without it co-located with
+          # hawcx-manager in the platform package, the supervisor cannot launch.
+          cargo install haap-unseal-orch \
             --registry hawcx \
             --version "=${HAWCX_MANAGER_VERSION}" \
             --target ${{ matrix.target }} \
@@ -135,6 +150,21 @@ jobs:
             exit 1
           fi
 
+      # Presence check only (NOT execution): cross-compiled targets such as
+      # aarch64-pc-windows-msvc cannot be exec'd on the x86_64 runner.
+      - name: Assert haap-unseal-orch artifact present
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ORCH="${RUNNER_TEMP}/staging/bin/haap-unseal-orch"
+          [[ "${{ runner.os }}" == "Windows" ]] && ORCH="${ORCH}.exe"
+          if [[ ! -s "$ORCH" ]]; then
+            echo "::error::haap-unseal-orch missing or empty at $ORCH (cargo install failed?)"
+            exit 1
+          fi
+          echo "haap-unseal-orch present ($(wc -c < "$ORCH") bytes)"
+
       # Save only on a successful fresh build — a failed build must not
       # poison the cache for subsequent retries.
       - name: Save hawcx-manager binary to cache
@@ -142,7 +172,7 @@ jobs:
         uses: actions/cache/save@a7833574556fa59680c1b7cb190c1735db73ebf0 # v5.0.0
         with:
           path: ${{ runner.temp }}/staging/bin
-          key: hawcx-manager-${{ matrix.target }}-${{ steps.ver.outputs.key }}
+          key: hawcx-manager-bins2-${{ matrix.target }}-${{ steps.ver.outputs.key }}
 
       # ── Always upload artifact (whether from cache or fresh build) ──────────
       - name: Upload binary artifact
@@ -152,6 +182,8 @@ jobs:
           path: |
             ${{ runner.temp }}/staging/bin/hawcx-manager
             ${{ runner.temp }}/staging/bin/hawcx-manager.exe
+            ${{ runner.temp }}/staging/bin/haap-unseal-orch
+            ${{ runner.temp }}/staging/bin/haap-unseal-orch.exe
           if-no-files-found: warn
 
   test-matrix:
@@ -188,14 +220,19 @@ jobs:
         include:
           - platform_pkg: linux-x64
             binary_name: hawcx-manager
+            orch_name: haap-unseal-orch
           - platform_pkg: linux-arm64
             binary_name: hawcx-manager
+            orch_name: haap-unseal-orch
           - platform_pkg: darwin-arm64
             binary_name: hawcx-manager
+            orch_name: haap-unseal-orch
           - platform_pkg: win32-x64
             binary_name: hawcx-manager.exe
+            orch_name: haap-unseal-orch.exe
           - platform_pkg: win32-arm64
             binary_name: hawcx-manager.exe
+            orch_name: haap-unseal-orch.exe
 
     steps:
       - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
@@ -215,26 +252,64 @@ jobs:
           else
             echo "version=${GITHUB_REF_NAME#node-v}" >> "$GITHUB_OUTPUT"
           fi
-      - name: Stage binary into platform package
+      - name: Stage binaries into platform package
         shell: bash
         run: |
-          BINARY_SRC="binary/${{ matrix.binary_name }}"
-          if [[ ! -f "$BINARY_SRC" ]]; then
-            echo "Binary not found: $BINARY_SRC"
-            exit 1
-          fi
-          cp "$BINARY_SRC" "node/platforms/${{ matrix.platform_pkg }}/${{ matrix.binary_name }}"
-          chmod +x "node/platforms/${{ matrix.platform_pkg }}/${{ matrix.binary_name }}" || true
+          set -euo pipefail
+          PKG_DIR="node/platforms/${{ matrix.platform_pkg }}"
+          # Stage BOTH binaries: the multi-call manager and the orchestrator the
+          # supervisor spawns by name from PATH. They must be co-located in the
+          # platform package dir so the SDK bring-up can put that dir on PATH.
+          for b in "${{ matrix.binary_name }}" "${{ matrix.orch_name }}"; do
+            SRC="binary/${b}"
+            if [[ ! -f "$SRC" ]]; then
+              echo "::error::binary not found in artifact: $SRC"
+              exit 1
+            fi
+            cp "$SRC" "${PKG_DIR}/${b}"
+            chmod +x "${PKG_DIR}/${b}" || true
+          done
+          ls -la "${PKG_DIR}"
           # Stamp the resolved version into the platform package.json so npm
           # publishes the right version rather than whatever is committed in git.
+          # Also ensure BOTH binaries are in the `files` allowlist — npm only
+          # publishes files listed there, so the orchestrator would be silently
+          # dropped from the tarball otherwise (idempotent: no duplicates).
           node -e "
             const fs = require('fs');
-            const p = 'node/platforms/${{ matrix.platform_pkg }}/package.json';
+            const p = '${PKG_DIR}/package.json';
             const pkg = JSON.parse(fs.readFileSync(p));
             pkg.version = '${{ steps.ver.outputs.version }}';
+            const files = new Set(pkg.files || []);
+            files.add('${{ matrix.binary_name }}');
+            files.add('${{ matrix.orch_name }}');
+            pkg.files = [...files];
             fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + '\n');
-            console.log('Stamped', p, 'to', pkg.version);
+            console.log('Stamped', p, 'to', pkg.version, 'files:', pkg.files);
           "
+      # Verify BOTH binaries are actually in the tarball npm will publish.
+      # `npm pack --dry-run` reports exactly what would be packed, honoring the
+      # `files` allowlist — this catches a missing binary BEFORE we publish an
+      # incomplete package. Presence check only (no execution of the binaries).
+      - name: Verify binaries are bundled in tarball
+        working-directory: node/platforms/${{ matrix.platform_pkg }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PACKED="$(npm pack --dry-run --json)"
+          echo "$PACKED" | node -e "
+            const data = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+            const files = (data[0].files || []).map(f => f.path);
+            const required = ['${{ matrix.binary_name }}', '${{ matrix.orch_name }}'];
+            const missing = required.filter(r => !files.includes(r));
+            if (missing.length) {
+              console.error('::error::missing from tarball:', missing.join(', '));
+              console.error('present:', files.join(', '));
+              process.exit(1);
+            }
+            console.log('OK bundled in tarball:', required.join(', '));
+          "
+
       - name: Publish platform package
         working-directory: node/platforms/${{ matrix.platform_pkg }}
         run: |
