@@ -65,7 +65,16 @@ from hawcx_haap.ipc import (
     ToolCallResponse,
 )
 
-__version__ = "0.1.0a12"
+# Single source of truth: read the version from installed package metadata
+# (pyproject.toml) so it can never drift from the published artifact. Falls
+# back to a dev sentinel for editable/source checkouts with no dist metadata.
+from importlib.metadata import PackageNotFoundError as _PackageNotFoundError
+from importlib.metadata import version as _pkg_version
+
+try:
+    __version__ = _pkg_version("hawcx-haap")
+except _PackageNotFoundError:  # pragma: no cover - source checkout without install
+    __version__ = "0.0.0+dev"
 __all__ = [
     "get_binary_path",
     "HawcxAgent",
