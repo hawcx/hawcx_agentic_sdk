@@ -47,8 +47,11 @@ the two CAA channels.
 - **SDK version (release line):** `v0.1.0-alpha.13` (current). Used for
   Docker tags, the 6 published npm packages (`@hawcx/hawcx-haap` + 5
   platform packages), and tarballs. `hawcx-manager` ships at crate
-  version `0.8.0` from `cargo.hawcx.com`; `haap-rsv` carries its own
-  semver from `hx_agent_authorizer`.
+  version `0.8.2` from `cargo.hawcx.com` (pinned as
+  `HAWCX_MANAGER_VERSION` in all three release workflows — bump in
+  lockstep with the hawcx-manager workspace version in
+  `hx_agent_client_auth_service`); `haap-rsv` carries its own semver from
+  `hx_agent_authorizer`.
 - **Canonical architecture reference:** `HAWCX_MANAGER_AUDIT.pdf` v2
   (2026-05-28) in `hx_agent_canonical_spec` — definitive for the
   multi-call binary, network surface, registration flow, and the

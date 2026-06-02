@@ -351,9 +351,9 @@ function decodeHandshake(payload: Buffer): DecodedHandshake {
  * - the dir's uid does not equal `process.getuid()`, OR
  * - the dir's mode has any group/other bit set (mask `0o077`).
  */
-function validateIpcSocketPath(endpoint: string): void {
+function validateIpcSocketPath(endpoint: string): fs.Stats | null {
   if (process.platform === "win32") {
-    return; // Named Pipe ACLs handled by the kernel; nothing to stat.
+    return null; // Named Pipe ACLs handled by the kernel; nothing to stat.
   }
   const getuid = process.getuid;
   if (typeof getuid !== "function") {
@@ -428,6 +428,9 @@ function validateIpcSocketPath(endpoint: string): void {
       );
     }
   }
+  // INF-08: return the validated stat so the caller can re-stat the
+  // *connected* socket and detect a swap between this check and connect.
+  return sockStat;
 }
 
 /**
@@ -446,7 +449,18 @@ export function connectAssembler(
   // synchronously on mismatch — the Promise constructor's `executor`
   // call catches it and rejects, so caller's `await` still sees an
   // IpcError without partial side effects.
-  validateIpcSocketPath(endpoint);
+  //
+  // INF-08: capture the validated socket's stat so we can re-stat the
+  // *connected* path and detect a path-based TOCTOU swap (an attacker who
+  // can write in the parent dir replacing the socket between stat and
+  // connect). Node's `net` does not expose SO_PEERCRED without a native
+  // binding (forbidden in this pure-language client — see CLAUDE.md), so
+  // we close the window by asserting the path still resolves to the same
+  // (dev, ino, uid) we validated. A swap changes the inode. This is
+  // strongest on a 0o700 parent owned by us (the default); the residual
+  // window only matters under the opt-in legacy HAAP_SDK_ALLOW_TMP_IPC=1
+  // /tmp/hawcx/ path, where a same-UID parent owner is no longer required.
+  const preStat = validateIpcSocketPath(endpoint);
   return new Promise((resolve, reject) => {
     const sock = net.createConnection({ path: endpoint });
     const timer =
@@ -464,6 +478,36 @@ export function connectAssembler(
     sock.once("connect", () => {
       if (timer) clearTimeout(timer);
       sock.removeListener("error", onError);
+      // INF-08: re-stat after connect and compare identity. On Windows
+      // preStat is null (Named Pipe ACLs are kernel-enforced) — skip.
+      if (preStat !== null) {
+        try {
+          const postStat = fs.statSync(endpoint);
+          if (
+            !postStat.isSocket() ||
+            postStat.dev !== preStat.dev ||
+            postStat.ino !== preStat.ino ||
+            postStat.uid !== preStat.uid
+          ) {
+            sock.destroy();
+            reject(
+              new IpcError(
+                `IPC socket ${endpoint} changed identity between validation and ` +
+                  "connect (possible TOCTOU swap); refusing the connection",
+              ),
+            );
+            return;
+          }
+        } catch (err) {
+          sock.destroy();
+          reject(
+            new IpcError(
+              `re-stat ${endpoint} after connect failed: ${(err as Error).message}`,
+            ),
+          );
+          return;
+        }
+      }
       resolve(sock);
     });
   });

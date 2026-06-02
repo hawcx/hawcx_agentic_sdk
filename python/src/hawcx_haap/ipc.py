@@ -274,7 +274,7 @@ def perform_handshake(sock: socket.socket, local_role: int = ROLE_AGENT) -> int:
 # ── Platform-aware socket connect ────────────────────────────────────
 
 
-def _validate_ipc_socket_path(socket_path: str) -> None:
+def _validate_ipc_socket_path(socket_path: str) -> os.stat_result | None:
     """H-4 (2026-05-20) — validate UID + parent-dir mode before connect.
 
     Refuses sockets whose owner UID differs from
@@ -291,9 +291,14 @@ def _validate_ipc_socket_path(socket_path: str) -> None:
     No-op on Windows: Named Pipe ACLs are handled by the kernel at
     ``CreateFileW`` time and surface as ``OSError(EACCES)`` from the
     pipe-open path; nothing to stat here.
+
+    INF-08: returns the validated ``stat_result`` so the caller can
+    re-verify the connected peer (SO_PEERCRED) and/or re-stat the path to
+    detect a TOCTOU swap between this check and ``connect``. Returns
+    ``None`` on Windows.
     """
     if sys.platform == "win32":
-        return
+        return None
 
     sock_path = Path(socket_path)
     try:
@@ -336,6 +341,13 @@ def _validate_ipc_socket_path(socket_path: str) -> None:
         )
     parent_perms = parent_stat.st_mode & 0o777
     if parent_perms & 0o077 != 0:
+        # INF-08: setting HAAP_SDK_ALLOW_TMP_IPC=1 relaxes the parent-dir
+        # mode (and owner) requirement for the legacy /tmp/hawcx/ path. That
+        # REOPENS the stat→connect TOCTOU window for that path, since a
+        # group/other-writable parent lets another user swap the socket. The
+        # post-connect SO_PEERCRED / re-stat check in
+        # _verify_peer_after_connect is the backstop that still catches a
+        # swap on that opt-in path.
         if os.environ.get("HAAP_SDK_ALLOW_TMP_IPC") != "1":
             raise IpcError(
                 f"IPC parent dir {parent} has mode {parent_perms:o}; "
@@ -344,13 +356,77 @@ def _validate_ipc_socket_path(socket_path: str) -> None:
                 "opt into the legacy /tmp/hawcx/ path."
             )
 
+    return sock_stat
+
+
+def _verify_peer_after_connect(
+    sock: socket.socket, pre_stat: os.stat_result, socket_path: str
+) -> None:
+    """INF-08: close the stat→connect TOCTOU window after ``connect``.
+
+    Two complementary checks:
+
+    1. ``SO_PEERCRED`` (Linux) — read the kernel-attested peer credentials
+       of the *connected* socket and assert the peer UID equals the UID we
+       validated. This is OS-enforced peer identity: it cannot be defeated
+       by a path swap, because it reflects the process actually on the
+       other end of *this* connection.
+    2. A path re-stat fallback — on platforms without ``SO_PEERCRED``
+       (e.g. macOS, where ``LOCAL_PEERCRED`` is not exposed by the stdlib
+       ``socket`` module), re-stat the path and assert it still resolves to
+       the same ``(st_dev, st_ino, st_uid)`` we validated. A swap changes
+       the inode, so a replaced socket is rejected.
+
+    Raises ``IpcError`` on any mismatch. The expected UID honours
+    ``HAAP_SDK_EXPECTED_PEER_UID`` (same resolution as the pre-connect
+    check), defaulting to the validated socket's own owner UID.
+    """
+    expected_env = os.environ.get("HAAP_SDK_EXPECTED_PEER_UID")
+    expected_uid = int(expected_env, 10) if expected_env is not None else pre_stat.st_uid
+
+    so_peercred = getattr(socket, "SO_PEERCRED", None)
+    if so_peercred is not None:
+        # struct ucred { pid_t pid; uid_t uid; gid_t gid; } — three native
+        # ints. Read uid (the 2nd field) and compare.
+        creds = sock.getsockopt(socket.SOL_SOCKET, so_peercred, struct.calcsize("3i"))
+        _pid, peer_uid, _gid = struct.unpack("3i", creds)
+        if peer_uid != expected_uid:
+            sock.close()
+            raise IpcError(
+                f"IPC peer on {socket_path} has uid {peer_uid}, expected "
+                f"{expected_uid} (SO_PEERCRED); refusing the connection"
+            )
+        return
+
+    # No SO_PEERCRED (macOS): fall back to a post-connect path re-stat.
+    try:
+        post_stat = Path(socket_path).stat()
+    except OSError as e:
+        sock.close()
+        raise IpcError(f"re-stat {socket_path} after connect failed: {e}") from e
+    if (
+        not stat.S_ISSOCK(post_stat.st_mode)
+        or post_stat.st_dev != pre_stat.st_dev
+        or post_stat.st_ino != pre_stat.st_ino
+        or post_stat.st_uid != pre_stat.st_uid
+    ):
+        sock.close()
+        raise IpcError(
+            f"IPC socket {socket_path} changed identity between validation and "
+            "connect (possible TOCTOU swap); refusing the connection"
+        )
+
 
 def _connect_unix(path: str, timeout_secs: float | None) -> socket.socket:
-    _validate_ipc_socket_path(path)
+    pre_stat = _validate_ipc_socket_path(path)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     if timeout_secs is not None:
         sock.settimeout(timeout_secs)
     sock.connect(path)
+    # INF-08: pre_stat is None only on Windows, which never reaches this
+    # AF_UNIX path; guard anyway for type-narrowing.
+    if pre_stat is not None:
+        _verify_peer_after_connect(sock, pre_stat, path)
     return sock
 
 
