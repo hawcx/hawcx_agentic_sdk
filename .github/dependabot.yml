@@ -1,0 +1,19 @@
+# INF-02: keep SHA-pinned GitHub Actions current. Dependabot bumps the
+# pinned 40-char commit SHAs (and the trailing `# vX.Y.Z` comment) as new
+# action releases land, so pinning never means silently running stale,
+# CVE-bearing action code. Grouped to keep PR volume low; reviewer must
+# still read each SHA diff.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns:
+          - "*"
+    labels:
+      - "dependencies"
+      - "ci"

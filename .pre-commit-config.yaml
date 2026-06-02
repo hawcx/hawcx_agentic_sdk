@@ -1,0 +1,19 @@
+# INF-11/INF-12: pre-commit guards for secret hygiene in the eval bundle.
+# Install once per clone:  pip install pre-commit && pre-commit install
+#
+# The guard below refuses to commit a populated docker/bundle/.env (or any
+# tracked .env), which is gitignored but could be force-added. .env.example
+# is the only sanctioned tracked copy.
+repos:
+  - repo: local
+    hooks:
+      - id: block-bundle-env
+        name: block committing .env files (use .env.example)
+        entry: >-
+          bash -c 'for f in "$@"; do
+            case "$f" in
+              *.env|*/.env) echo "Refusing to commit secret file: $f (use .env.example; values must be operator-generated throwaways)"; exit 1 ;;
+            esac
+          done' --
+        language: system
+        files: (^|/)\.env$

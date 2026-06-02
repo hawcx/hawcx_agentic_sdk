@@ -1,9 +1,29 @@
 # syntax=docker/dockerfile:1.7
 
-# hawcx_agentic_sdk image — customer-side release/distribution image.
+# ============================================================================
+# DEPRECATED — DEV/REFERENCE ONLY. NOT THE PUBLISHED BUILD. (INF-10)
+# ============================================================================
+# The release pipeline (.github/workflows/release.yml) builds the customer
+# image from `Dockerfile.fast`, which COPYs the `hawcx-manager` binary that
+# was `cargo install`ed (pinned + --locked) from the private Kellnr registry
+# at cargo.hawcx.com. THAT is the reproducible, attestable path.
+#
+# This Dockerfile encodes the RETIRED in-pipeline sibling-checkout build
+# model (F-2 migration, closed 2026-05-27 — see CLAUDE.md). It rebuilds
+# hawcx-manager from whatever `hx_agent_crypto_core` / `hx_agent_client_auth_service`
+# trees happen to be on disk, so it reproduces NEITHER the published image
+# NOR the documented registry-install flow. Do not use it to produce a
+# customer artifact. Kept only as a local "build from sibling source"
+# convenience for engineers iterating on hawcx-manager itself.
+#
+# The fail-fast guard below refuses to build under CI so this path can never
+# silently become a release artifact again.
+# ============================================================================
+#
+# hawcx_agentic_sdk image — DEV-ONLY sibling-source build.
 #
 # Topology note (2026-05-21): this repo is a release-only scaffold and
-# hosts no Rust source code of its own. The image is built from sibling
+# hosts no Rust source code of its own. This dev image is built from sibling
 # repos that ARE checked out as part of the build context:
 #
 #   hawcx_agentic_sdk/             (this file; only Dockerfile + workflow + docs)
@@ -29,6 +49,20 @@
 #   docker build -f hawcx_agentic_sdk/Dockerfile -t hawcx-sdk ~/Projects/
 
 FROM rust:1-bookworm AS builder
+
+# INF-10: refuse to run this deprecated dev path in CI. The published image
+# is built from Dockerfile.fast; a CI invocation of THIS file means a
+# misconfiguration that would ship a non-reproducible, sibling-source build.
+# Pass --build-arg ALLOW_DEV_BUILD=1 to use it intentionally on a workstation.
+ARG CI=""
+ARG ALLOW_DEV_BUILD=""
+RUN if [ -n "$CI" ] && [ "$ALLOW_DEV_BUILD" != "1" ]; then \
+        echo "ERROR (INF-10): Dockerfile is dev/reference-only. CI must build" >&2; \
+        echo "the customer image from Dockerfile.fast (registry-installed," >&2; \
+        echo "version-pinned hawcx-manager). Set --build-arg ALLOW_DEV_BUILD=1" >&2; \
+        echo "only for a deliberate local sibling-source build." >&2; \
+        exit 1; \
+    fi
 
 WORKDIR /build
 
