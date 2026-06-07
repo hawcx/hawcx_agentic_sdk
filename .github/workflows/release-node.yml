@@ -238,7 +238,14 @@ jobs:
       - name: Publish platform package
         working-directory: node/platforms/${{ matrix.platform_pkg }}
         run: |
-          out=$(npm publish --provenance --access public --tag alpha 2>&1) && echo "$out" || {
+          # Stable versions (no prerelease suffix, e.g. 0.1.0) publish under the
+          # default `latest` dist-tag; prereleases (e.g. 0.1.0-alpha.17, which
+          # contain a `-`) publish under `alpha` so they never become the
+          # default `npm install` target.
+          VER="${{ steps.ver.outputs.version }}"
+          if [[ "$VER" == *-* ]]; then DIST_TAG=alpha; else DIST_TAG=latest; fi
+          echo "publishing ${VER} under dist-tag: ${DIST_TAG}"
+          out=$(npm publish --provenance --access public --tag "$DIST_TAG" 2>&1) && echo "$out" || {
             echo "$out"
             echo "$out" | grep -q "cannot publish over the previously published versions" \
               && echo "Already published — skipping." \
@@ -290,16 +297,28 @@ jobs:
       - name: Publish
         working-directory: node
         run: |
-          out=$(npm publish --provenance --access public --tag alpha 2>&1) && echo "$out" || {
+          # Stable → `latest`, prerelease (version contains `-`) → `alpha`.
+          VER="${{ steps.ver.outputs.version }}"
+          if [[ "$VER" == *-* ]]; then DIST_TAG=alpha; else DIST_TAG=latest; fi
+          echo "publishing ${VER} under dist-tag: ${DIST_TAG}"
+          out=$(npm publish --provenance --access public --tag "$DIST_TAG" 2>&1) && echo "$out" || {
             echo "$out"
             echo "$out" | grep -q "cannot publish over the previously published versions" \
               && echo "Already published — skipping." \
               || exit 1
           }
         # Authentication via npm Trusted Publishing (OIDC) — same as above.
-      - name: Move latest tag
+      - name: Move latest tag (stable only)
         working-directory: node
         run: |
           PKG=$(node -p "require('./package.json').name")
           VER=$(node -p "require('./package.json').version")
-          npm dist-tag add "${PKG}@${VER}" latest
+          # Only stable releases (no prerelease suffix) may own `latest`.
+          # Publishing with `--tag latest` above already sets it for stable;
+          # this is the explicit guard so a prerelease never moves `latest`
+          # (which would make `npm install <pkg>` resolve to an alpha).
+          if [[ "$VER" == *-* ]]; then
+            echo "prerelease ${VER} — leaving 'latest' untouched"
+          else
+            npm dist-tag add "${PKG}@${VER}" latest
+          fi
