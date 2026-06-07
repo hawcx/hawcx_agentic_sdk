@@ -1,0 +1,10 @@
+{
+  "slack_list_channels":       { "provider": "slack", "action": "read",  "resource": "channels" },
+  "slack_get_channel_history": { "provider": "slack", "action": "read",  "resource": "channels" },
+  "slack_get_thread_replies":  { "provider": "slack", "action": "read",  "resource": "channels" },
+  "slack_get_users":           { "provider": "slack", "action": "read",  "resource": "users" },
+  "slack_get_user_profile":    { "provider": "slack", "action": "read",  "resource": "users" },
+  "slack_post_message":        { "provider": "slack", "action": "write", "resource": "channels" },
+  "slack_reply_to_thread":     { "provider": "slack", "action": "write", "resource": "channels" },
+  "slack_add_reaction":        { "provider": "slack", "action": "write", "resource": "channels" }
+}

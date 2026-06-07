@@ -96,7 +96,16 @@ services:
       - HAAP_RSV_ORG_ID=${HAWCX_ORG_ID}
       - HAAP_CUSTOMER_REDIS_URL=redis://redis:6379
       - HAAP_REPLAY_LRU_CAPACITY=${HAAP_REPLAY_LRU_CAPACITY:-10000}
+      - HAAP_RSV_PROXY_ALLOWLIST=${HAAP_RSV_PROXY_ALLOWLIST:-}
+      - HAAP_RSV_PROXY_DOWNSTREAM_AUTH_SLACK_COM=${HAAP_RSV_PROXY_DOWNSTREAM_AUTH_SLACK_COM:-}
+      # ASS-6: Slack MCP scope-gate routing. Resolves each Slack MCP
+      # tools/call to {provider, action, resource} so the RSV's §45.7.2
+      # OAuth scope-gate ALLOWs read tools / DENYs write tools against a
+      # read-only PolicySet. File mounted read-only below.
+      - HAAP_RSV_MCP_ROUTING_FILE=/etc/hawcx/slack-mcp-routing.json
       - RUST_LOG=${LOG_LEVEL:-info}
+    volumes:
+      - ./slack-mcp-routing.json:/etc/hawcx/slack-mcp-routing.json:ro
     ports:
       - "${RSV_PORT:-8443}:8443"
     depends_on:
