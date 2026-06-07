@@ -118,12 +118,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # --force: a restored-but-stale staging dir (partial cache key match,
+          # cache-hit=false) can already contain the binary; without --force
+          # cargo errors "binary already exists in destination". The exact
+          # version pin + --locked guarantee the re-install is byte-identical.
           cargo install hawcx-manager \
             --registry hawcx \
             --version "=${HAWCX_MANAGER_VERSION}" \
             --target ${{ matrix.target }} \
             --root "${RUNNER_TEMP}/staging" \
-            --locked
+            --locked \
+            --force
 
       # INF-01: assert the installed binary reports the pinned version.
       - name: Assert installed hawcx-manager version
