@@ -51,6 +51,13 @@ export interface HawcxAgentInvokeOptions {
    * Use {@link HawcxAgent.invokeFor} for the sugar form.
    */
   actingForUser?: string;
+  /**
+   * Optional OAuth provider id (e.g. "slack") marking this call as
+   * OAuth-protected, so the Assembler fetches the matching bearer from the
+   * EIB before reaching the destination. Mirrors
+   * {@link ToolCallRequest.provider}. (ASS-4)
+   */
+  provider?: string;
 }
 
 function defaultIpcDir(): string {
@@ -299,6 +306,7 @@ export class HawcxAgent {
       contentType: opts.contentType,
       transport: opts.transport,
       actingForUser: opts.actingForUser,
+      provider: opts.provider,
     });
   }
 

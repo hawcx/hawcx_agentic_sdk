@@ -120,6 +120,15 @@ export interface ToolCallRequest {
    * scope_json metadata. See `HawcxAgent.invokeFor`.
    */
   actingForUser?: string;
+  /**
+   * Optional OAuth provider id (e.g. "slack") marking this call as
+   * OAuth-protected. When set, the Assembler fetches the matching bearer
+   * from the EIB and attaches it to the egress request; without it the
+   * Assembler treats the destination as unauthenticated and never queries
+   * the EIB (so OAuth-protected destinations are rejected). Mirrors
+   * `haap_ipc::messages::assembler::ToolCallRequest.provider`. (ASS-4)
+   */
+  provider?: string;
 }
 
 /**
@@ -166,6 +175,11 @@ function toolCallRequestToWire(req: ToolCallRequest): Record<string, unknown> {
     // projects this into `scope_json.user_principal_id` per
     // CS v6.9.0 line 163.
     wire.acting_for_user = req.actingForUser;
+  }
+  if (req.provider !== undefined) {
+    // OAuth provider id (e.g. "slack"). The Assembler uses it to fetch the
+    // matching bearer from the EIB for OAuth-protected destinations. (ASS-4)
+    wire.provider = req.provider;
   }
   return wire;
 }
