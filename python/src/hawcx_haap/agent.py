@@ -298,6 +298,7 @@ class HawcxAgent:
         transport: TokenTransport | None = None,
         request_id: str | None = None,
         acting_for_user: str | None = None,
+        provider: str | None = None,
     ) -> ToolCallResponse:
         """Profile E tool call.
 
@@ -357,6 +358,7 @@ class HawcxAgent:
             content_type=content_type,
             transport=transport,
             acting_for_user=acting_for_user,
+            provider=provider,
         )
         return self._client.invoke(req)
 

@@ -134,6 +134,12 @@ class ToolCallRequest:
     content_type: str | None = None
     transport: TokenTransport | None = None
     acting_for_user: str | None = None
+    # ASS-4: optional OAuth provider id (e.g. "slack") marking this call as
+    # bound to an OAuth-protected destination. Mirrors
+    # `haap_ipc::messages::assembler::ToolCallRequest.provider`; the Assembler
+    # uses it to fetch the EIB bearer / route via the RSV OAuth proxy. `None`
+    # leaves the wire unchanged (back-compatible with non-OAuth calls).
+    provider: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -163,6 +169,10 @@ class ToolCallRequest:
             # Assembler projects this into `scope_json.user_principal_id`
             # at token-mint time per CS v6.9.0 line 163.
             out["acting_for_user"] = self.acting_for_user
+        if self.provider is not None:
+            # ASS-4: OAuth provider id (e.g. "slack"). The Assembler uses it to
+            # fetch the provider bearer and route the call to the RSV OAuth proxy.
+            out["provider"] = self.provider
         return out
 
 
