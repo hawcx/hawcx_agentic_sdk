@@ -8,12 +8,16 @@ version in `python/pyproject.toml`).
 
 ## [0.1.1] - 2026-06-09
 
-Bundles **`hawcx-manager` 0.8.3**, which adds the **`daemon`** subcommand
+Bundles **`hawcx-manager` 0.8.4**, which adds the **`daemon`** subcommand
 (`install | uninstall | start | stop | status | logs`) — run the agent-host as a
-background OS service (launchd/systemd) instead of by hand (ASS-19).
-`HAWCX_MANAGER_VERSION` bumped `0.8.2 → 0.8.3` in lockstep across all three
-release workflows. Final (non-prerelease) version, so `pip install hawcx-haap` /
-`npm install @hawcx/hawcx-haap` resolve to it without `--pre` or a version pin.
+background OS service (launchd/systemd) instead of by hand (ASS-19) — and fixes
+a **Windows-only build break** in `haap-assembler-bin` (the `#[cfg(windows)]`
+`handle_agent_message` call site was missing the `rs_proxy_url` /
+`rs_proxy_auth_token` args added in ASS-15, so the Windows wheels failed to
+compile). `HAWCX_MANAGER_VERSION` bumped `0.8.2 → 0.8.4` in lockstep across all
+three release workflows. Final (non-prerelease) version, so `pip install
+hawcx-haap` / `npm install @hawcx/hawcx-haap` resolve to it without `--pre` or a
+version pin.
 
 ## [v0.1.0-alpha.10] - 2026-05-22
 

@@ -16,7 +16,7 @@ on:
 # (see ./Cargo.lock) makes `--locked` meaningful for the transitive graph;
 # this `--version =<exact>` pin makes the top-level crate deterministic.
 env:
-  HAWCX_MANAGER_VERSION: "0.8.3"
+  HAWCX_MANAGER_VERSION: "0.8.4"
 
 jobs:
   build:
