@@ -14,7 +14,7 @@ on:
 # version. Keep in lockstep with release.yml, release-node.yml, CLAUDE.md,
 # and the hawcx-manager workspace version in hx_agent_client_auth_service.
 env:
-  HAWCX_MANAGER_VERSION: "0.8.4"
+  HAWCX_MANAGER_VERSION: "0.8.5"
 
 jobs:
   # Build the platform-specific hawcx-manager binary from the private hawcx
