@@ -6,6 +6,17 @@ versions track each language surface independently (Rust crate
 versions in `Cargo.toml`, Node version in `node/package.json`, Python
 version in `python/pyproject.toml`).
 
+## [0.1.0] - 2026-06-09
+
+First **final** (non-prerelease) release, so `pip install hawcx-haap` /
+`npm install @hawcx/hawcx-haap` resolve to it without `--pre` or a version pin.
+
+- Bundles **`hawcx-manager` 0.8.3**, which adds the **`daemon`** subcommand
+  (`install | uninstall | start | stop | status | logs`) — run the agent-host
+  as a background OS service (launchd/systemd) instead of by hand (ASS-19).
+  `HAWCX_MANAGER_VERSION` bumped `0.8.2 → 0.8.3` in lockstep across all three
+  release workflows.
+
 ## [v0.1.0-alpha.10] - 2026-05-22
 
 Re-tag of the alpha.9 content on top of #18's smoke-test fix.
