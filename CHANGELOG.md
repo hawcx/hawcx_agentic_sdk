@@ -6,9 +6,9 @@ versions track each language surface independently (Rust crate
 versions in `Cargo.toml`, Node version in `node/package.json`, Python
 version in `python/pyproject.toml`).
 
-## [0.1.2] - 2026-06-10
+## [0.1.3] - 2026-06-10
 
-Bundles **`hawcx-manager` 0.8.6**, which makes the **daemon-first** model work:
+Bundles **`hawcx-manager` 0.8.7**, which makes the **daemon-first** model work:
 bring the agent-host up first (`hawcx-manager daemon start` / `haap-supervisor
 run`), then `hawcx-manager enroll standard-agent` once — the rest wires itself.
 
@@ -23,7 +23,11 @@ run`), then `hawcx-manager enroll standard-agent` once — the rest wires itself
   daemon-first enroll can force the encrypted-file token store, skipping the macOS
   keychain prompt and its duplicate-item collision on repeat enrollments.
 
-`HAWCX_MANAGER_VERSION` bumped `0.8.5 → 0.8.6` in lockstep across all three release
+- **ASS-29 (0.8.7):** `cfg`-gate the control-socket delivery to Unix + add a Windows
+  stub — 0.8.6 used `tokio::net::UnixStream` unconditionally and failed the Windows
+  build, so 0.8.6 never shipped through the SDK; 0.8.7 builds on every platform.
+
+`HAWCX_MANAGER_VERSION` bumped `0.8.5 → 0.8.7` in lockstep across all three release
 workflows.
 
 ## [0.1.1] - 2026-06-09
