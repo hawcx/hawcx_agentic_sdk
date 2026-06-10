@@ -36,6 +36,10 @@ jobs:
             os: windows-latest
           - target: aarch64-pc-windows-msvc
             os: windows-latest
+            # Cross-compiled on an x86_64 Windows runner (no native ARM64
+            # Windows runner here): the binary can't be executed, so the
+            # version-assert skips the exec check (mirrors release-node.yml).
+            cross: true
 
     steps:
       - name: Checkout hx_agentic_sdk
@@ -125,6 +129,18 @@ jobs:
           set -euo pipefail
           BIN="${RUNNER_TEMP}/staging/bin/hawcx-manager"
           [[ "${{ runner.os }}" == "Windows" ]] && BIN="${BIN}.exe"
+          if [[ ! -s "$BIN" ]]; then
+            echo "::error::hawcx-manager binary missing or empty at $BIN"
+            exit 1
+          fi
+          # Cross-compiled targets (e.g. aarch64-pc-windows-msvc built on an
+          # x86_64 runner) cannot be executed here. The exact version is already
+          # guaranteed by `cargo install --version="=X.Y.Z" --locked` above, so
+          # assert the artifact exists and skip the exec-based check.
+          if [[ "${{ matrix.cross }}" == "true" ]]; then
+            echo "cross-compiled ${{ matrix.target }}: artifact present ($(wc -c < "$BIN") bytes); skipping exec-based version check"
+            exit 0
+          fi
           got="$("$BIN" --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?' | head -n1)"
           echo "installed hawcx-manager version: ${got} (expected ${HAWCX_MANAGER_VERSION})"
           if [[ "${got}" != "${HAWCX_MANAGER_VERSION}" ]]; then
