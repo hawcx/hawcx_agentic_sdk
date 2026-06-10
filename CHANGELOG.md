@@ -6,6 +6,26 @@ versions track each language surface independently (Rust crate
 versions in `Cargo.toml`, Node version in `node/package.json`, Python
 version in `python/pyproject.toml`).
 
+## [0.1.2] - 2026-06-10
+
+Bundles **`hawcx-manager` 0.8.6**, which makes the **daemon-first** model work:
+bring the agent-host up first (`hawcx-manager daemon start` / `haap-supervisor
+run`), then `hawcx-manager enroll standard-agent` once — the rest wires itself.
+
+- **ASS-28:** `enroll` now delivers the minted org_token straight to the running
+  daemon's control socket (`MSG_REGISTER_REQ`), so the daemon registers itself and
+  background renewal takes over — no external delivery script, no manual restart.
+- **ASS-29:** the Assembler's upstream (TQS) connect budget is configurable
+  (`HAAP_ASSEMBLER_UPSTREAM_TIMEOUT_SECS`, default 600s) instead of a hardcoded
+  30s, so it waits through the human-paced device-flow enrollment instead of dying
+  before the agent registers.
+- **ASS-29:** `HAAP_MANAGER_TOKEN_STORE=file|keyring|auto` override — unattended /
+  daemon-first enroll can force the encrypted-file token store, skipping the macOS
+  keychain prompt and its duplicate-item collision on repeat enrollments.
+
+`HAWCX_MANAGER_VERSION` bumped `0.8.5 → 0.8.6` in lockstep across all three release
+workflows.
+
 ## [0.1.1] - 2026-06-09
 
 Bundles **`hawcx-manager` 0.8.5**, which adds the **`daemon`** subcommand
