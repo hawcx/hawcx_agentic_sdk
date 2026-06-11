@@ -6,6 +6,26 @@ versions track each language surface independently (Rust crate
 versions in `Cargo.toml`, Node version in `node/package.json`, Python
 version in `python/pyproject.toml`).
 
+## [0.1.4] - 2026-06-11
+
+Bundles **`hawcx-manager` 0.8.8**, a renewal-cadence hardening release on top of
+the daemon-first model from 0.1.3 — no surprises across long-running sessions.
+
+- **ASS-23:** root-fixed the autonomous session-renewal cadence. The periodic
+  `RenewalTrigger` was anchored to the full session interval, so `since_last`
+  landed just under the period on alternate ticks and the loop renewed at half
+  the intended rate — long sessions could let a session lapse mid-tool-call.
+  The periodic trigger now fires at `4/5` of the interval, so renewal always
+  beats the session TTL with margin.
+- **ASS-29:** the TQS-JIT child's upstream connect budget is now configurable
+  (`HAAP_TQS_UPSTREAM_TIMEOUT_SECS`, falling back to
+  `HAAP_ASSEMBLER_UPSTREAM_TIMEOUT_SECS`, default 600s) instead of a hardcoded
+  30s — it waits through the JIT precompute warm-up instead of dying before the
+  token pool fills.
+
+`HAWCX_MANAGER_VERSION` bumped `0.8.7 → 0.8.8` in lockstep across all three release
+workflows.
+
 ## [0.1.3] - 2026-06-10
 
 Bundles **`hawcx-manager` 0.8.7**, which makes the **daemon-first** model work:
