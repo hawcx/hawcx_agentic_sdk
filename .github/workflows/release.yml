@@ -16,6 +16,12 @@ on:
 # (see ./Cargo.lock) makes `--locked` meaningful for the transitive graph;
 # this `--version =<exact>` pin makes the top-level crate deterministic.
 env:
+  # Bumped 0.8.2 -> 0.8.8 to pull in the KI-2 fix (JIT<->Precompute socket-path
+  # de-dup, hx_agent_client_auth_service PR #43) so a re-cut hx-agent-sdk image
+  # runs the supervisor mint pipeline without the crash-loop. 0.8.8 is the
+  # current hx_agent_client_auth_service `main` workspace version and MUST be
+  # published to cargo.hawcx.com (release-crates.yml) BEFORE the next SDK tag is
+  # pushed, or `cargo install =0.8.8` fails. See the re-cut runbook in the PR.
   HAWCX_MANAGER_VERSION: "0.8.8"
 
 jobs:
