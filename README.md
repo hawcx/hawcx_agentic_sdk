@@ -1,7 +1,7 @@
 # hawcx_agentic_sdk
 
 Customer-facing distribution channel for the **Hawcx Agent Authentication
-Protocol** (HAAP Canonical Specification v7.2.5).
+Protocol** (HAAP Canonical Specification, currently v7.3.5).
 
 > **Status (2026-05-21):** this repo is **release-only**. It carries no
 > Rust source code. The Dockerfile, GitHub Actions workflow, compose
