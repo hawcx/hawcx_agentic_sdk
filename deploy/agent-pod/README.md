@@ -1,6 +1,8 @@
 # haap-agent-pod (HST-1 robust-tier)
 
-One pod per agent instance. Two containers, two kernel principals:
+One **StatefulSet-of-1** per agent instance (`replicas: 1`, a governing
+headless `Service` for `spec.serviceName`). Two containers, two kernel
+principals:
 
 | container | runAsUser | runs |
 |-----------|-----------|------|
@@ -29,6 +31,26 @@ env-var names in `keeperEnv` are the shared contract with
 
 `runtimeClassName` is set only for the microvm posture (critical tier) and is
 kept consistent with `HAAP_REQUIRED_ISOLATION_POSTURE` by the controller.
+
+## Why StatefulSet, not a bare Pod
+
+A bare `Pod` never gets rescheduled on node failure — it just vanishes, and
+whatever provisioned it has to notice and re-create it from scratch. A
+`StatefulSet` of one replica gives the same single agent a stable identity
+(name, DNS via the headless Service) and lets the control plane reschedule it
+automatically.
+
+**This is not a resume mechanism.** The IPC/seal `emptyDir` volumes stay
+`medium: Memory` (tmpfs) — deliberately **not** a `volumeClaimTemplate` / PVC.
+Sealed key material dies with the pod, which is what makes UID reuse safe (a
+rescheduled pod is the same agent identity, never a stranger inheriting old
+keys). The trade-off: a reschedule to a different node starts the agent with
+fresh, re-enrolled state, not the previous session resumed. Full
+resume-after-reschedule would require persisting key material in a PVC — a
+materially different security posture (durable key material off the node,
+new backup/rotation/encryption-at-rest obligations) that this chart
+deliberately does **not** adopt. If a workload needs resume-on-reschedule,
+that's a separate design decision, not a drop-in flag here.
 
 ## Dev vs prod
 

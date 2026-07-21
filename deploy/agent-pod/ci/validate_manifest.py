@@ -31,10 +31,34 @@ def fail(msg):
 
 def main(path):
     docs = [d for d in yaml.safe_load_all(open(path)) if d]
-    pods = [d for d in docs if d.get("kind") == "Pod"]
-    if len(pods) != 1:
-        fail(f"expected exactly one Pod, got {len(pods)} (kinds: {[d.get('kind') for d in docs]})")
-    spec = pods[0]["spec"]
+    stsl = [d for d in docs if d.get("kind") == "StatefulSet"]
+    if len(stsl) != 1:
+        fail(f"expected exactly one StatefulSet, got {len(stsl)} (kinds: {[d.get('kind') for d in docs]})")
+    sts = stsl[0]
+    sts_spec = sts["spec"]
+
+    # StatefulSet-of-1: exactly one agent replica, stable identity.
+    if sts_spec.get("replicas") != 1:
+        fail(f"StatefulSet replicas must be 1, got {sts_spec.get('replicas')!r}")
+
+    # A StatefulSet requires a governing headless Service (clusterIP: None)
+    # matching spec.serviceName — that's what gives the pod stable identity.
+    svc_name = sts_spec.get("serviceName")
+    if not svc_name:
+        fail("StatefulSet must set spec.serviceName")
+    svcs = [d for d in docs if d.get("kind") == "Service" and d.get("metadata", {}).get("name") == svc_name]
+    if len(svcs) != 1:
+        fail(f"expected exactly one Service named {svc_name!r} (serviceName), got {len(svcs)}")
+    if svcs[0]["spec"].get("clusterIP") != "None":
+        fail(f"Service {svc_name!r} must be headless (clusterIP: None)")
+
+    # No PVC / volumeClaimTemplates — sealed key material must stay ephemeral
+    # tmpfs, never persistent. A PVC here would survive UID reuse / pod death,
+    # which the isolation model deliberately refuses.
+    if sts_spec.get("volumeClaimTemplates"):
+        fail("StatefulSet must not use volumeClaimTemplates (IPC/seal state must stay tmpfs, never persistent)")
+
+    spec = sts_spec["template"]["spec"]
 
     # No host namespaces — a shared host ns erases the per-agent boundary.
     for ns in ("hostPID", "hostIPC", "hostNetwork"):
