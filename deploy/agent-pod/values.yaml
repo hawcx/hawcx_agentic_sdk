@@ -1,0 +1,52 @@
+# Default values for the haap-agent-pod chart.
+#
+# The orchestrator provisioning controller OVERRIDES these per agent instance
+# via a rendered `-f values.json`. The defaults here exist for `helm lint`,
+# `helm template` in CI, and human review — they are NOT production values
+# (the image refs are placeholders; pin to SHA digests in prod).
+
+# Pod name. Controller sets to haap-agent-<agent-instance-id>.
+podName: haap-agent-example
+
+# Namespace the controller applies into (informational; passed via kubectl -n).
+namespace: hawcx-agents
+
+# Per-agent kernel principals from the reserved band 100000-199999, DISJOINT
+# from the infra band (<100000; distroless/orchestrator run as 65532).
+# credUid = keeper container; llmUid = agent container. Distinct, cluster-unique.
+credUid: 100000
+llmUid: 100001
+
+# Pod runtimeClassName. Empty string ⇒ omit (node-default runc; standard tier).
+# Non-empty (e.g. "gvisor") ⇒ microvm posture (critical tier). The orchestrator
+# guarantees this matches HAAP_REQUIRED_ISOLATION_POSTURE in keeperEnv.
+runtimeClassName: ""
+
+# Container images. PIN TO SHA DIGESTS IN PRODUCTION (image@sha256:...).
+keeperImage: "ghcr.io/hawcx/hawcx-manager:0.8.8"   # unchanged manager image; agents are data
+agentImage: "ghcr.io/hawcx/agent-runtime:latest"   # placeholder; customer/LLM-loop image
+
+# The exact HST-1 fail-closed preflight contract (PR #82). The controller
+# populates this; the keeper container emits each entry verbatim as an env var.
+# ABSENCE of any required key REFUSES the pod in production. Keys shown here are
+# the standard-tier example the CI render validates.
+keeperEnv:
+  HAAP_PRODUCTION_MODE: "true"
+  HAAP_REQUIRED_ISOLATION_POSTURE: "standard"
+  HAAP_AGENT_EXPECTED_UID: "100001"
+  HAAP_SHARED_INFRA_UIDS: "65532"
+  HAAP_AGENT_NS_ISOLATION: "pid,mnt,ipc"
+  HAAP_TQS_PEER_AUTHENTICATOR_UID: "100000"
+  HAAP_TQS_PEER_JIT_UID: "100000"
+
+# tmpfs sizes for the in-memory IPC volumes.
+ipcSizeLimit: 1Mi
+keeperInternalSizeLimit: 8Mi
+
+resources:
+  keeper:
+    requests: { cpu: "50m", memory: "128Mi" }
+    limits:   { cpu: "500m", memory: "512Mi" }
+  agent:
+    requests: { cpu: "100m", memory: "256Mi" }
+    limits:   { cpu: "1", memory: "1Gi" }
