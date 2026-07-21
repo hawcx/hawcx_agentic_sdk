@@ -1,0 +1,17 @@
+# Headless governing Service the StatefulSet requires (spec.serviceName).
+# No ports: the agent pod exposes no network service (deny-by-default
+# posture); this exists only to satisfy the StatefulSet contract and give the
+# pod stable DNS, not to open ingress.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.podName | quote }}
+  labels:
+    app.kubernetes.io/name: haap-agent
+    app.kubernetes.io/instance: {{ .Values.podName | quote }}
+    app.kubernetes.io/managed-by: hx-orchestrator
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: haap-agent
+    app.kubernetes.io/instance: {{ .Values.podName | quote }}
