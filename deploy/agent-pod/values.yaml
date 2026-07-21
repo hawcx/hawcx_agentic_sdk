@@ -22,9 +22,10 @@ llmUid: 100001
 # guarantees this matches HAAP_REQUIRED_ISOLATION_POSTURE in keeperEnv.
 runtimeClassName: ""
 
-# Container images. PIN TO SHA DIGESTS IN PRODUCTION (image@sha256:...).
-keeperImage: "ghcr.io/hawcx/hawcx-manager:0.8.8"   # unchanged manager image; agents are data
-agentImage: "ghcr.io/hawcx/agent-runtime:latest"   # placeholder; customer/LLM-loop image
+# Container images. PIN TO SHA DIGESTS IN PRODUCTION (image@sha256:...); the
+# controller always overrides these with digest-pinned refs. Never :latest.
+keeperImage: "ghcr.io/hawcx/hawcx-manager:0.8.8"      # unchanged manager image; agents are data
+agentImage: "ghcr.io/hawcx/agent-runtime:0.1.0"       # placeholder; customer/LLM-loop image
 
 # The exact HST-1 fail-closed preflight contract (PR #82). The controller
 # populates this; the keeper container emits each entry verbatim as an env var.
