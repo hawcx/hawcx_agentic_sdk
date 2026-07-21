@@ -1,0 +1,15 @@
+apiVersion: v2
+name: haap-agent-pod
+description: >-
+  HST-1 robust-tier agent pod: one pod per agent instance, two containers under
+  two distinct kernel principals (keeper = sk-holding supervisor→agent-group;
+  agent = customer/LLM loop). The orchestrator's provisioning controller renders
+  this chart's values (per-agent UIDs, runtimeClassName, the fail-closed
+  preflight env contract) and applies it to GKE.
+
+  This is the PRODUCTION topology. The docker-compose bundle under docker/ is the
+  dev-mode profile (same-UID single node) and is NOT a security boundary.
+type: application
+version: 0.1.0
+# appVersion tracks the hawcx-manager image the keeper container runs.
+appVersion: "0.8.8"

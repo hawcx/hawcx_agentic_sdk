@@ -1,0 +1,16 @@
+# CI render fixture — mirrors what the orchestrator emits for a CRITICAL
+# agent class (microvm posture). Exercises the runtimeClassName branch.
+podName: haap-agent-ci-critical
+credUid: 150000
+llmUid: 150001
+runtimeClassName: "gvisor"
+keeperImage: "ghcr.io/hawcx/hawcx-manager@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+agentImage: "ghcr.io/customer/agent@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+keeperEnv:
+  HAAP_PRODUCTION_MODE: "true"
+  HAAP_REQUIRED_ISOLATION_POSTURE: "microvm"
+  HAAP_AGENT_EXPECTED_UID: "150001"
+  HAAP_SHARED_INFRA_UIDS: "65532"
+  HAAP_AGENT_NS_ISOLATION: "pid,mnt,ipc"
+  HAAP_TQS_PEER_AUTHENTICATOR_UID: "150000"
+  HAAP_TQS_PEER_JIT_UID: "150000"

@@ -1,0 +1,96 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ .Values.podName | quote }}
+  labels:
+    app.kubernetes.io/name: haap-agent
+    app.kubernetes.io/managed-by: hx-orchestrator
+    hawcx.com/isolation-posture: {{ .Values.keeperEnv.HAAP_REQUIRED_ISOLATION_POSTURE | quote }}
+spec:
+  # Deny-by-default posture. NO host namespaces: the agent must never share the
+  # node's pid/ipc/network namespace (that would erase the per-agent boundary).
+  hostPID: false
+  hostIPC: false
+  hostNetwork: false
+  # Keep keeper and agent in SEPARATE pid namespaces (ADR-0022 D-22-1).
+  shareProcessNamespace: false
+  # Agent pods make no Kubernetes API calls; do not project a SA token.
+  automountServiceAccountToken: false
+  restartPolicy: Always
+  {{- if .Values.runtimeClassName }}
+  # Set only for the microvm posture (critical tier). Omitted ⇒ node-default runc.
+  runtimeClassName: {{ .Values.runtimeClassName | quote }}
+  {{- end }}
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    # ── keeper: sk-holding supervisor → agent-group, runs as credUid ──────
+    - name: keeper
+      image: {{ .Values.keeperImage | quote }}
+      securityContext:
+        runAsUser: {{ .Values.credUid }}
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault
+      env:
+        {{- range $k, $v := .Values.keeperEnv }}
+        - name: {{ $k }}
+          value: {{ $v | quote }}
+        {{- end }}
+        # Downward-API metadata for audit/logging correlation.
+        - name: HAAP_POD_NAME
+          valueFrom: { fieldRef: { fieldPath: metadata.name } }
+        - name: HAAP_POD_NAMESPACE
+          valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+        - name: HAAP_POD_UID
+          valueFrom: { fieldRef: { fieldPath: metadata.uid } }
+      volumeMounts:
+        # Shared assembler IPC — the ONLY volume the agent container also sees.
+        - name: haap-ipc
+          mountPath: /run/hawcx/ipc
+        # Keeper-private sockets (authenticator/tqs/unseal/eib). Agent does NOT
+        # mount this, so it can only ever reach the assembler socket.
+        - name: haap-keeper-internal
+          mountPath: /run/hawcx/internal
+      resources:
+        {{- toYaml .Values.resources.keeper | nindent 8 }}
+    # ── agent: customer/LLM loop, runs as llmUid, sees only the assembler ──
+    - name: agent
+      image: {{ .Values.agentImage | quote }}
+      securityContext:
+        runAsUser: {{ .Values.llmUid }}
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+        seccompProfile:
+          type: RuntimeDefault
+      env:
+        - name: HAAP_ASSEMBLER_SOCKET_DIR
+          value: /run/hawcx/ipc
+        - name: HAAP_POD_NAME
+          valueFrom: { fieldRef: { fieldPath: metadata.name } }
+        - name: HAAP_POD_UID
+          valueFrom: { fieldRef: { fieldPath: metadata.uid } }
+      volumeMounts:
+        - name: haap-ipc
+          mountPath: /run/hawcx/ipc
+      resources:
+        {{- toYaml .Values.resources.agent | nindent 8 }}
+  volumes:
+    # tmpfs so IPC sockets never touch disk and are wiped on pod death.
+    - name: haap-ipc
+      emptyDir:
+        medium: Memory
+        sizeLimit: {{ .Values.ipcSizeLimit }}
+    - name: haap-keeper-internal
+      emptyDir:
+        medium: Memory
+        sizeLimit: {{ .Values.keeperInternalSizeLimit }}
