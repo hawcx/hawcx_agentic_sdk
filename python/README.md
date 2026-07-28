@@ -162,6 +162,50 @@ Operator obligations:
    caller (without an allowlist) is **deprecated**. See
    `../CHANGELOG.md` for the migration recipe.
 
+## Egress transport (optional) — route agent HTTP through the broker
+
+When a HAAP agent runs under the OS sandbox from ADR-0048, its entire
+outbound network is pinned to a single per-agent UNIX-domain socket — a
+SOCKS5 egress broker — and that socket is its *only* network path. A SOCKS
+proxy URL has nowhere to put a filesystem path
+(`socks5h:///…/egress-broker.sock` parses to an empty host), so stock SOCKS
+transports, which dial `(host, port)`, cannot reach it. This SDK ships a
+small transport shim that opens the UDS, performs the SOCKS5 `CONNECT`, and
+hands the connected stream to `httpx` for **end-to-end** TLS + HTTP. The
+broker never terminates TLS and neither does the shim — your certificate
+verification is unchanged, and the broker holds no plaintext.
+
+`httpx` is an **optional** extra (the SDK core stays zero-dependency):
+
+```bash
+pip install 'hawcx-haap[httpx]'
+```
+
+Opt in with one line — `client()` returns a ready-to-use `httpx.Client`:
+
+```python
+import hawcx_haap.egress as egress
+
+with egress.client() as http:                 # async_client() for asyncio
+    r = http.get("https://api.example.com/v1/models")
+```
+
+The broker socket is discovered from `$HAAP_EGRESS_BROKER_SOCKET`, or from
+`$HAAP_AGENT_SOCKET_DIR/$HAAP_AGENT_INSTANCE_ID/egress-broker.sock` (the
+paths the supervisor sets), or pass `socket_path=`. If none resolves to an
+existing socket, `client()` **raises** rather than falling back to the direct
+network — a silent fallback would defeat the control.
+
+Per ADR-0048 the shim always sends the hostname as `ATYP=0x03` (DOMAINNAME)
+and never resolves DNS itself, so the broker enforces its allowlist against
+the name the agent actually asked for. Failures map to distinguishable
+exceptions (all subclass `HawcxError`): `EgressPolicyDenied` (host:port not
+in the signed policy), `EgressHostUnreachable` (includes the SSRF refusal),
+`EgressPeerCredError` (the peer-credential check failed), and
+`EgressProtocolError` (malformed handshake). This transport is a
+network-reachability control only — it is **not** a second authorization
+gate; the RSV still enforces the tool-call mandate (ADR-0048 D48-6).
+
 ## Limitations / known gaps
 
 - End-to-end verification against real binaries is pending alpha-2 closure of

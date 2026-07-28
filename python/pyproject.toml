@@ -36,9 +36,16 @@ dev = [
     "ruff>=0.4",
     "build>=1.2",
     "wheel>=0.43",
+    "httpx>=0.27.0",       # egress transport tests
+    "cryptography>=41",    # in-memory self-signed cert for the TLS-through-tunnel test
 ]
 crewai = [
     "crewai>=0.51",
+]
+# Optional egress transport (ADR-0048): route agent HTTP through the per-agent
+# SOCKS5-over-UDS broker. Off by default — the SDK core stays zero-dependency.
+httpx = [
+    "httpx>=0.27.0",
 ]
 
 [project.urls]
