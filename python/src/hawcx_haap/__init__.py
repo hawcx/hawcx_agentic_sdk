@@ -1,6 +1,6 @@
 """hawcx-haap — customer SDK for the Hawcx Agent Authentication Protocol (HAAP).
 
-Per CS v6.7.4 §39, Profile E uses a five-process customer-side pipeline
+Per CS v7.2.5 §39, Profile E uses a five-process customer-side pipeline
 (Authenticator, TQS-precompute, TQS-jit, Assembler, Supervisor). This SDK is
 the Python entry point: it connects to a customer-deployed ``haap-supervisor``
 via the Assembler's agent IPC socket and proxies tool calls through it.
@@ -44,6 +44,9 @@ Assembler process; the SDK exchanges only plaintext request bodies and
 decrypted response bodies over the local IPC socket.
 """
 
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _dist_version
+
 from hawcx_haap._binary import get_binary_path
 from hawcx_haap.agent import HawcxAgent
 from hawcx_haap.auth_ipc import (
@@ -65,7 +68,12 @@ from hawcx_haap.ipc import (
     ToolCallResponse,
 )
 
-__version__ = "0.1.0a13"
+# Single source of truth is [project] version in pyproject.toml; resolved from
+# the installed distribution so it cannot drift from the published wheel.
+try:
+    __version__ = _dist_version("hawcx-haap")
+except PackageNotFoundError:  # imported from a source tree without an install
+    __version__ = "0.0.0+unknown"
 __all__ = [
     "get_binary_path",
     "HawcxAgent",
