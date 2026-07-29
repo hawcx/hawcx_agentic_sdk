@@ -30,7 +30,7 @@ from hawcx_haap.errors import (  # noqa: E402
     EgressProtocolError,
     HawcxError,
 )
-from tests.egress_broker import (  # noqa: E402
+from egress_broker import (  # noqa: E402
     FakeBroker,
     TLSServer,
     close_no_reply_handler,
@@ -257,7 +257,7 @@ def test_boundary_fuzz_defined_exceptions_only() -> None:
 
     # 1. Truncated / disconnect at each handshake stage.
     def hold_after_greeting(conn: socket.socket, b: FakeBroker) -> None:
-        from tests.egress_broker import recv_exact
+        from egress_broker import recv_exact
 
         recv_exact(conn, 3)
         conn.sendall(b"\x05\x00")
