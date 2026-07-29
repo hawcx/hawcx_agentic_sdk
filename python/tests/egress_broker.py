@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime
 import socket
 import ssl
+import struct
 import tempfile
 import threading
 from collections.abc import Callable
@@ -149,6 +150,23 @@ def scripted_handler(
 
 def close_no_reply_handler(conn: socket.socket, broker: FakeBroker) -> None:
     """Peer-cred rejection: accept then close without any reply."""
+    conn.close()
+
+
+def reset_no_reply_handler(conn: socket.socket, broker: FakeBroker) -> None:
+    """Peer-cred rejection that lands as an RST rather than a clean EOF.
+
+    ``SO_LINGER`` with a zero timeout asks for RST instead of a graceful FIN. On
+    Linux that is what an agent actually observes when the broker rejects it at
+    the ``SO_PEERCRED`` gate and closes with our greeting still queued — the case
+    that leaked a raw ``ConnectionResetError`` before this was handled.
+
+    Honest ceiling: ``SO_LINGER`` is a no-op for ``AF_UNIX`` on macOS, so this
+    handler degrades to a clean close there and only exercises the reset path on
+    Linux. Linux is the light-mode platform, so that is where it counts — but it
+    does mean a macOS-only run cannot prove this path.
+    """
+    conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
     conn.close()
 
 

@@ -181,6 +181,33 @@ def _bound_trailer_len(atyp: int) -> int | None:
 # ── sync driver ─────────────────────────────────────────────────────────────
 
 
+def _closed_mid_handshake(*, peer_cred: bool, got_bytes: bool) -> EgressError:
+    """Classify "the broker went away" — a clean EOF and an RST are one event.
+
+    A connection reset is not a distinct failure from an orderly close. Linux
+    sends RST when a peer closes a socket that still has unread data queued (the
+    greeting we just wrote is exactly that), while macOS reports the same broker
+    behaviour as a clean EOF. Routing both here is what keeps the shim's public
+    contract — "only EgressError subclasses escape" — true on every platform.
+    """
+    if peer_cred and not got_bytes:
+        return EgressPeerCredError(
+            "broker closed the connection without a reply — "
+            "peer-credential (SO_PEERCRED) check likely failed"
+        )
+    return EgressProtocolError("broker closed connection mid-handshake (truncated reply)")
+
+
+def _sendall_sync(sock: socket.socket, data: bytes, *, peer_cred: bool) -> None:
+    try:
+        sock.sendall(data)
+    # socket.timeout IS an OSError subclass, so it must be caught first.
+    except socket.timeout as exc:  # noqa: UP041 - socket.timeout is what sendall raises
+        raise EgressProtocolError("timed out writing the broker handshake") from exc
+    except OSError as exc:
+        raise _closed_mid_handshake(peer_cred=peer_cred, got_bytes=False) from exc
+
+
 def _recv_exact_sync(sock: socket.socket, n: int, *, peer_cred: bool) -> bytes:
     buf = bytearray()
     while len(buf) < n:
@@ -188,13 +215,10 @@ def _recv_exact_sync(sock: socket.socket, n: int, *, peer_cred: bool) -> bytes:
             chunk = sock.recv(n - len(buf))
         except socket.timeout as exc:  # noqa: UP041 - socket.timeout is what recv raises
             raise EgressProtocolError("timed out awaiting broker handshake reply") from exc
+        except ConnectionResetError as exc:
+            raise _closed_mid_handshake(peer_cred=peer_cred, got_bytes=bool(buf)) from exc
         if not chunk:
-            if not buf and peer_cred:
-                raise EgressPeerCredError(
-                    "broker closed the connection without a reply — "
-                    "peer-credential (SO_PEERCRED) check likely failed"
-                )
-            raise EgressProtocolError("broker closed connection mid-handshake (truncated reply)")
+            raise _closed_mid_handshake(peer_cred=peer_cred, got_bytes=bool(buf))
         buf.extend(chunk)
     return bytes(buf)
 
@@ -214,9 +238,9 @@ def _socks5_connect_sync(
             raise EgressConfigError(
                 f"cannot connect to egress broker socket {socket_path!r}: {exc.strerror}"
             ) from exc
-        sock.sendall(_GREETING)
+        _sendall_sync(sock, _GREETING, peer_cred=True)
         _check_method_reply(_recv_exact_sync(sock, 2, peer_cred=True))
-        sock.sendall(request)
+        _sendall_sync(sock, request, peer_cred=False)
         header = _recv_exact_sync(sock, 4, peer_cred=False)
         if header[0] != 0x05:
             raise EgressProtocolError(f"bad SOCKS version {header[0]:#04x} in CONNECT reply")
@@ -244,17 +268,21 @@ async def _recv_exact_async(stream: Any, n: int, *, peer_cred: bool) -> bytes:
     while len(buf) < n:
         try:
             chunk = await stream.receive(n - len(buf))
-        except anyio.EndOfStream:
-            if not buf and peer_cred:
-                raise EgressPeerCredError(
-                    "broker closed the connection without a reply — "
-                    "peer-credential (SO_PEERCRED) check likely failed"
-                ) from None
-            raise EgressProtocolError(
-                "broker closed connection mid-handshake (truncated reply)"
-            ) from None
+        # anyio surfaces a clean close as EndOfStream and an RST (ECONNRESET) as
+        # BrokenResourceError; see _closed_mid_handshake for why they are one event.
+        except (anyio.EndOfStream, anyio.BrokenResourceError) as exc:
+            raise _closed_mid_handshake(peer_cred=peer_cred, got_bytes=bool(buf)) from exc
         buf.extend(chunk)
     return bytes(buf)
+
+
+async def _send_all_async(stream: Any, data: bytes, *, peer_cred: bool) -> None:
+    import anyio
+
+    try:
+        await stream.send(data)
+    except anyio.BrokenResourceError as exc:
+        raise _closed_mid_handshake(peer_cred=peer_cred, got_bytes=False) from exc
 
 
 async def _socks5_connect_async(
@@ -272,9 +300,9 @@ async def _socks5_connect_async(
                 raise EgressConfigError(
                     f"cannot connect to egress broker socket {socket_path!r}: {exc}"
                 ) from exc
-            await stream.send(_GREETING)
+            await _send_all_async(stream, _GREETING, peer_cred=True)
             _check_method_reply(await _recv_exact_async(stream, 2, peer_cred=True))
-            await stream.send(request)
+            await _send_all_async(stream, request, peer_cred=False)
             header = await _recv_exact_async(stream, 4, peer_cred=False)
             if header[0] != 0x05:
                 raise EgressProtocolError(f"bad SOCKS version {header[0]:#04x} in CONNECT reply")

@@ -36,6 +36,7 @@ from egress_broker import (  # noqa: E402
     close_no_reply_handler,
     make_localhost_cert,
     relay_handler,
+    reset_no_reply_handler,
     scripted_handler,
 )
 
@@ -116,6 +117,18 @@ def test_greeting_rejection_05FF_reported_clearly() -> None:
 
 def test_closed_with_no_reply_is_peercred_error() -> None:
     with FakeBroker(close_no_reply_handler) as broker:
+        with egress.client(socket_path=broker.path, verify=False, timeout=3) as http:
+            with pytest.raises(EgressPeerCredError):
+                http.get("https://x.example.com/")
+
+
+def test_reset_instead_of_clean_close_is_still_peercred_error() -> None:
+    # Same broker behaviour as the test above, asking for an RST rather than a FIN.
+    # The property under test is the contract — only EgressError subclasses cross this
+    # boundary — not which wire event delivers it. On Linux the broker's close really
+    # does arrive as ECONNRESET and this failed before the fix; on macOS SO_LINGER is a
+    # no-op for AF_UNIX, so there it degrades to the clean-close case above.
+    with FakeBroker(reset_no_reply_handler) as broker:
         with egress.client(socket_path=broker.path, verify=False, timeout=3) as http:
             with pytest.raises(EgressPeerCredError):
                 http.get("https://x.example.com/")
@@ -270,6 +283,7 @@ def test_boundary_fuzz_defined_exceptions_only() -> None:
 
     staged = [
         close_no_reply_handler,  # closed before any reply
+        reset_no_reply_handler,  # RST before any reply (Linux's real peer-cred rejection)
         scripted_handler(connect_reply=b""),  # greeting ok, then closed with no CONNECT reply
         scripted_handler(connect_reply=b"\x05"),  # 1-byte truncated reply
         scripted_handler(connect_reply=b"\x05\x00\x00"),  # header truncated (3 of 4)
@@ -301,7 +315,7 @@ def test_boundary_fuzz_defined_exceptions_only() -> None:
         iterations += 1
 
     print(f"\n[boundary-fuzz] egress SOCKS5 reply parser: {iterations} iterations, all defined")
-    assert iterations == 12 + 240
+    assert iterations == 13 + 240
 
 
 if __name__ == "__main__":  # pragma: no cover - quick self-check
