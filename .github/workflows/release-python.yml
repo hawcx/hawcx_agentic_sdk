@@ -87,11 +87,23 @@ jobs:
       # INF-01: exact-version pin (=X.Y.Z) + --locked so the binary bundled
       # into the PyPI platform wheels is deterministically tied to one
       # hawcx-manager source version.
-      - name: Install hawcx-manager from hawcx registry
+      - name: Install hawcx-manager + haap-unseal-orch from hawcx registry
         shell: bash
         run: |
           set -euo pipefail
+          # hawcx-manager: the multi-call binary (all 5 daemon roles via
+          # argv0/subcommand dispatch) + enroll/status/run-pipeline.
           cargo install hawcx-manager \
+            --registry hawcx \
+            --version "=${HAWCX_MANAGER_VERSION}" \
+            --target ${{ matrix.target }} \
+            --root "${RUNNER_TEMP}/staging" \
+            --locked
+          # haap-unseal-orch: the separate orchestrator binary the supervisor
+          # spawns by name from PATH (graph.rs `Command::new("haap-unseal-orch")`).
+          # Same workspace version as hawcx-manager. Without it bundled, the
+          # supervisor cannot launch and HawcxAgent.enroll() has no pipeline.
+          cargo install haap-unseal-orch \
             --registry hawcx \
             --version "=${HAWCX_MANAGER_VERSION}" \
             --target ${{ matrix.target }} \
@@ -124,6 +136,18 @@ jobs:
             exit 1
           fi
 
+      - name: Assert haap-unseal-orch artifact present
+        shell: bash
+        run: |
+          set -euo pipefail
+          ORCH="${RUNNER_TEMP}/staging/bin/haap-unseal-orch"
+          [[ "${{ runner.os }}" == "Windows" ]] && ORCH="${ORCH}.exe"
+          if [[ ! -s "$ORCH" ]]; then
+            echo "::error::haap-unseal-orch missing or empty at $ORCH (cargo install failed?)"
+            exit 1
+          fi
+          echo "haap-unseal-orch present ($(wc -c < "$ORCH") bytes)"
+
       - name: Upload binary artifact
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
@@ -131,6 +155,8 @@ jobs:
           path: |
             ${{ runner.temp }}/staging/bin/hawcx-manager
             ${{ runner.temp }}/staging/bin/hawcx-manager.exe
+            ${{ runner.temp }}/staging/bin/haap-unseal-orch
+            ${{ runner.temp }}/staging/bin/haap-unseal-orch.exe
           if-no-files-found: warn
 
   # Per-platform: stage the binary into python/src/hawcx_haap/_bin/, build a
@@ -169,17 +195,29 @@ jobs:
           name: binary-${{ matrix.plat_tag }}
           path: binary/
 
-      - name: Stage binary into package
+      - name: Stage binaries into package
         shell: bash
         run: |
-          BINARY_SRC="binary/${{ matrix.binary_name }}"
-          if [[ ! -f "$BINARY_SRC" ]]; then
-            echo "Binary not found: $BINARY_SRC"
-            exit 1
-          fi
+          set -euo pipefail
+          case "${{ matrix.plat_tag }}" in
+            win_*) EXT=".exe" ;;
+            *)     EXT="" ;;
+          esac
           mkdir -p python/src/hawcx_haap/_bin
-          cp "$BINARY_SRC" "python/src/hawcx_haap/_bin/${{ matrix.binary_name }}"
-          chmod +x "python/src/hawcx_haap/_bin/${{ matrix.binary_name }}" || true
+          # Bundle BOTH the multi-call manager and the orchestrator. Role
+          # daemons (authenticator/tqs/assembler/eib) are dispatched from
+          # hawcx-manager via argv0; the SDK bring-up creates the role-named
+          # symlinks at runtime (small wheel, no symlink-in-zip on Windows).
+          for b in hawcx-manager haap-unseal-orch; do
+            SRC="binary/${b}${EXT}"
+            if [[ ! -f "$SRC" ]]; then
+              echo "::error::binary not found in artifact: $SRC"
+              exit 1
+            fi
+            cp "$SRC" "python/src/hawcx_haap/_bin/${b}${EXT}"
+            chmod +x "python/src/hawcx_haap/_bin/${b}${EXT}" || true
+          done
+          ls -la python/src/hawcx_haap/_bin/
 
       - name: Build + retag platform wheel
         working-directory: python
@@ -197,19 +235,25 @@ jobs:
           mv dist_raw/*.whl dist/
           ls -la dist/
 
-      - name: Verify binary is bundled in wheel
+      - name: Verify binaries are bundled in wheel
         working-directory: python
         shell: bash
         run: |
-          python - <<'PY'
+          python - "${{ matrix.plat_tag }}" <<'PY'
           import glob, zipfile, sys
+          plat = sys.argv[1]
+          ext = ".exe" if plat.startswith("win_") else ""
           whl = glob.glob("dist/*.whl")[0]
           names = zipfile.ZipFile(whl).namelist()
           bins = [n for n in names if n.startswith("hawcx_haap/_bin/")]
-          if not bins:
-              print("FAIL: no binary bundled in", whl)
+          required = {f"hawcx_haap/_bin/hawcx-manager{ext}",
+                      f"hawcx_haap/_bin/haap-unseal-orch{ext}"}
+          missing = required - set(bins)
+          if missing:
+              print("FAIL: missing from", whl, "->", sorted(missing))
+              print("present:", bins)
               sys.exit(1)
-          print("OK bundled:", bins)
+          print("OK bundled:", sorted(bins))
           PY
 
       - name: Upload wheel artifact
