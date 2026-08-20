@@ -1,0 +1,21 @@
+{
+  "_comment": [
+    "Claude Desktop config for a HAAP no-wrap MCP client (auto-wrap plan U4b, ADR-0031 Lane B).",
+    "Claude Desktop SPAWNS this command and speaks MCP over its stdio. Nothing in Claude",
+    "Desktop is Hawcx-aware and no SDK is imported: every tools/call it makes is intercepted",
+    "by the attach proxy, which mints a per-call HAAP token out-of-process and attaches it at",
+    "params._meta.hawcx before forwarding. The model never holds a reusable credential.",
+    "Replace <> placeholders. See docs/MCP_NO_WRAP_CLIENTS.md for what each one is."
+  ],
+  "mcpServers": {
+    "ukg-o365": {
+      "command": "hawcx-manager",
+      "args": [
+        "mcp",
+        "--agent", "<agent-class-name>",
+        "--manifest", "</etc/hawcx/class-manifest.json>",
+        "--socket", "</run/hawcx/agent-assembler-0.sock>"
+      ]
+    }
+  }
+}
