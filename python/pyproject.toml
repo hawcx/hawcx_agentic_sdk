@@ -28,7 +28,14 @@ classifiers = [
 ]
 dependencies = []
 
+[project.scripts]
+# `hawcx wrap` / `hawcx validate`. The core package stays dependency-free
+# (`dependencies = []` above); YAML support is the `cli` extra and is imported
+# lazily, so a JSON template works with no extras installed at all.
+hawcx = "hawcx_haap.cli:main"
+
 [project.optional-dependencies]
+cli = ["pyyaml>=6.0"]
 dev = [
     "pytest>=7",
     "pytest-asyncio>=0.21",
