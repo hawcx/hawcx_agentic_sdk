@@ -1,0 +1,21 @@
+{
+  "_comment": [
+    "Cursor MCP config — the SAME attach seat as Claude Desktop, different client binary.",
+    "That sameness is the point of Lane B: a new MCP client is a config file, not a new",
+    "wrapper. If this ever needs a Cursor-specific flag, that is a defect in the proxy."
+  ],
+  "mcpServers": {
+    "ukg-salesforce": {
+      "command": "hawcx-manager",
+      "args": [
+        "mcp",
+        "--agent", "<agent-class-name>",
+        "--manifest", "</etc/hawcx/class-manifest.json>"
+      ],
+      "env": {
+        "_comment": "--socket omitted above: the supervisor exports HAAP_ASSEMBLER_SOCK for its children, and the proxy falls back to it. Set it explicitly only when running the proxy outside the supervisor's process tree.",
+        "HAAP_ASSEMBLER_SOCK": "</run/hawcx/agent-assembler-0.sock>"
+      }
+    }
+  }
+}
