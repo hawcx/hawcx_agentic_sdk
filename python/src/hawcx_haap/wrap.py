@@ -35,7 +35,8 @@ from __future__ import annotations
 import datetime as _dt
 import keyword
 import re
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 from .template import tool_entries
 
@@ -130,7 +131,8 @@ def generate_module(doc: dict[str, Any], *, source_path: str = "<template>",
     # human-readable provenance line is worth more than reproducibility.
     stamp = ""
     if stamp_time:
-        stamp = f"\n# Generated at {_dt.datetime.now(_dt.timezone.utc).isoformat(timespec='seconds')}"
+        now = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
+        stamp = f"\n# Generated at {now}"
 
     lines: list[str] = [
         _BANNER,
@@ -166,7 +168,9 @@ def generate_module(doc: dict[str, Any], *, source_path: str = "<template>",
         "                 method: str = \"POST\", provider: str | None = None,",
         "                 acting_for_user: str | None = None) -> None:",
         "        if not self.TOOL_ID:",
-        "            raise ValueError(\"_HawcxGeneratedTool is abstract; use a generated subclass\")",
+        "            raise ValueError(",
+        "                \"_HawcxGeneratedTool is abstract; use a generated subclass\"",
+        "            )",
         "        if not endpoint:",
         "            # Fail closed. An empty endpoint would reach the Assembler as an",
         "            # empty target and surface as an opaque mint/forward error far",

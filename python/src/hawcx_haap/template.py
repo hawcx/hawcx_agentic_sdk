@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Iterable
+from typing import Any
 
 __all__ = [
     "TEMPLATE_HEADER",
