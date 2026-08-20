@@ -119,7 +119,34 @@ Practical consequences worth stating plainly:
   under `hawcx-manager`; Windows laptops run the Manager UI only.
 
 So U4b's "off-the-shelf binary talks MCP through Lane B with no SDK" is **met on
-macOS and Linux, and open on Windows**. Closing it means a named-pipe twin of the
-Assembler IPC leg, the same shape as the guardian relay's named-pipe work
-(`client_auth` #251/#255) — the transport-generic-exchange approach there exists
-precisely so the two platforms cannot drift.
+macOS and Linux, and open on Windows**.
+
+### It is not the transport that blocks it
+
+Worth stating precisely, because "add a named-pipe client" looks like the fix and
+is not. The chain is three deep:
+
+1. `haap-mcp-attach-proxy`'s `assembler_ipc`/`flow`/`http`/`server` are `cfg(unix)`.
+2. They are gated because `haap-sdk-ipc`'s `connection` and `peer_cred` modules
+   are `cfg(unix)` — that crate's own header says *"Windows: named-pipe support is
+   a follow-up"*.
+3. **And even with both built, it would still not work.** The Assembler already
+   speaks named pipes on Windows (`haap-assembler-bin/src/runtime.rs` types
+   `IpcStream` as `NamedPipeClient`), but its per-connection peer check does not
+   exist yet. `peer_auth::verify_peer_uid`'s `cfg(windows)` arm returns
+   `WindowsPeerCheckUnavailable` whenever hardening is enforced, and
+   `runtime.rs`'s pipe-accept loop rejects the connection on that error. Under
+   enforced hardening the Assembler therefore refuses **every** named-pipe peer,
+   by design:
+
+   > *"Windows native peer-identity check is unavailable (AppContainer/Package-SID
+   > separation not yet built — ADR-0026 D-26-2/3/4, ADR-0043 D43-4.1); refusing
+   > connection with hardening enforced rather than trusting the pipe DACL alone"*
+
+So a Windows attach-proxy client would connect to a server built to refuse it. The
+real blocker is the unbuilt per-Package-SID peer identity — a security primitive
+tracked in its own right (tracker E4 / `crypto#41`), not an attach-proxy defect.
+
+Building the transport first would produce something that appears to work only
+with `HAAP_ALLOW_UNHARDENED_DEV=1`, which is exactly the shape of thing that gets
+demoed and then mistaken for shipped.
