@@ -234,14 +234,18 @@ def test_cli_wrap_refuses_to_clobber(tmp_path):
     assert "a developer edited this" not in out.read_text()
 
 
-def test_cli_has_no_submit_subcommand_yet():
-    """Plan U2 pairs validate with `submit --org`, but the console endpoint it
-    pushes to is U3 and does not exist. An unknown-subcommand error is honest; a
-    subcommand that parsed the flags and failed at the network would read as an
-    outage rather than an unbuilt feature."""
-    r = _cli("submit", "--org", "ukg", "x.yaml")
-    assert r.returncode != 0
-    assert "invalid choice" in r.stderr or "submit" in r.stderr
+def test_cli_registers_submit():
+    """U1 deliberately shipped WITHOUT `submit`, because the console endpoint it
+    pushes to did not exist and a subcommand failing at the network would read as
+    an outage rather than an unbuilt feature. U2 built both halves, so it is
+    registered now. Kept as a test rather than deleted: the pairing between this
+    subcommand and a reachable endpoint is the thing worth pinning.
+    """
+    r = _cli("submit", "--help")
+    assert r.returncode == 0
+    assert "--org" in r.stdout
+    # The flag's meaning is load-bearing and easy to misread as a destination.
+    assert "derived server-side" in r.stdout or "cannot be set" in r.stdout
 
 
 def test_yaml_path_needs_no_pyyaml_for_json():

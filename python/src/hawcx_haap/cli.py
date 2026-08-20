@@ -9,7 +9,8 @@ import argparse
 import pathlib
 import sys
 
-from .template import TemplateError, load_template, validate_v1
+from .submit import SubmitError, resolve_credentials, submit_template
+from .template import TemplateError, load_template
 from .wrap import GenerationError, generate_module
 
 _PROG = "hawcx"
@@ -77,6 +78,53 @@ def _cmd_wrap(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_submit(args: argparse.Namespace) -> int:
+    text, hint = _read(args.template)
+    try:
+        # Validate LOCALLY first. The console revalidates — it must, since it is
+        # reachable without this CLI — but failing here turns a network
+        # round-trip and a 400 into an immediate, offline error listing every
+        # problem at once.
+        doc = load_template(text, path_hint=hint)
+    except TemplateError as e:
+        print(f"{hint}: INVALID — not submitted", file=sys.stderr)
+        for code, path in e.errors:
+            print(f"  {code:28} {path}", file=sys.stderr)
+        if not e.errors:
+            print(f"  {e}", file=sys.stderr)
+        return 1
+
+    try:
+        console_url, api_key = resolve_credentials(args.org)
+        result = submit_template(
+            doc,
+            console_url=console_url,
+            api_key=api_key,
+            source=args.source,
+            timeout=args.timeout,
+        )
+    except SubmitError as e:
+        print(f"submit failed: {e}", file=sys.stderr)
+        for err in e.errors:
+            print(f"  {err.get('code', '?'):28} {err.get('path', '?')}", file=sys.stderr)
+        return 1
+
+    print(
+        f"submitted {result.get('name')} v{result.get('version')} "
+        f"({result.get('toolCount')} tool(s)) — status {result.get('status')}, "
+        f"id {result.get('id')}"
+    )
+    # `--org` selected the CREDENTIAL; the console derives the destination org
+    # from the key itself. Saying so on success makes a wrong-key submission
+    # visible instead of silent.
+    print(
+        f"  via {console_url} using the API key configured for {args.org!r}; "
+        "the destination org is the one bound to that key.",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog=_PROG,
@@ -99,18 +147,31 @@ def build_parser() -> argparse.ArgumentParser:
              "byte-identical and CI shows no spurious diff)",
     )
     w.set_defaults(func=_cmd_wrap)
+
+    s_ = sub.add_parser(
+        "submit",
+        help="submit a template to the Admin Console as a draft",
+        description=(
+            "Validate a template locally, then POST it to the console's "
+            "/api/agent-templates endpoint. --org selects WHICH API KEY to use; the "
+            "destination org is derived server-side from that key and cannot be set "
+            "by this client."
+        ),
+    )
+    s_.add_argument("template", help="path to the template YAML/JSON, or - for stdin")
+    s_.add_argument(
+        "--org", required=True,
+        help="org name, used to pick HAWCX_API_KEY_<ORG> / HAWCX_CONSOLE_URL_<ORG> "
+             "(falling back to the unsuffixed variables)",
+    )
+    s_.add_argument("--source", default="cli", help="provenance string recorded on the draft")
+    s_.add_argument("--timeout", type=int, default=30, help="HTTP timeout in seconds")
+    s_.set_defaults(func=_cmd_submit)
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Entry point.
-
-    NOTE on `submit`: plan U2 pairs `validate` with `submit --org <org>`, which
-    pushes a draft to the Admin Console (`templates.push`). That console endpoint
-    does not exist yet (plan U3), so `submit` is NOT registered here. A subcommand
-    that accepted the flags and failed at the network would look like an outage
-    instead of an unbuilt feature; an unknown-subcommand error is honest.
-    """
+    """Entry point for `hawcx validate` / `hawcx wrap` / `hawcx submit`."""
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
