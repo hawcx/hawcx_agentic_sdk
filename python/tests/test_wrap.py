@@ -10,6 +10,7 @@ import textwrap
 
 import pytest
 
+from hawcx_haap import wrap as wrap_module
 from hawcx_haap.template import TemplateError, load_template
 from hawcx_haap.wrap import GenerationError, class_name_for, generate_module
 
@@ -49,6 +50,33 @@ def _string_literals(source: str) -> set[str]:
         n.value for n in ast.walk(tree)
         if isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value not in docstrings
     }
+
+
+def test_generated_source_is_pure_ascii():
+    """Generated modules get read back by tools that may not pass an encoding,
+    and the platform default is cp1252 on Windows. A single em-dash in the banner
+    turned into byte 0x97 there and Python refused to import its own output:
+    "SyntaxError: (unicode error) 'utf-8' codec can't decode byte 0x97". Passed
+    on ubuntu and macOS; caught only by the Windows matrix.
+    """
+    src = generate_module(UKG_O365)
+    assert src.isascii(), {c: hex(ord(c)) for c in src if ord(c) > 127}
+    # The property that actually broke: encodable in the legacy Windows codepage
+    # and byte-identical afterwards.
+    assert src.encode('cp1252').decode('cp1252') == src
+
+
+def test_generator_refuses_to_emit_non_ascii():
+    """The guard, not just the current output — otherwise the next smart quote
+    someone pastes into a docstring reintroduces the bug."""
+    doc = {**UKG_O365, "name": "o365-group-assistant"}
+    original = wrap_module._BANNER
+    try:
+        wrap_module._BANNER = "# generated \u2014 dash"
+        with pytest.raises(GenerationError, match="non-ASCII"):
+            generate_module(doc)
+    finally:
+        wrap_module._BANNER = original
 
 
 def test_generated_module_is_valid_python_and_deterministic():
@@ -109,7 +137,7 @@ def test_colliding_class_names_fail_closed():
 
 def test_generated_tools_are_importable_and_wired(tmp_path):
     mod = tmp_path / "gen.py"
-    mod.write_text(generate_module(UKG_O365))
+    mod.write_text(generate_module(UKG_O365), encoding="utf-8")
     sys.path.insert(0, str(tmp_path))
     try:
         import importlib
@@ -143,7 +171,7 @@ def test_invoke_is_called_with_the_template_identity(tmp_path):
     """The point of the whole generator: tool identity and actions on the wire
     come from the template, and no credential is handled here."""
     mod = tmp_path / "gen2.py"
-    mod.write_text(generate_module(UKG_O365))
+    mod.write_text(generate_module(UKG_O365), encoding="utf-8")
     sys.path.insert(0, str(tmp_path))
     try:
         import importlib
