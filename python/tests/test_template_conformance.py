@@ -34,14 +34,20 @@ _VECTOR_REL = pathlib.Path("spec/conformance/vectors/agent-template-v1.json")
 
 
 def _spec_root() -> pathlib.Path | None:
+    """Locate an hx_agent_canonical_spec checkout, or None.
+
+    An explicitly-set `HAWCX_CANONICAL_SPEC` is used EXCLUSIVELY — no silent
+    fallback to the sibling. If someone points this at the wrong checkout, the
+    right outcome is "not found" (and a skip naming the bad path), not quietly
+    validating against a different repo than the one they named.
+    """
     env = os.environ.get("HAWCX_CANONICAL_SPEC")
-    candidates = [pathlib.Path(env)] if env else []
+    if env:
+        p = pathlib.Path(env)
+        return p if (p / _VECTOR_REL).is_file() else None
     # tests/ -> python/ -> repo root -> haap_repos/
-    candidates.append(pathlib.Path(__file__).resolve().parents[3] / "hx_agent_canonical_spec")
-    for c in candidates:
-        if (c / _VECTOR_REL).is_file():
-            return c
-    return None
+    sibling = pathlib.Path(__file__).resolve().parents[3] / "hx_agent_canonical_spec"
+    return sibling if (sibling / _VECTOR_REL).is_file() else None
 
 
 _ROOT = _spec_root()
@@ -57,6 +63,14 @@ pytestmark = pytest.mark.skipif(
 
 
 def _vectors() -> dict:
+    # Returns an empty shell when the spec repo is absent. `pytestmark = skipif`
+    # skips TEST FUNCTIONS, but a module-level `@parametrize(..., _manifest_vectors())`
+    # argument is evaluated during COLLECTION, before any skip applies — so an
+    # unguarded `_ROOT / ...` here is a collection-time TypeError that fails the
+    # whole file instead of skipping it. Found in CI, not locally: the sibling
+    # checkout exists on a dev machine, so the skip path never ran.
+    if _ROOT is None:
+        return {"vectors": [], "golden_manifest": {}, "goldens": {}}
     return json.loads((_ROOT / _VECTOR_REL).read_text())
 
 

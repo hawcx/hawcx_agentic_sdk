@@ -101,6 +101,50 @@ jobs:
       # The Python package is pure-Python (hatchling backend). The bundled
       # hawcx-manager binary ships only in the release platform wheels, so the
       # editable dev install needs NO Rust toolchain and NO cargo registry.
+      # Fetch the CANONICAL agent-template vector set so
+      # tests/test_template_conformance.py runs instead of skipping. That module
+      # is the only cross-repo proof that this SDK's validator agrees with the
+      # reference oracle in hx_agent_canonical_spec; skipped, it proves nothing.
+      #
+      # ONE FILE over the API, not `actions/checkout` of the whole spec repo:
+      # checkout must land inside $GITHUB_WORKSPACE, which would drop an
+      # untracked sibling tree into this repo's working copy and put it in scope
+      # for the other jobs' tree scans. Fetching the single JSON into a temp dir
+      # shaped like the spec repo keeps this job self-contained.
+      #
+      # `continue-on-error` + the empty-token guard: HAWCX_GH_TOKEN is not yet a
+      # secret on this repo (only CARGO_HAWCX_TOKEN and GITHUB_TOKEN are, and
+      # GITHUB_TOKEN cannot read a different private repo). Until it is added the
+      # step no-ops and the conformance module skips with its own loud reason.
+      # It starts working the moment the secret lands — no code change needed.
+      - name: Fetch the canonical agent-template vector set
+        id: oracle
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.HAWCX_GH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "HAWCX_GH_TOKEN not set on this repo — conformance vectors unavailable."
+            echo "tests/test_template_conformance.py will SKIP (not silently pass)."
+            exit 1
+          fi
+          rel="spec/conformance/vectors/agent-template-v1.json"
+          dest="${RUNNER_TEMP}/canonical_spec/${rel}"
+          mkdir -p "$(dirname "$dest")"
+          curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github.raw" \
+            "https://api.github.com/repos/hawcx/hx_agent_canonical_spec/contents/${rel}" \
+            -o "$dest"
+          # Reject an HTML error page or a truncated body before the tests read it:
+          # a malformed oracle would surface as dozens of confusing vector
+          # failures instead of one clear fetch failure.
+          python -c "import json,sys; d=json.load(open(sys.argv[1])); assert d.get('vectors'), 'no vectors in fetched file'" "$dest"
+          echo "HAWCX_CANONICAL_SPEC=${RUNNER_TEMP}/canonical_spec" >> "$GITHUB_ENV"
+          echo "fetched $(python -c "import json,sys;print(len(json.load(open(sys.argv[1]))['vectors']))" "$dest") vectors"
+
       - name: Install + test
         working-directory: python
         shell: bash
