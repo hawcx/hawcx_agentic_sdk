@@ -6,9 +6,16 @@
 from __future__ import annotations
 
 import argparse
+import json
 import pathlib
 import sys
 
+from .extract import (
+    ExtractError,
+    build_template,
+    extract_from_mcp_tools_list,
+    extract_from_names,
+)
 from .submit import SubmitError, resolve_credentials, submit_template
 from .template import TemplateError, load_template
 from .wrap import GenerationError, generate_module
@@ -87,7 +94,7 @@ def _cmd_submit(args: argparse.Namespace) -> int:
         # problem at once.
         doc = load_template(text, path_hint=hint)
     except TemplateError as e:
-        print(f"{hint}: INVALID — not submitted", file=sys.stderr)
+        print(f"{hint}: INVALID -- not submitted", file=sys.stderr)
         for code, path in e.errors:
             print(f"  {code:28} {path}", file=sys.stderr)
         if not e.errors:
@@ -111,7 +118,7 @@ def _cmd_submit(args: argparse.Namespace) -> int:
 
     print(
         f"submitted {result.get('name')} v{result.get('version')} "
-        f"({result.get('toolCount')} tool(s)) — status {result.get('status')}, "
+        f"({result.get('toolCount')} tool(s)) -- status {result.get('status')}, "
         f"id {result.get('id')}"
     )
     # `--org` selected the CREDENTIAL; the console derives the destination org
@@ -120,6 +127,53 @@ def _cmd_submit(args: argparse.Namespace) -> int:
     print(
         f"  via {console_url} using the API key configured for {args.org!r}; "
         "the destination org is the one bound to that key.",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def _cmd_extract(args: argparse.Namespace) -> int:
+    try:
+        if args.names:
+            report = extract_from_names(args.names, namespace=args.namespace)
+        else:
+            text, hint = _read(args.tools)
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError as e:
+                print(f"{hint}: not valid JSON: {e}", file=sys.stderr)
+                return 1
+            report = extract_from_mcp_tools_list(payload, namespace=args.namespace)
+        doc = build_template(
+            report, name=args.name, version=args.version, framework=args.framework
+        )
+    except ExtractError as e:
+        print(f"extract failed: {e}", file=sys.stderr)
+        return 1
+
+    print(json.dumps(doc, indent=2))
+
+    # The report goes to STDERR so `hawcx extract ... > template.json` yields a
+    # clean file while the human still sees what needs checking. Silencing it
+    # would be the difference between a draft and something that looks finished.
+    if report.refused:
+        print("\nREFUSED -- add these by hand:", file=sys.stderr)
+        for src_name, why in report.refused:
+            print(f"  {src_name}: {why}", file=sys.stderr)
+    if report.unknown_verbs:
+        print(
+            "\nNo recognised verb -- actions DEFAULTED to ['read'], check each: "
+            + ", ".join(report.unknown_verbs),
+            file=sys.stderr,
+        )
+    if report.normalized:
+        print("\nRenamed to satisfy the id grammar:", file=sys.stderr)
+        for src_name, new_id in report.normalized:
+            print(f"  {src_name} -> {new_id}", file=sys.stderr)
+    print(
+        "\nThis is a DRAFT. `risk` is derived from the inferred action and is "
+        "deliberately mild; endpoints are absent by design (they come from the org "
+        "tool registry at runtime). Review, then `hawcx validate`.",
         file=sys.stderr,
     )
     return 0
@@ -167,6 +221,31 @@ def build_parser() -> argparse.ArgumentParser:
     s_.add_argument("--source", default="cli", help="provenance string recorded on the draft")
     s_.add_argument("--timeout", type=int, default=30, help="HTTP timeout in seconds")
     s_.set_defaults(func=_cmd_submit)
+
+    e = sub.add_parser(
+        "extract",
+        help="draft a template from an existing agent's tool list",
+        description=(
+            "Infer tools[].{id, actions, risk} from an MCP tools/list response or a "
+            "list of tool names. Endpoints, providers and constraints are NEVER "
+            "inferred. Output is a DRAFT for review, printed to stdout; the "
+            "what-to-check report goes to stderr."
+        ),
+    )
+    src = e.add_mutually_exclusive_group(required=True)
+    src.add_argument("--tools", help="path to an MCP tools/list JSON response, or - for stdin")
+    src.add_argument("--names", nargs="+", help="bare tool names, space separated")
+    e.add_argument(
+        "--namespace", required=True,
+        help="id prefix, e.g. `o365`. Required: the v1 id grammar is dotted and a "
+             "bare name cannot satisfy it. Synthesising one would mint a HAAP tool "
+             "identity out of nothing.",
+    )
+    e.add_argument("--name", required=True, help="template name (the agent's name)")
+    e.add_argument("--version", default="0.1.0", help="template version")
+    e.add_argument("--framework", default="langchain",
+                   help="framework kind accepted by the v1 schema")
+    e.set_defaults(func=_cmd_extract)
     return p
 
 
