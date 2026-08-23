@@ -70,20 +70,30 @@ On `pip install`, the matching platform wheel is selected automatically. `hawcx-
 
 ### How it works
 
-The build backend is [maturin](https://www.maturin.rs/) with `bindings = "bin"`. This packages a Rust binary — not a Python extension — into a platform-specific wheel. The same approach is used by `ruff`, `uv`, and `black`.
+The build backend is [hatchling](https://hatch.pypa.io/latest/). The package itself is **pure Python** — there is no Rust source in this repo and no Python extension module. The platform-specific `hawcx-manager` binary is *staged as package data*, not compiled: the release workflow drops it into `src/hawcx_haap/_bin/` before each wheel build, and the custom hatchling hook in `python/hatch_build.py` force-includes that directory **only when it exists**.
 
 ```toml
 # python/pyproject.toml (relevant section)
 [build-system]
-requires = ["maturin>=1.5,<2.0"]
-build-backend = "maturin"
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
 
-[tool.maturin]
-bindings = "bin"
-# Rust source lives in sibling hx_agent_client_auth_service repo.
-# CI passes --manifest-path at build time.
-python-source = "src"
+[tool.hatch.build.targets.wheel]
+packages = ["src/hawcx_haap"]
+
+# hatch_build.py force-includes src/hawcx_haap/_bin/ when the release workflow
+# has staged a binary there. Absent it, the wheel is simply pure-Python.
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
 ```
+
+Consequences worth knowing:
+
+- A dev / editable install needs **no Rust toolchain and no cargo registry access** — the hook no-ops and `get_binary_path()` raises at call time instead.
+- The hook emits a `py3-none-any` wheel; the release workflow retags it to the real platform tag with `python -m wheel tags` afterwards.
+- Build platform wheels with `python -m build --wheel`, **not** via sdist: the sdist deliberately excludes `src/hawcx_haap/_bin`.
+
+> This section previously described [maturin](https://www.maturin.rs/) with `bindings = "bin"`. That was accurate before the alpha.13 packaging change and is not what the repo does today (verified 2026-08-22).
 
 ### Supported platforms
 
@@ -105,7 +115,7 @@ binary = get_binary_path()
 # → "C:\...\venv\Scripts\hawcx-manager.exe" (Windows)
 ```
 
-`get_binary_path()` raises `RuntimeError` if the binary is absent (e.g., installed from source without running maturin). The error message explains the local development workflow.
+`get_binary_path()` raises `RuntimeError` if the binary is absent (e.g., installed from an sdist or an editable checkout, where nothing was staged into `_bin/`). The error message explains the local development workflow.
 
 ### Packages on PyPI
 
@@ -113,6 +123,49 @@ binary = get_binary_path()
 |---|---|
 | `hawcx-haap` | Core IPC client + bundled `hawcx-manager` binary |
 | `hawcx-crewai` | CrewAI `BaseTool` adapter (depends on `hawcx-haap`) |
+
+### The `hawcx` CLI
+
+`hawcx-haap` installs one console script, `hawcx` (`[project.scripts]` → `hawcx_haap.cli:main`):
+
+| Subcommand | Purpose |
+|---|---|
+| `hawcx validate <template>` | Check a `hawcx/agent-template/v1` document; prints every error code at once |
+| `hawcx extract --tools <mcp.json> \| --names ...` | Draft a template from an existing agent's tool list (output is a DRAFT) |
+| `hawcx wrap <template> -o <out.py>` | Generate HAAP tool wrappers from a template |
+| `hawcx submit <template> --org <org>` | Push a validated template to the Admin Console as a draft |
+| `hawcx bundle <project-dir>` | Pack a Python agent into one executable `.pyz` and print its `sha256` |
+
+**Python only.** Node bundling is not yet available: `node/package.json` has no `bin` field and this SDK ships no Node CLI at all. A single-file `.mjs` entry (and later a Node SEA) is a separate increment; nothing half-built is shipped in its place.
+
+#### `hawcx bundle` — the measurable exec target
+
+HAAP's code-identity gate measures the bytes of the exact file the supervisor `exec`s and requires that digest to be listed in the org-signed class manifest's `allowed_workload_selectors`. The supervisor's agent config has **no args field**, so it cannot hand a script path to an interpreter — which means an `agent_bin` pointing at `/usr/local/bin/python` measures CPython and proves nothing about the agent. The exec target has to *be* the agent program. `hawcx bundle` produces that file.
+
+```bash
+hawcx bundle ./my_agent -o my-agent.pyz
+# sha256:9f2c...e41b          <- stdout: the digest, and nothing else
+#   my-agent.pyz (48213 bytes)   <- stderr: what to do with it
+```
+
+The mechanism is the standard library's [`zipapp`](https://docs.python.org/3/library/zipapp.html) — no new dependency, no vendored packer. Dependencies are staged with `pip install --target` (from `<project>/requirements.txt` by default, or `-r`), the project is copied in alongside them, and the archive is written with a `#!/usr/bin/env python3` shebang and the executable bit.
+
+| Flag | Meaning |
+|---|---|
+| `-o, --output` | Output path (default: `<dirname>.pyz` in the cwd) |
+| `-m, --main` | Entry point as `package.module:function`; omit when the project has a `__main__.py` |
+| `-r, --requirement` | Requirements file to vendor (default: `<project>/requirements.txt` if present) |
+| `--force` | Overwrite an existing output file — refused without it, same as `hawcx wrap` |
+
+**Native extension modules are refused.** If any `.so`, `.pyd`, or `.dylib` lands in the staged tree, the build fails and names the offending package(s). This is not a missing feature: CPython cannot import an extension module out of a zip, so a runtime that appears to support it does so by unpacking to a temp directory — at which point the bytes HAAP measured are no longer the bytes that execute. The documented escape hatch is **PyInstaller**: a one-file PyInstaller binary is also a single measurable exec target. `hawcx bundle` does not drive PyInstaller; run it yourself and hash the result.
+
+In practice this rules out a large slice of the agent ecosystem today — anything pulling in `pydantic` (and therefore `pydantic-core`), for instance, which includes CrewAI-based agents. Treat the refusal as the honest signal it is.
+
+**Digest stability.** Two builds of unchanged input on one machine produce byte-identical output: staged mtimes are normalised, byte-compilation is disabled (`--no-compile`), and `zipapp` walks the tree in sorted order. Full **cross-machine** reproducibility is **not** claimed — `pip` resolves wheels for the running interpreter and platform, and zip stores timestamps in local time. Build on the platform you deploy to. Cross-machine reproducibility is roadmap.
+
+**Named residual.** The interpreter the shebang points at is *not* measured; it is the same trust class as the system libraries the agent links. What is measured is the whole agent program plus its vendored dependencies.
+
+Windows Lane A bundles are out of scope for v0 — the shebang mechanism is Unix, and the attach path is Unix-only today.
 
 ---
 

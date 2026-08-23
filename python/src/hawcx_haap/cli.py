@@ -1,6 +1,11 @@
 """``hawcx`` CLI. Auto-wrap plan U1 (``wrap``) and U2 (``validate``).
 
 ``submit`` is deliberately absent rather than stubbed — see :func:`main`.
+
+``bundle`` (agent-delivery WP-F) is Python-only. Node bundling is not built:
+``node/package.json`` has no ``bin`` and there is no Node CLI to hang it off,
+so a half-built subcommand would advertise a capability that does not exist.
+The asymmetry is stated in ``--help`` rather than papered over.
 """
 
 from __future__ import annotations
@@ -10,6 +15,7 @@ import json
 import pathlib
 import sys
 
+from .bundle import BundleError, build_bundle
 from .extract import (
     ExtractError,
     build_template,
@@ -179,11 +185,50 @@ def _cmd_extract(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_bundle(args: argparse.Namespace) -> int:
+    src = pathlib.Path(args.source)
+    out = pathlib.Path(args.output) if args.output else pathlib.Path(f"{src.resolve().name}.pyz")
+
+    if out.exists() and not args.force:
+        # Same posture as `wrap`: the output is a file someone may have already
+        # placed in a class manifest. Silently replacing it would change what
+        # the digest on record refers to.
+        print(f"{out}: exists -- pass --force to overwrite", file=sys.stderr)
+        return 1
+
+    req = pathlib.Path(args.requirement) if args.requirement else src / "requirements.txt"
+    if not req.is_file():
+        if args.requirement:
+            print(f"{req}: no such requirements file", file=sys.stderr)
+            return 1
+        req = None  # type: ignore[assignment]
+
+    try:
+        digest = build_bundle(src, out, main=args.main, requirement=req)
+    except BundleError as e:
+        print(f"{e}", file=sys.stderr)
+        return 1
+
+    print(digest)
+    print(
+        f"  {out} ({out.stat().st_size} bytes)\n"
+        "  Put that digest in the class manifest's `allowed_workload_selectors` and "
+        "point\n  the supervisor's agent_bin at this file. The exec target IS the "
+        "workload: the\n  code-identity gate measures these exact bytes, so a rebuild "
+        "that changes them\n  needs a manifest update.",
+        file=sys.stderr,
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog=_PROG,
-        description="Hawcx HAAP agent tooling: validate a hawcx/agent-template/v1 "
-                    "and generate tool wrappers from it.",
+        description="Hawcx HAAP agent tooling: validate a hawcx/agent-template/v1, "
+                    "generate tool wrappers from it, and bundle a Python agent into "
+                    "one measurable executable file.",
+        epilog="Python only. Node bundling is not yet available (there is no Node CLI "
+               "in this SDK); `hawcx bundle` covers Python agents.",
     )
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -246,11 +291,47 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--framework", default="langchain",
                    help="framework kind accepted by the v1 schema")
     e.set_defaults(func=_cmd_extract)
+
+    b = sub.add_parser(
+        "bundle",
+        help="pack a Python agent project into one executable .pyz and print its sha256",
+        description=(
+            "Build a stdlib zipapp with a `#!/usr/bin/env python3` shebang: one file, "
+            "one digest, directly executable. HAAP's code-identity gate measures the "
+            "bytes of the file the supervisor execs and there is no way to pass it a "
+            "script argument, so the exec target must BE the agent program. The printed "
+            "sha256 is what an admin puts in the class manifest's "
+            "`allowed_workload_selectors`.\n\n"
+            "Dependencies are staged with `pip install --target` for the interpreter "
+            "running this command, so build on the platform you deploy to. Native "
+            "extension modules (.so/.pyd/.dylib) are REFUSED -- a zipapp cannot carry "
+            "them without unpacking to a temp dir, which breaks the measurement; use "
+            "PyInstaller for those agents.\n\n"
+            "Python only. Node bundling is not yet available -- there is no Node CLI "
+            "in this SDK (`node/package.json` has no `bin`), and a single-file .mjs "
+            "entry is a later increment."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    b.add_argument("source", help="path to the agent project directory")
+    b.add_argument("-o", "--output", help="output path (default: <dirname>.pyz in the cwd)")
+    b.add_argument(
+        "-m", "--main",
+        help="entry point as 'package.module:function'. Omit when the project already "
+             "has a __main__.py.",
+    )
+    b.add_argument(
+        "-r", "--requirement",
+        help="requirements file to vendor (default: <source>/requirements.txt when it "
+             "exists; no dependency staging at all when it does not)",
+    )
+    b.add_argument("--force", action="store_true", help="overwrite an existing output file")
+    b.set_defaults(func=_cmd_bundle)
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Entry point for `hawcx validate` / `hawcx wrap` / `hawcx submit`."""
+    """Entry point for `hawcx validate` / `wrap` / `submit` / `extract` / `bundle`."""
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)

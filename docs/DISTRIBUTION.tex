@@ -196,24 +196,40 @@ On \code{pip install}, pip selects the wheel matching the current platform.
 \pkg{hawcx-manager} lands in \code{venv/bin/hawcx-manager} (Unix) or
 \code{venv\textbackslash Scripts\textbackslash hawcx-manager.exe} (Windows).
 
-\subsection{Build backend: maturin \texttt{bindings = "bin"}}
+\subsection{Build backend: hatchling with a binary-staging hook}
 
-The build backend is \href{https://www.maturin.rs/}{maturin} configured with
-\code{bindings = "bin"}. This packages a Rust binary --- not a Python
-extension --- into a platform-specific wheel. The same mechanism is used by
-\pkg{ruff}, \pkg{uv}, and \pkg{black}.
+The build backend is \href{https://hatch.pypa.io/latest/}{hatchling}. The
+package is \emph{pure Python}: there is no Rust source in this repo and no
+Python extension module. The platform-specific \pkg{hawcx-manager} binary is
+staged as package data rather than compiled --- the release workflow drops it
+into \code{src/hawcx\_haap/\_bin/} before each wheel build, and the custom
+hatchling hook in \code{python/hatch\_build.py} force-includes that directory
+\emph{only when it exists}.
 
 \begin{lstlisting}[language=TOML, caption={python/pyproject.toml (relevant section)}]
 [build-system]
-requires = ["maturin>=1.5,<2.0"]
-build-backend = "maturin"
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
 
-[tool.maturin]
-bindings = "bin"
-# Rust source lives in sibling hx_agent_client_auth_service repo.
-# CI passes --manifest-path at build time via release-python.yml.
-python-source = "src"
+[tool.hatch.build.targets.wheel]
+packages = ["src/hawcx_haap"]
+
+# hatch_build.py force-includes src/hawcx_haap/_bin/ when the release workflow
+# has staged a binary there. Absent it, the wheel is simply pure-Python.
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "hatch_build.py"
 \end{lstlisting}
+
+Consequences: a dev or editable install needs no Rust toolchain and no cargo
+registry access (the hook no-ops, and \code{get\_binary\_path()} raises at call
+time instead); the hook emits a \code{py3-none-any} wheel that
+\code{release-python.yml} retags with \code{python -m wheel tags}; and platform
+wheels must be built with \code{python -m build --wheel}, never via the sdist,
+which deliberately excludes \code{\_bin}.
+
+\emph{Correction (2026-08-22): this section previously described maturin with}
+\code{bindings = "bin"}\emph{. That was accurate before the alpha.13 packaging
+change and no longer describes the repo.}
 
 \subsection{Supported platforms}
 
@@ -245,8 +261,9 @@ binary = get_binary_path()
 \end{lstlisting}
 
 \code{get\_binary\_path()} raises \code{RuntimeError} if the binary is absent
-(e.g., installed from source without maturin). The error message explains the
-local development workflow.
+(e.g., installed from an sdist or an editable checkout, where nothing was
+staged into \code{\_bin/}). The error message explains the local development
+workflow.
 
 \subsection{PyPI packages}
 
