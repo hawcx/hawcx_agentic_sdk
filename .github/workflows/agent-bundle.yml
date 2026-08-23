@@ -1,0 +1,234 @@
+# Reusable: build a customer agent into ONE measurable `.pyz` and publish its digest.
+#
+# WHY THIS EXISTS
+# ---------------
+# ADR-0063 D-63-2: a Lane A agent ships as one directly-executable file, and the
+# supervisor measures the digest of the exact bytes it is about to `exec`,
+# requiring that digest to appear in the org-signed class manifest's
+# `runtime.allowed_workload_selectors`. Until now the last link in that chain was
+# a person: someone ran `hawcx bundle` by hand, on whatever OS they had open, and
+# typed the result into a manifest. A hand process gets the platform wrong
+# silently -- both digests on record for the UKG agent were built on Windows and
+# are therefore invalid exec targets for the Linux hosts agents actually run on.
+# CI cannot make that mistake: the platform is an input, and it is printed.
+#
+# Call it from an agent repo:
+#
+#   jobs:
+#     bundle:
+#       uses: hawcx/hawcx_agentic_sdk/.github/workflows/agent-bundle.yml@main
+#       with:
+#         project-path: agent
+#         output-name: my-agent.pyz
+#
+# This repo is PUBLIC, so any repo -- including a private one -- may call this.
+#
+# WHICH `hawcx bundle`, AND WHICH `hawcx-haap`
+# --------------------------------------------
+# Both come from THIS repo's source at `sdk-ref`, never from PyPI:
+#
+#   * the TOOL, because the published wheel lags main (0.1.5 was still awaiting
+#     a release approval while this workflow was written, and an agent pinning
+#     `hawcx-haap>=0.1.5` could not resolve from PyPI at all);
+#   * the VENDORED RUNTIME, via PIP_FIND_LINKS pointing at a wheel built from the
+#     same checkout. If the bundler came from source and the `hawcx-haap` inside
+#     the bundle came from PyPI you would have two SDK versions in one artifact
+#     and the digest would be attributable to neither.
+#
+# The digest is therefore a function of (agent commit, sdk-ref, runner OS,
+# python-version) and nothing else. All four are printed in the job summary.
+#
+# NAMED CONSEQUENCE, do not discover this later: a wheel built from source
+# carries NO `hawcx_haap/_bin/` binary. `hawcx-manager` is staged into the
+# platform wheels by release-python.yml from the cargo registry, so a vendored
+# bundle built here is the pure-Python closure (tens of KB), not the ~25 MB
+# artifact a PyPI-vendored build produces. That binary is the supervisor's, not
+# the agent's -- the agent reaches the Assembler over a UNIX socket -- but it
+# does mean this digest and a PyPI-vendored digest are different files.
+name: agent-bundle
+
+on:
+  workflow_call:
+    inputs:
+      project-path:
+        description: "Agent project directory in the CALLING repo (the dir `hawcx bundle` is pointed at)."
+        required: true
+        type: string
+      main:
+        description: >-
+          Entry point as 'package.module:function'. Leave empty when the project
+          ships its own __main__.py -- passing both is an error `hawcx bundle`
+          refuses, because a project cannot have two entry points.
+        required: false
+        type: string
+        default: ""
+      output-name:
+        description: "Filename of the built bundle (also the artifact name stem)."
+        required: false
+        type: string
+        default: agent.pyz
+      runs-on:
+        description: >-
+          Runner to build on. The digest is PER-PLATFORM: pip resolves wheels for
+          the running interpreter and platform, so a macOS build is not a valid
+          exec target on a Linux host. Linux is the default because that is where
+          agents run; set macos-14 deliberately, never incidentally.
+        required: false
+        type: string
+        default: ubuntu-latest
+      python-version:
+        description: "Interpreter that stages the dependencies. Also part of the digest."
+        required: false
+        type: string
+        default: "3.12"
+      sdk-ref:
+        description: >-
+          Ref of hawcx/hawcx_agentic_sdk supplying both `hawcx bundle` and the
+          vendored `hawcx-haap`. Defaults to main; pin a tag or SHA when you need
+          a digest that stays put across SDK changes. The resolved SHA is printed.
+        required: false
+        type: string
+        default: main
+    outputs:
+      digest:
+        description: "sha256:<hex> of the built bundle -- the class-manifest selector."
+        value: ${{ jobs.bundle.outputs.digest }}
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    name: bundle ${{ inputs.output-name }} on ${{ inputs.runs-on }}
+    runs-on: ${{ inputs.runs-on }}
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      # No `repository:` -- in a called workflow this checks out the CALLER,
+      # which is where the agent project lives.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check out the SDK source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: hawcx/hawcx_agentic_sdk
+          ref: ${{ inputs.sdk-ref }}
+          path: .hawcx-sdk
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install `hawcx bundle` and build the wheel the bundle will vendor
+        id: sdk
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install ./.hawcx-sdk/python
+          # --no-deps: hawcx-haap declares `dependencies = []`; this wheelhouse
+          # exists to satisfy the AGENT's `hawcx-haap` pin, not to mirror PyPI.
+          python -m pip wheel ./.hawcx-sdk/python --no-deps -w "${RUNNER_TEMP}/wheelhouse"
+          sha=$(git -C .hawcx-sdk rev-parse HEAD)
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+          echo "SDK ${{ inputs.sdk-ref }} = ${sha}"
+          ls -l "${RUNNER_TEMP}/wheelhouse"
+
+      # Build TWICE. Reproducibility is what makes a digest mean anything: if the
+      # same inputs can produce two different files, "the digest in the manifest"
+      # names a moment rather than a program, and re-measuring proves nothing.
+      # `hawcx bundle` is built for this (staged mtimes flattened to the zip
+      # epoch, pip --no-compile, __pycache__ filtered, --main materialised as a
+      # real staged file) -- this step is the check that it still holds, on this
+      # runner, for this agent.
+      - name: Build twice and require the digests to match
+        id: build
+        shell: bash
+        env:
+          # Satisfy the agent's `hawcx-haap` requirement from the source wheel
+          # above. Agents that do not depend on hawcx-haap are unaffected: nothing
+          # in the wheelhouse matches their requirements.
+          PIP_FIND_LINKS: ${{ runner.temp }}/wheelhouse
+          # Caller-supplied strings go through the environment, never through
+          # `${{ }}` interpolation into the script body -- an input containing a
+          # shell metacharacter would otherwise execute here.
+          PROJECT_PATH: ${{ inputs.project-path }}
+          MAIN_SPEC: ${{ inputs.main }}
+          OUT_NAME: ${{ inputs.output-name }}
+        run: |
+          set -euo pipefail
+          MAIN_ARG=()
+          if [[ -n "${MAIN_SPEC}" ]]; then
+            MAIN_ARG=(--main "${MAIN_SPEC}")
+          fi
+
+          build() {
+            local out="$1"
+            mkdir -p "$(dirname "$out")"
+            hawcx bundle "${PROJECT_PATH}" -o "$out" "${MAIN_ARG[@]}" --force
+          }
+
+          # `hawcx bundle` prints `sha256:<hex>` on stdout and the advisory note
+          # on stderr, so stdout alone is the digest.
+          d1=$(build "${RUNNER_TEMP}/b1/${OUT_NAME}")
+          d2=$(build "${RUNNER_TEMP}/b2/${OUT_NAME}")
+
+          echo "build 1: ${d1}"
+          echo "build 2: ${d2}"
+          if [[ "${d1}" != "${d2}" ]]; then
+            echo "::error::NOT REPRODUCIBLE -- two builds of the same input produced different bytes (${d1} vs ${d2}). A digest that changes per build cannot authorize anything; do not put either value in a class manifest."
+            exit 1
+          fi
+
+          cp "${RUNNER_TEMP}/b1/${OUT_NAME}" "${RUNNER_TEMP}/${OUT_NAME}"
+          printf '%s\n' "${d1}" > "${RUNNER_TEMP}/${OUT_NAME}.sha256"
+          echo "digest=${d1}" >> "$GITHUB_OUTPUT"
+          echo "size=$(wc -c < "${RUNNER_TEMP}/${OUT_NAME}")" >> "$GITHUB_OUTPUT"
+
+      # The point of the whole exercise: an administrator copies one line into a
+      # manifest without reading a log.
+      - name: Publish the selector to the job summary
+        shell: bash
+        env:
+          OUT_NAME: ${{ inputs.output-name }}
+          PROJECT_PATH: ${{ inputs.project-path }}
+          RUNNER_LABEL: ${{ inputs.runs-on }}
+          PY_VERSION: ${{ inputs.python-version }}
+          SDK_REF: ${{ inputs.sdk-ref }}
+          SDK_SHA: ${{ steps.sdk.outputs.sha }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          SIZE: ${{ steps.build.outputs.size }}
+        run: |
+          set -euo pipefail
+          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
+          ## \`${OUT_NAME}\` — class-manifest selector
+
+          \`\`\`
+          ${DIGEST}
+          \`\`\`
+
+          Paste that into the org-signed class manifest's
+          \`runtime.allowed_workload_selectors\` and point the supervisor's
+          \`agent_bin\` at this file. The exec target IS the workload.
+
+          | | |
+          |---|---|
+          | agent commit | \`${GITHUB_SHA}\` (\`${GITHUB_REPOSITORY}\`) |
+          | project path | \`${PROJECT_PATH}\` |
+          | SDK ref | \`${SDK_REF}\` = \`${SDK_SHA}\` |
+          | built on | \`${RUNNER_LABEL}\` / python \`${PY_VERSION}\` |
+          | size | ${SIZE} bytes |
+          | reproducible | yes — two builds, identical digest |
+
+          **The digest is per-platform.** It is only a valid exec target on
+          \`${RUNNER_LABEL}\`-class hosts. Rebuild elsewhere and re-measure.
+          EOF
+
+      - name: Upload the bundle and its digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.output-name }}-${{ inputs.runs-on }}
+          path: |
+            ${{ runner.temp }}/${{ inputs.output-name }}
+            ${{ runner.temp }}/${{ inputs.output-name }}.sha256
+          if-no-files-found: error
