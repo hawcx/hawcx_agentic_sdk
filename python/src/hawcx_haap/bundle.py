@@ -79,7 +79,15 @@ class BundleError(Exception):
     """A bundle could not be built, or was refused."""
 
 
-_MAIN_TEMPLATE = "# -*- coding: utf-8 -*-\nimport {module}\n{module}.{fn}()\n"
+# `raise SystemExit(f())`, not a bare `f()`. A bare call DISCARDS the entry
+# point's return value, so an agent that returns 2 to report failure exits 0
+# and everything reading exit status -- a supervisor deciding whether the
+# workload it just spawned is healthy, a CI step, a shell `&&` -- is told it
+# succeeded. Measured: the same run exits 2 as a module and 0 from a `--main`
+# bundle. This is the idiom `console_scripts` already uses (`sys.exit(main())`),
+# so a bundled entry point and an installed one now agree; `SystemExit(None)`
+# is still a clean 0.
+_MAIN_TEMPLATE = "# -*- coding: utf-8 -*-\nimport {module}\nraise SystemExit({module}.{fn}())\n"
 
 
 def _is_pycache(arcname: pathlib.PurePath) -> bool:
