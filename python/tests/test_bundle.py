@@ -250,3 +250,46 @@ def test_golden_bundle_reaches_a_mock_assembler(tmp_path, mock_assembler, mock_a
     # The Assembler saw a real Profile E call, not just a process that started.
     assert mock_assembler.received_request is not None
     assert mock_assembler.received_request["tool"] == "acme.doc.generate"
+
+
+# -- the entry point's exit code -------------------------------------------
+
+def _main_project(root: Path, ret: str) -> Path:
+    """A project whose `--main` entry function returns `ret`."""
+    proj = root / "app"
+    (proj / "pkg").mkdir(parents=True)
+    (proj / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (proj / "pkg" / "run.py").write_text(
+        "def main():\n    return " + ret + "\n", encoding="utf-8"
+    )
+    return proj
+
+
+def test_main_entry_propagates_a_failing_exit_code(tmp_path):
+    """A bundled agent that fails MUST NOT exit 0.
+
+    The generated `__main__.py` used to call the entry point and throw its
+    return value away, so a function returning 2 produced exit 0. Everything
+    that reads exit status -- a supervisor deciding whether the workload it
+    just spawned is healthy, CI, a shell `&&` -- was told a failed run
+    succeeded. This is the regression test for that.
+    """
+    proj = _main_project(tmp_path, "2")
+    out = tmp_path / "app.pyz"
+    build_bundle(proj, out, main="pkg.run:main")
+
+    r = subprocess.run([sys.executable, str(out)], capture_output=True, text=True)
+    assert r.returncode == 2, (
+        "a --main entry returning 2 must exit 2, not "
+        f"{r.returncode} -- exit status is how a supervisor learns the agent failed"
+    )
+
+
+def test_main_entry_returning_none_is_still_a_clean_zero(tmp_path):
+    """Positive control: the fix must not turn every success into a failure."""
+    proj = _main_project(tmp_path, "None")
+    out = tmp_path / "app.pyz"
+    build_bundle(proj, out, main="pkg.run:main")
+
+    r = subprocess.run([sys.executable, str(out)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
