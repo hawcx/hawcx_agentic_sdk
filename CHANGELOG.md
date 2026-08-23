@@ -6,6 +6,35 @@ versions track each language surface independently (Rust crate
 versions in `Cargo.toml`, Node version in `node/package.json`, Python
 version in `python/pyproject.toml`).
 
+## [0.1.5] - unreleased (Python surface only)
+
+`python/pyproject.toml` is bumped to `0.1.5`; nothing is published until a
+`python-v0.1.5` tag is pushed. The bundled `hawcx-manager` version is
+unchanged at `0.8.8`.
+
+- **New module `hawcx_haap.mcp_caller`** — the Lane A integration core, lifted
+  out of a customer agent (`hx_ukg_poc` PR #73) where it had no business being
+  per-customer. `Caller`, `McpTool`, `Decision`, `get_agent`, `close_agent`,
+  `env_principal_allowlist`, all exported from `hawcx_haap`. It builds the MCP
+  JSON-RPC `tools/call` document, routes every call through `agent.invoke()`,
+  and classifies the answer as an allow or a deny. Pure-Python, no new
+  dependency — a consumer built on it still bundles with `hawcx bundle`.
+- **Fixed on the way in: an SSE-framed denial was classified as an ALLOW.**
+  Streamable HTTP may answer with an event stream, and the extracted code
+  detected one by testing whether the body starts with `data:`. A real frame
+  opens with `event: message`, so the check said "not a stream", no JSON-RPC
+  error was found, and an HTTP 200 carrying a §45.7.5 rejection came back as a
+  successful call. `_json_documents()` now tries the whole body as JSON and
+  then scans every `data:` line unconditionally; `test_mcp_caller.py` pins the
+  `event: message` case specifically. Written once here so no customer agent
+  has to rediscover it.
+- **Unclassifiable responses now deny.** A body that yields no JSON-RPC
+  document — empty, truncated, HTML error page, non-UTF-8, a top-level array —
+  is a `Decision(allowed=False)` rather than an allow. A denial nobody could
+  parse must not read as a success. A JSON-RPC error outside the HAAP
+  `-32005…-32000` range is still an allow: it is a downstream fault, and
+  calling it a policy denial would manufacture a decision nobody made.
+
 ## [0.1.4] - 2026-06-11
 
 Bundles **`hawcx-manager` 0.8.8**, a renewal-cadence hardening release on top of

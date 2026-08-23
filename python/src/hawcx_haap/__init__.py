@@ -42,6 +42,12 @@ Per CS §39, the Python process never holds session keys (``response_key``,
 ``K_req``, ``K_resp``). All cryptographic operations happen inside the
 Assembler process; the SDK exchanges only plaintext request bodies and
 decrypted response bodies over the local IPC socket.
+
+Calling an MCP server through HAAP is a layer up from ``invoke``: see
+:mod:`hawcx_haap.mcp_caller` for :class:`Caller`, :class:`McpTool` and
+:class:`Decision`, which build the JSON-RPC ``tools/call`` document and — the
+part worth not rewriting per agent — classify the answer, including a denial
+delivered inside an HTTP 200 or wrapped in an SSE frame.
 """
 
 from importlib.metadata import PackageNotFoundError
@@ -67,6 +73,15 @@ from hawcx_haap.ipc import (
     ToolCallRequest,
     ToolCallResponse,
 )
+from hawcx_haap.mcp_caller import (
+    HAWCX_REJECT_CODES,
+    Caller,
+    Decision,
+    McpTool,
+    close_agent,
+    env_principal_allowlist,
+    get_agent,
+)
 
 # Single source of truth is [project] version in pyproject.toml; resolved from
 # the installed distribution so it cannot drift from the published wheel.
@@ -85,6 +100,14 @@ __all__ = [
     "ToolCallResponse",
     "TokenTransport",
     "HAWCX_HAAP_V7_2_5_CAPABILITY",
+    # MCP tool calling (hawcx_haap.mcp_caller)
+    "Caller",
+    "McpTool",
+    "Decision",
+    "get_agent",
+    "close_agent",
+    "env_principal_allowlist",
+    "HAWCX_REJECT_CODES",
     "HawcxError",
     "HandshakeError",
     "IpcError",

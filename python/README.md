@@ -109,6 +109,67 @@ class TokenTransport(str, Enum):
 Per CS v7.2.0 §34. Default per-call selector is omitted on the wire → the
 Assembler uses `HttpHeader`.
 
+## Calling an MCP server — `hawcx_haap.mcp_caller`
+
+`invoke()` is the transport. `mcp_caller` is the layer above it for agents
+whose destination is an MCP server: it builds the JSON-RPC 2.0 `tools/call`
+document, routes it through `invoke()`, and — the part worth not rewriting per
+agent — decides whether the answer was an allow or a deny.
+
+```python
+from hawcx_haap import Caller, McpTool, close_agent, get_agent
+
+MAILBOX = McpTool(
+    tool_id="mail.read",                             # the scope policy is written against
+    url="https://mcp.example.com/servers/mail",
+    name="list_messages",                            # the downstream MCP tool name
+    actions=("read",),
+    resource="mailbox",
+    arguments={"top": 5},
+)
+
+caller = Caller(agent=get_agent(["alice@example.com"]), provider="microsoft")
+try:
+    decision = caller.call(MAILBOX, "alice@example.com")
+    print(decision.summary())   # "ALLOW mail.read  as alice@example.com http=200"
+finally:
+    close_agent()
+```
+
+`Decision` is `(tool, principal, allowed, reason, reason_code, http_status,
+body, request_id)`. A refusal is an outcome, not an exception — nothing here
+needs a `try` around it.
+
+**Why classification is in the SDK.** A HAAP denial arrives in three shapes and
+only the first looks like a failure:
+
+| Shape | Where it was refused | What a naive reader sees |
+|---|---|---|
+| `RequestRejected` (0x54) | token mint, before egress | an exception — hard to miss |
+| JSON-RPC `error.code` in `-32005…-32000` (§45.7.5) | RSV MCP gateway | **HTTP 200** |
+| the same error inside an SSE frame | RSV MCP gateway | **HTTP 200**, and a body that is not JSON |
+
+The third shape is the trap. Streamable HTTP lets the server answer with a JSON
+body *or* an event stream, and a real SSE frame opens with `event: message` —
+so sniffing for a leading `data:` decides it is not a stream, finds no error,
+and reports a denial as an allow. `_json_documents()` tries the whole body as
+JSON and then scans every `data:` line unconditionally, and
+`tests/test_mcp_caller.py` pins the `event: message` case.
+
+Fail-closed both ways: `principal_allowlist` stays required all the way down,
+and a body that yields no JSON-RPC document at all — empty, truncated, HTML,
+non-UTF-8 — is a **deny**. Not being able to tell is not the same as being told
+yes. A JSON-RPC error *outside* the HAAP range (`-32601` "method not found",
+say) is a downstream fault and stays an allow; reporting it as a policy denial
+would manufacture evidence of a decision nobody made.
+
+`Caller.invoke_kwargs()` returns the `invoke()` kwargs without calling
+anything, so a scope review can print the request that *would* go — feed it to
+`ToolCallRequest(plaintext_request_body=body, **kwargs).to_wire()`.
+
+The module is pure-Python and adds no dependency, so a consumer built on it
+still bundles with `hawcx bundle`.
+
 ## Wire protocol
 
 The SDK speaks the same wire as the in-process Rust crates:
