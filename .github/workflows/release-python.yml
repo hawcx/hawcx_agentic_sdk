@@ -323,8 +323,22 @@ jobs:
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          python -m pip install dist/*.whl
-          python -m pip install pytest pytest-asyncio
+          # Install the built wheel WITH its `dev` extra, rather than naming
+          # test deps here. The previous line installed `pytest pytest-asyncio`
+          # only — a hand-copied subset of pyproject's `dev` extra that drifted
+          # the moment a test grew a new dependency. It did: the property and
+          # fuzz suites (`test_prop_*`, `test_fuzz_*`) import `hypothesis`, so
+          # all three wheel-test jobs died at COLLECTION with
+          # ModuleNotFoundError and `publish` skipped. A tag that builds five
+          # good wheels and then refuses to ship them is the expensive way to
+          # discover a duplicated dependency list.
+          #
+          # `<wheel>[dev]` resolves the extra from the wheel's own METADATA, so
+          # pyproject stays the single source of truth and the package under
+          # test is still the built artifact — not a source reinstall, which is
+          # the thing this job exists to avoid.
+          WHEEL=$(ls dist/*.whl | head -1)
+          python -m pip install "${WHEEL}[dev]"
       - name: Resolve bundled binary (outside source tree)
         shell: bash
         run: |
