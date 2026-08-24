@@ -133,10 +133,62 @@ binary = get_binary_path()
 | `hawcx validate <template>` | Check a `hawcx/agent-template/v1` document; prints every error code at once |
 | `hawcx extract --tools <mcp.json> \| --names ...` | Draft a template from an existing agent's tool list (output is a DRAFT) |
 | `hawcx wrap <template> -o <out.py>` | Generate HAAP tool wrappers from a template |
+| `hawcx init <template> -d <dir>` | Scaffold a whole agent: the generated tool module **plus** a `config.py` you own |
 | `hawcx submit <template> --org <org>` | Push a validated template to the Admin Console as a draft |
 | `hawcx bundle <project-dir>` | Pack a Python agent into one executable `.pyz` and print its `sha256` |
 
 **Python only.** Node bundling is not yet available: `node/package.json` has no `bin` field and this SDK ships no Node CLI at all. A single-file `.mjs` entry (and later a Node SEA) is a separate increment; nothing half-built is shipped in its place.
+
+#### `hawcx init` — the generated module and the config you own
+
+`hawcx wrap` emits the tool module. Since 0.1.5 the Lane A core (`Caller`,
+`Decision`, allow/deny classification) lives in the SDK too, which leaves
+exactly one file per customer still hand-written: the deployment config — where
+each MCP server is, what the downstream tool is called, which resource, which
+provider, and which principals the agent may act for. `hawcx init` scaffolds it.
+
+```bash
+hawcx init agent-template.yaml -d ./myagent
+# ./myagent/hawcx_tools.py: wrote 2 tool wrapper(s) from agent-template.yaml
+# ./myagent/config.py: wrote config skeleton
+```
+
+| File | Owner | On re-run |
+|---|---|---|
+| `hawcx_tools.py` | `@generated` — do not edit | rewritten with `--force` |
+| `config.py` | **the customer's** — edit and keep | **kept**, always; `--force` does not reach it |
+
+The two files have opposite ownership, and one `--force` cannot serve both —
+which is why this is a separate subcommand rather than a `wrap --config` flag.
+A flag passed to regenerate the module would eventually overwrite a config
+someone spent a day filling in. There is no flag to overwrite `config.py`;
+delete it yourself if you want a fresh one.
+
+**An unfilled value fails loudly rather than looking configured.** Every
+deployment-specific value is emitted as `FILL_ME` and the file ends in
+`require_filled(...)`, so an untouched config raises on **import** and names
+every gap in one message:
+
+```
+ValueError: 8 unfilled config value(s): PROVIDER, PRINCIPAL_ALLOWLIST,
+TOOLS['o365.mail.read'].url, TOOLS['o365.mail.read'].name, ...
+```
+
+Every path at once, not one per traceback. A commented placeholder
+(`# TODO: your RS URL`) reads as considered, survives review, and arrives at
+the Assembler as a real target; this cannot get past the import.
+
+**`PRINCIPAL_ALLOWLIST` has no default**, and a test pins it that way. It is the
+fail-closed gate on `acting_for_user`, so a default would be a default answer to
+which users the agent may act for. `[]` is a real answer — "forbid runtime
+principal switching entirely" — and has to be a human's choice.
+
+Not scaffolded, deliberately: the HTTP method (MCP `tools/call` over Streamable
+HTTP is POST and `Caller.invoke_kwargs` sets it) and per-tool providers (a
+`Caller` carries one `provider`; an agent spanning two builds two `Caller`s).
+The generated config imports only `hawcx_haap` and stays pure-Python, so an
+agent carrying it still bundles with `hawcx bundle` below — a zipapp cannot
+carry native extensions.
 
 #### `hawcx bundle` — the measurable exec target
 

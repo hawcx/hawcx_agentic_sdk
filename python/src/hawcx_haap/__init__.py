@@ -48,6 +48,10 @@ Calling an MCP server through HAAP is a layer up from ``invoke``: see
 :class:`Decision`, which build the JSON-RPC ``tools/call`` document and — the
 part worth not rewriting per agent — classify the answer, including a denial
 delivered inside an HTTP 200 or wrapped in an SSE frame.
+
+``hawcx init`` scaffolds the deployment config that layer consumes (the tools,
+the provider, the principal allowlist). ``FILL_ME`` and ``require_filled`` are
+what make an unfilled value in it raise at import rather than look configured.
 """
 
 from importlib.metadata import PackageNotFoundError
@@ -74,6 +78,7 @@ from hawcx_haap.ipc import (
     ToolCallResponse,
 )
 from hawcx_haap.mcp_caller import (
+    FILL_ME,
     HAWCX_REJECT_CODES,
     Caller,
     Decision,
@@ -81,6 +86,7 @@ from hawcx_haap.mcp_caller import (
     close_agent,
     env_principal_allowlist,
     get_agent,
+    require_filled,
 )
 
 # Single source of truth is [project] version in pyproject.toml; resolved from
@@ -108,6 +114,9 @@ __all__ = [
     "close_agent",
     "env_principal_allowlist",
     "HAWCX_REJECT_CODES",
+    # Scaffolded config (`hawcx init`)
+    "FILL_ME",
+    "require_filled",
     "HawcxError",
     "HandshakeError",
     "IpcError",

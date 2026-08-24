@@ -40,7 +40,7 @@ from typing import Any
 
 from .template import tool_entries
 
-__all__ = ["generate_module", "class_name_for", "GenerationError"]
+__all__ = ["generate_module", "generate_config", "class_name_for", "GenerationError"]
 
 # ASCII ONLY, and this is a correctness constraint rather than a style rule.
 # Generated source is written and re-read by other tools, and `Path.write_text`
@@ -247,6 +247,157 @@ def generate_module(doc: dict[str, Any], *, source_path: str = "<template>",
         "        # declare means the map and the template disagree about scope.",
         "        raise ValueError(f\"endpoint supplied for undeclared tool(s): {extra}\")",
         "    return {tid: cls(agent, endpoints[tid], **kwargs) for tid, cls in TOOLS.items()}",
+        "",
+    ]
+    return _assert_ascii("\n".join(lines))
+
+
+# ── `hawcx init`: the customer-owned config ──────────────────────────────────
+#
+# Issue #88. Once the Lane A core (`Caller`/`Decision`/allow-deny
+# classification) lives in the SDK, the only thing a customer still hand-writes
+# is their deployment config: which MCP tools exist, where they are, and which
+# principals the agent may act for. Every customer writing that from scratch is
+# how a fleet ends up with N subtly different shapes of the same file, which is
+# the copy-paste dynamic `hawcx wrap` was built to retire.
+#
+# Same input, second output — so it lives beside `generate_module` and reuses
+# `tool_entries`. Rule 2 above still holds: the config generator is handed the
+# same narrow `(id, actions)` projection and cannot reach `constraints` or
+# `suggested_levels` either.
+#
+# TWO OUTPUTS, OPPOSITE OWNERSHIP. `generate_module` emits `@generated -- DO NOT
+# EDIT`, regenerated freely. This emits a file the customer edits and keeps.
+# That is why `hawcx init` writes them under different rules (`--force`
+# regenerates the module; nothing overwrites the config) rather than `hawcx wrap
+# --config` writing both under one flag: one `--force` governing a generated
+# module and a hand-edited config would eventually eat somebody's config while
+# they were doing the routine thing to the module.
+
+_CONFIG_BANNER = (
+    "# Scaffolded by `hawcx init`. THIS FILE IS YOURS -- edit it and keep it.\n"
+    "# Nothing regenerates over your edits: `hawcx init` refuses to overwrite an\n"
+    "# existing config.py, so re-running it after adding tools to the template\n"
+    "# rewrites the generated tool module and leaves this file alone."
+)
+
+
+def generate_config(doc: dict[str, Any], *, source_path: str = "<template>") -> str:
+    """Return the source of a customer-owned ``config.py``. Always ASCII.
+
+    Every deployment-specific value is emitted as ``FILL_ME``, and the module
+    ends in a :func:`~hawcx_haap.mcp_caller.require_filled` call, so an
+    unfilled config raises at **import** naming every gap at once. A commented
+    placeholder would have read as configured and reached the Assembler as a
+    real target; this cannot.
+
+    What is NOT emitted, and why:
+
+    * **HTTP method.** MCP ``tools/call`` over Streamable HTTP is POST, and
+      :meth:`Caller.invoke_kwargs` sets it. A knob whose only correct value is
+      the default is a knob someone eventually turns.
+    * **Per-tool provider.** :class:`~hawcx_haap.mcp_caller.Caller` carries one
+      ``provider`` for the destination it talks to, so ``PROVIDER`` is one
+      value here. An agent spanning two providers builds two ``Caller``s.
+    * **Endpoints as data from the template.** Same Pattern Z rule as
+      :func:`generate_module`: URLs come from the org tool registry / EIB, so
+      the template never carried one and neither does this file.
+    """
+    entries = tool_entries(doc)
+    # Class names are irrelevant to this file, but a template that cannot
+    # produce a module must not quietly produce half a scaffold either: the two
+    # outputs of `hawcx init` succeed or fail together.
+    _check_collisions(entries)
+    name = doc["name"]
+    version = doc["version"]
+
+    lines: list[str] = [
+        _CONFIG_BANNER,
+        f"# template: {name} {version}  ({source_path})",
+        '"""Deployment config for `' + name + '`.',
+        "",
+        "Fill in every FILL_ME below. Until you do, importing this module raises a",
+        "ValueError naming every value still unfilled -- an unfilled deployment",
+        "fails here rather than sending a placeholder somewhere as a URL or a",
+        "principal.",
+        "",
+        "Use it like::",
+        "",
+        "    from hawcx_haap import Caller, close_agent, get_agent",
+        "",
+        "    import config",
+        "",
+        "    def run(principal: str) -> None:",
+        "        caller = Caller(agent=get_agent(config.PRINCIPAL_ALLOWLIST),",
+        "                        provider=config.PROVIDER)",
+        "        try:",
+        "            for tool in config.TOOLS.values():",
+        "                print(caller.call(tool, principal).summary())",
+        "        finally:",
+        "            close_agent()",
+        "",
+        "`principal` comes from the request being served; PRINCIPAL_ALLOWLIST is what",
+        "decides whether it is permitted. Those are two different things and the",
+        "second one is not derived from the first.",
+        "",
+        "Pure-Python and stdlib-only apart from `hawcx_haap` itself, so an agent",
+        "carrying this file still bundles with `hawcx bundle` (a zipapp cannot",
+        "carry native extensions).",
+        '"""',
+        "",
+        "from __future__ import annotations",
+        "",
+        "from hawcx_haap import FILL_ME, McpTool, require_filled",
+        "",
+        "#: OAuth provider id naming the bridging bearer the Assembler attaches for",
+        "#: this destination, e.g. \"microsoft\". Write None if this agent needs no",
+        "#: bridging bearer -- write it explicitly, because \"no provider\" and \"nobody",
+        "#: has looked at this yet\" must not be the same value.",
+        "PROVIDER: str | None = FILL_ME",
+        "",
+        "#: The principals this agent may act for. REQUIRED, and deliberately",
+        "#: without a default: it is the fail-closed gate on `acting_for_user`, so a",
+        "#: default here would be a default answer to \"who may this agent",
+        "#: impersonate\". Source it from operator config -- NEVER from model output,",
+        "#: a request body, or anything an LLM can influence.",
+        "#:",
+        "#: `[]` is a real answer and means \"forbid runtime principal switching",
+        "#: entirely\". It is not the same as leaving this unfilled.",
+        "PRINCIPAL_ALLOWLIST: list[str] = FILL_ME",
+        "",
+        "#: HAAP tool id -> the MCP tool it names. `tool_id` and `actions` come from",
+        "#: the template and are already filled; `url`, `name` and `resource` are",
+        "#: yours, because only your tenant knows them.",
+        "#:",
+        "#: `name` is the downstream MCP tool name from the server's own",
+        "#: `tools/list` -- not the HAAP tool id, and not a guess at it. Enumerate",
+        "#: the tenant's MCP inventory and paste the real names in.",
+        "TOOLS: dict[str, McpTool] = {",
+    ]
+
+    for tid, actions in entries:
+        acts = ", ".join(repr(a) for a in actions)
+        lines += [
+            f'    "{tid}": McpTool(',
+            f'        tool_id="{tid}",',
+            "        url=FILL_ME,        # target RS URL of the MCP server",
+            "        name=FILL_ME,       # downstream MCP tool name from tools/list",
+            f"        actions=({acts}{',' if len(actions) == 1 else ''}),",
+            "        resource=FILL_ME,   # resource scope, or \"*\" for the whole server",
+            "    ),",
+        ]
+
+    lines += [
+        "}",
+        "",
+        "# Fails the import while any FILL_ME survives, naming every one of them in",
+        "# one message. Keep this call: it is the difference between a placeholder",
+        "# that stops a deployment and a placeholder that ships in one.",
+        "require_filled(",
+        "    PROVIDER=PROVIDER,",
+        "    PRINCIPAL_ALLOWLIST=PRINCIPAL_ALLOWLIST,",
+        "    TOOLS=TOOLS,",
+        ")",
         "",
     ]
     return _assert_ascii("\n".join(lines))

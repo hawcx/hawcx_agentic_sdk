@@ -11,6 +11,41 @@ version in `python/pyproject.toml`).
 `python/pyproject.toml` is bumped to `0.1.6`; nothing is published until a
 `python-v0.1.6` tag is pushed.
 
+- **New subcommand `hawcx init`** (#88) — scaffolds both halves of a customer
+  agent from one `hawcx/agent-template/v1`: the `@generated`
+  `hawcx_tools.py` that `hawcx wrap` already emitted, plus a
+  **customer-owned `config.py`** carrying the deployment values the Lane A
+  core consumes (`McpTool` per tool, `PROVIDER`, `PRINCIPAL_ALLOWLIST`). With
+  the Lane A core in the SDK since 0.1.5, that config was the last thing every
+  customer still hand-wrote, and hand-writing it is how a fleet ends up with N
+  subtly different shapes of the same file.
+
+  **Why `init` and not `wrap --config`.** The issue left the choice open. The
+  two outputs have opposite ownership — the tool module is regenerated freely,
+  the config is hand-edited and must never be clobbered — and one `--force`
+  cannot serve both. Here `--force` regenerates `hawcx_tools.py` only; the
+  config is written when absent and **kept** otherwise, with no flag to
+  overwrite it. A single flag governing both would eventually eat a config
+  while someone was doing the routine thing to the module.
+
+  **Placeholders that cannot look configured.** Every deployment-specific value
+  is emitted as `FILL_ME` and the file ends in a `require_filled()` call, so an
+  untouched config raises at **import** and names every unfilled path at once
+  (`TOOLS['o365.mail.read'].url`, …) rather than one per traceback. A commented
+  `# TODO: your RS URL` would have survived review and reached the Assembler as
+  a real target. `FILL_ME` and `require_filled` are new exports on
+  `hawcx_haap`, so the check is tested library code rather than a copy inlined
+  into every customer's config.
+
+  **`PRINCIPAL_ALLOWLIST` is emitted with no default**, and pinned that way by
+  a test. It is the fail-closed gate on `acting_for_user`; `[]` is a real
+  answer ("forbid runtime principal switching entirely") and must be a human's
+  choice, not the scaffolder's. Not scaffolded on purpose: HTTP method (MCP
+  `tools/call` is POST and `Caller.invoke_kwargs` sets it) and per-tool
+  provider (a `Caller` carries one provider; two providers means two
+  `Caller`s). The generated config imports only `hawcx_haap`, so an agent
+  carrying it still bundles with `hawcx bundle`.
+
 - **`hawcx bundle` is now reproducible on Windows** (#92). `pip install
   --target` materialises a console-script launcher per entry point under
   `bin/`. On Windows that launcher is a stub `.exe` with a zip appended, and
