@@ -170,6 +170,51 @@ anything, so a scope review can print the request that *would* go — feed it to
 The module is pure-Python and adds no dependency, so a consumer built on it
 still bundles with `hawcx bundle`.
 
+## Scaffolding an agent's config — `hawcx init`
+
+`mcp_caller` is the code. `config.py` is the part only your tenant knows: where
+each MCP server is, what the downstream tool is called, which resource, which
+provider, and which principals the agent may act for. `hawcx init` writes both
+halves from one `hawcx/agent-template/v1`:
+
+```bash
+hawcx init agent-template.yaml -d ./myagent
+```
+
+| File | Owner | Re-running `hawcx init` |
+|---|---|---|
+| `hawcx_tools.py` | `@generated` — do not edit | rewritten with `--force` |
+| `config.py` | **yours** — edit and keep it | **kept**, always; `--force` does not reach it |
+
+One `--force` cannot serve both files, which is why this is `init` rather than
+a `wrap --config` flag: a flag you pass to regenerate the module would
+eventually eat a config someone had spent a day filling in.
+
+Every deployment-specific value is scaffolded as `FILL_ME`, and the file ends
+in `require_filled(...)`. So an untouched config does not run:
+
+```
+ValueError: 8 unfilled config value(s): PROVIDER, PRINCIPAL_ALLOWLIST,
+TOOLS['o365.mail.read'].url, TOOLS['o365.mail.read'].name, ...
+```
+
+Every gap at once, each named by its path. A commented placeholder
+(`# TODO: your RS URL`) would have survived review and reached the Assembler as
+a real target; this cannot leave the import.
+
+`PRINCIPAL_ALLOWLIST` is emitted with **no default**. It is the fail-closed gate
+on `acting_for_user`, so a default would be a default answer to which users the
+agent may impersonate. `[]` is a real answer — "forbid runtime principal
+switching entirely" — and must be something a human chose, not something the
+scaffolder assumed.
+
+Not scaffolded, on purpose: the HTTP method (MCP `tools/call` over Streamable
+HTTP is POST, and `Caller.invoke_kwargs` sets it — a knob whose only correct
+value is the default is a knob someone turns), and per-tool providers (a
+`Caller` carries one `provider` for the destination it talks to; an agent
+spanning two providers builds two `Caller`s). The generated config imports only
+`hawcx_haap`, so an agent carrying it still bundles with `hawcx bundle`.
+
 ## Wire protocol
 
 The SDK speaks the same wire as the in-process Rust crates:

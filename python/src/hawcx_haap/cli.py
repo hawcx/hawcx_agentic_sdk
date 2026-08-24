@@ -1,5 +1,9 @@
 """``hawcx`` CLI. Auto-wrap plan U1 (``wrap``) and U2 (``validate``).
 
+``init`` (issue #88) is ``wrap`` plus the one file a customer still hand-writes:
+their deployment config. See :func:`_cmd_init` for why it is a separate
+subcommand rather than a ``wrap --config`` flag.
+
 ``submit`` is deliberately absent rather than stubbed — see :func:`main`.
 
 ``bundle`` (agent-delivery WP-F) is Python-only. Node bundling is not built:
@@ -24,7 +28,7 @@ from .extract import (
 )
 from .submit import SubmitError, resolve_credentials, submit_template
 from .template import TemplateError, load_template
-from .wrap import GenerationError, generate_module
+from .wrap import GenerationError, generate_config, generate_module
 
 _PROG = "hawcx"
 
@@ -88,6 +92,66 @@ def _cmd_wrap(args: argparse.Namespace) -> int:
     out.write_text(source, encoding="utf-8")
     n = len(doc["tools"])
     print(f"{out}: wrote {n} tool wrapper(s) from {hint}")
+    return 0
+
+
+def _cmd_init(args: argparse.Namespace) -> int:
+    """Scaffold both halves of a customer agent: the generated tool module and
+    the config the customer owns.
+
+    Issue #88 left the choice open between `wrap --config` and a separate
+    `init`. It is `init`, because the two files have OPPOSITE ownership and one
+    `--force` cannot serve both: `hawcx_tools.py` is `@generated` and meant to
+    be rewritten, `config.py` is hand-edited and must never be. Here `--force`
+    governs the generated module only; the config is written when absent and
+    kept otherwise, with no flag to overwrite it. Delete it yourself if you
+    really want a fresh one -- that is a deliberate act, not a flag you passed
+    for the other file.
+    """
+    text, hint = _read(args.template)
+    try:
+        doc = load_template(text, path_hint=hint)
+        tools_src = generate_module(doc, source_path=hint)
+        config_src = generate_config(doc, source_path=hint)
+    except (TemplateError, GenerationError) as e:
+        print(f"{e}", file=sys.stderr)
+        return 1
+
+    out_dir = pathlib.Path(args.out_dir)
+    tools_path = out_dir / "hawcx_tools.py"
+    config_path = out_dir / "config.py"
+
+    if tools_path.exists() and not args.force:
+        print(f"{tools_path}: exists -- pass --force to regenerate", file=sys.stderr)
+        return 1
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tools_path.write_text(tools_src, encoding="utf-8")
+    print(f"{tools_path}: wrote {len(doc['tools'])} tool wrapper(s) from {hint}")
+
+    if config_path.exists():
+        print(f"{config_path}: exists -- KEPT (config.py is yours; `hawcx init` "
+              "never overwrites it)")
+        print(
+            "  A tool the template declares but your config does not will show\n"
+            "  up as a KeyError in TOOLS, not as a silent gap: compare it against\n"
+            f"  the regenerated {tools_path.name} to see what the template now "
+            "declares.",
+            file=sys.stderr,
+        )
+    else:
+        config_path.write_text(config_src, encoding="utf-8")
+        print(f"{config_path}: wrote config skeleton")
+        print(
+            "  Every FILL_ME in it must be replaced. Until then importing\n"
+            "  config.py raises and names every value still unfilled -- a\n"
+            "  placeholder stops the deployment here instead of reaching the\n"
+            "  Assembler as a real target.\n"
+            "  `PRINCIPAL_ALLOWLIST` has no default: it is the fail-closed gate\n"
+            "  on `acting_for_user`. Set the permitted principals from operator\n"
+            "  config, or [] to forbid runtime principal switching entirely.",
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -225,8 +289,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog=_PROG,
         description="Hawcx HAAP agent tooling: validate a hawcx/agent-template/v1, "
-                    "generate tool wrappers from it, and bundle a Python agent into "
-                    "one measurable executable file.",
+                    "scaffold an agent from it (generated tool wrappers plus a "
+                    "config.py you own), and bundle a Python agent into one "
+                    "measurable executable file.",
         epilog="Python only. Node bundling is not yet available (there is no Node CLI "
                "in this SDK); `hawcx bundle` covers Python agents.",
     )
@@ -246,6 +311,35 @@ def build_parser() -> argparse.ArgumentParser:
              "byte-identical and CI shows no spurious diff)",
     )
     w.set_defaults(func=_cmd_wrap)
+
+    i = sub.add_parser(
+        "init",
+        help="scaffold a customer agent: generated tool module + a config.py you own",
+        description=(
+            "Write two files from one template. `hawcx_tools.py` is @generated and "
+            "regenerated on demand (--force). `config.py` is YOURS: the tool "
+            "endpoints, MCP tool names, resources, provider and principal allowlist "
+            "that only your tenant knows. It is written when absent and KEPT "
+            "otherwise -- --force does not touch it, because one flag governing a "
+            "generated module and a hand-edited config would eventually eat the "
+            "config while you were doing the routine thing to the module.\n\n"
+            "Every deployment-specific value is scaffolded as FILL_ME and the file "
+            "ends in a require_filled() call, so an unfilled config raises at import "
+            "naming every gap at once. A commented placeholder would look configured "
+            "and reach the Assembler as a real target.\n\n"
+            "`principal_allowlist` is emitted as a required, explicit value with no "
+            "default. It is the fail-closed gate on `acting_for_user`; a default "
+            "would be a default answer to which users the agent may act for."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    i.add_argument("template", help="path to the template YAML/JSON, or - for stdin")
+    i.add_argument("-d", "--out-dir", default=".",
+                   help="directory to scaffold into (default: the current directory)")
+    i.add_argument("--force", action="store_true",
+                   help="regenerate hawcx_tools.py over an existing one. Never "
+                        "affects config.py.")
+    i.set_defaults(func=_cmd_init)
 
     s_ = sub.add_parser(
         "submit",
@@ -331,7 +425,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Entry point for `hawcx validate` / `wrap` / `submit` / `extract` / `bundle`."""
+    """Entry point for `hawcx validate` / `wrap` / `init` / `submit` / `extract` / `bundle`."""
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)

@@ -12,7 +12,12 @@ import pytest
 
 from hawcx_haap import wrap as wrap_module
 from hawcx_haap.template import TemplateError, load_template
-from hawcx_haap.wrap import GenerationError, class_name_for, generate_module
+from hawcx_haap.wrap import (
+    GenerationError,
+    class_name_for,
+    generate_config,
+    generate_module,
+)
 
 UKG_O365 = {
     "template": "hawcx/agent-template/v1",
@@ -281,3 +286,144 @@ def test_unsafe_yaml_tag_is_refused():
             "name: !!python/object/apply:os.system ['echo pwned']\n",
             path_hint="evil.yaml",
         )
+
+
+# ── `hawcx init`: the customer-owned config (issue #88) ──────────────────────
+
+def test_config_is_pure_ascii_and_valid_python():
+    """Same cp1252 trap as the generated module: this file is written and
+    re-read by tools that may not pass an encoding."""
+    src = generate_config(UKG_O365)
+    assert src.isascii()
+    ast.parse(src)
+    assert src == generate_config(UKG_O365), "must be deterministic"
+
+
+def test_config_carries_no_authority_and_no_suggestions():
+    """`generate_config` is handed the same narrow `(id, actions)` projection as
+    the module generator, so `constraints` and `suggested_levels` cannot reach
+    it. Pinned because a suggestion compiled into shipped config starts
+    behaving like a control."""
+    literals = _string_literals(generate_config(UKG_O365))
+    assert "group:ukg-poc-" not in literals
+    assert not any("resource_prefix" in s for s in literals)
+    assert not any("L1" == s for s in literals)
+
+
+def test_config_declares_no_default_principal_allowlist():
+    """The load-bearing requirement of #88: `principal_allowlist` is the
+    fail-closed gate on `acting_for_user` and must not acquire a default. It is
+    emitted as FILL_ME, never as `[]` — `[]` is a real answer ("forbid runtime
+    principal switching") and must be something a human chose."""
+    src = generate_config(UKG_O365)
+    assert "PRINCIPAL_ALLOWLIST: list[str] = FILL_ME" in src
+    assert "PRINCIPAL_ALLOWLIST: list[str] = []" not in src
+
+
+def test_config_placeholders_fail_loudly_naming_every_one(tmp_path):
+    """A placeholder must not look configured. Importing an untouched config
+    raises, and names EVERY unfilled value — fixing one per traceback is the
+    same round-trip tax `hawcx validate` avoids."""
+    (tmp_path / "config.py").write_text(generate_config(UKG_O365), encoding="utf-8")
+    sys.path.insert(0, str(tmp_path))
+    try:
+        import importlib
+        with pytest.raises(ValueError) as exc:
+            importlib.import_module("config")
+        msg = str(exc.value)
+        # 2 module-level values + 3 fields x 2 tools.
+        assert "8 unfilled config value(s)" in msg
+        assert "PRINCIPAL_ALLOWLIST" in msg and "PROVIDER" in msg
+        # Paths, not an opaque "something in TOOLS".
+        assert "TOOLS['o365.mail.read'].url" in msg
+        assert "TOOLS['o365.group.add_member'].resource" in msg
+    finally:
+        sys.path.remove(str(tmp_path))
+        sys.modules.pop("config", None)
+
+
+def test_filled_config_drives_a_caller(tmp_path):
+    """The point of the file: what it declares is what reaches `invoke()`. The
+    tool id and actions come from the template, the endpoint from the tenant."""
+    src = (
+        generate_config(UKG_O365)
+        .replace("PROVIDER: str | None = FILL_ME", 'PROVIDER: str | None = "microsoft"')
+        .replace(
+            "PRINCIPAL_ALLOWLIST: list[str] = FILL_ME",
+            'PRINCIPAL_ALLOWLIST: list[str] = ["alice@example.com"]',
+        )
+        .replace("url=FILL_ME,", 'url="https://mcp.example.com/o365",')
+        .replace("name=FILL_ME,", 'name="add_member",')
+        .replace("resource=FILL_ME,", 'resource="mailbox",')
+    )
+    (tmp_path / "config2.py").write_text(src, encoding="utf-8")
+    sys.path.insert(0, str(tmp_path))
+    try:
+        import importlib
+        cfg = importlib.import_module("config2")
+        assert set(cfg.TOOLS) == {"o365.group.add_member", "o365.mail.read"}
+        assert cfg.TOOLS["o365.mail.read"].actions == ("read",)
+
+        from hawcx_haap import Caller
+        kwargs = Caller(provider=cfg.PROVIDER).invoke_kwargs(
+            cfg.TOOLS["o365.group.add_member"], cfg.PRINCIPAL_ALLOWLIST[0]
+        )
+        assert kwargs["tool"] == "o365.group.add_member"
+        assert kwargs["action"] == ["write"]
+        assert kwargs["target_rs_url"] == "https://mcp.example.com/o365"
+        assert kwargs["provider"] == "microsoft"
+        assert kwargs["acting_for_user"] == "alice@example.com"
+    finally:
+        sys.path.remove(str(tmp_path))
+        sys.modules.pop("config2", None)
+
+
+def test_require_filled_reports_paths_and_accepts_empty_allowlist():
+    """`[]` is a filled value, not a missing one — the SDK honours an empty
+    allowlist as "forbid runtime principal switching entirely", so
+    `require_filled` must not treat it as unset."""
+    from hawcx_haap import FILL_ME, McpTool, require_filled
+
+    require_filled(PRINCIPAL_ALLOWLIST=[], PROVIDER=None, TOOLS={})
+
+    with pytest.raises(ValueError, match=r"TOOLS\['a\.b'\]\.url"):
+        require_filled(TOOLS={"a.b": McpTool(tool_id="a.b", url=FILL_ME, name="x")})
+    with pytest.raises(ValueError, match=r"ALLOWLIST\[1\]"):
+        require_filled(ALLOWLIST=["alice", FILL_ME])
+
+
+def test_cli_init_writes_both_and_never_clobbers_the_config(tmp_path):
+    """The two outputs have OPPOSITE ownership, and that is why this is `init`
+    rather than `wrap --config`: `--force` regenerates the @generated module
+    and must not reach the hand-edited config."""
+    t = tmp_path / "t.json"
+    t.write_text(json.dumps(UKG_O365))
+    d = tmp_path / "agent"
+
+    assert _cli("init", str(t), "-d", str(d)).returncode == 0
+    tools, config = d / "hawcx_tools.py", d / "config.py"
+    assert "@generated" in tools.read_text()
+    assert "THIS FILE IS YOURS" in config.read_text()
+
+    edited = config.read_text() + "\n# a real deployment value\n"
+    config.write_text(edited)
+
+    # Without --force the generated module is protected too, same as `wrap`.
+    r = _cli("init", str(t), "-d", str(d))
+    assert r.returncode == 1 and "--force" in r.stderr
+
+    # WITH --force the module is regenerated and the config is still untouched.
+    r = _cli("init", str(t), "-d", str(d), "--force")
+    assert r.returncode == 0
+    assert config.read_text() == edited, "--force must never reach config.py"
+    assert "KEPT" in r.stdout
+
+
+def test_cli_init_help_states_the_fail_closed_posture():
+    """A developer reading `--help` must learn that --force spares the config
+    and that the allowlist has no default — both are easy to assume otherwise.
+    """
+    r = _cli("init", "--help")
+    assert r.returncode == 0
+    assert "--force does not touch it" in r.stdout
+    assert "no" in r.stdout and "default" in r.stdout

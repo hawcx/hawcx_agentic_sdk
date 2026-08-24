@@ -37,7 +37,9 @@ Fail-closed, in both directions:
 
 Nothing here knows what tools exist. :class:`McpTool` is data the caller
 supplies; the tool vocabulary, the endpoints and the principals stay in the
-consumer's own deployment config.
+consumer's own deployment config. ``hawcx init`` scaffolds that config, and
+:data:`FILL_ME` / :func:`require_filled` at the bottom of this module are what
+make an unfilled value in it fail at import instead of looking configured.
 
 Quick start::
 
@@ -65,7 +67,8 @@ import json
 import os
 import threading
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, is_dataclass
+from dataclasses import fields as dc_fields
 from pathlib import Path
 from typing import Any
 
@@ -426,3 +429,70 @@ def env_principal_allowlist() -> list[str] | None:
     if raw is None:
         return None
     return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+# ── Scaffolded config ────────────────────────────────────────────────
+#
+# `hawcx init` emits a customer-owned `config.py` whose every deployment-
+# specific value starts as FILL_ME. The requirement that made this live in the
+# SDK rather than in the generated file: an unfilled value must FAIL LOUDLY
+# rather than look configured. A placeholder that merely reads as a comment
+# ("# TODO: your RS URL") survives review and reaches the Assembler as a real
+# target; a value that stops the module importing cannot.
+#
+# The check is here, not inlined into every generated config, for the same
+# reason `_json_documents` is here: it is logic with one correct answer, and a
+# copy per customer is a copy that drifts.
+
+#: The scaffolder's placeholder. Deliberately a string that is not a plausible
+#: URL, tool name or resource, and deliberately ugly — it is meant to be
+#: noticed in a diff, not to blend in.
+FILL_ME = "<FILL ME -- scaffolded by `hawcx init`>"
+
+
+def require_filled(**values: Any) -> None:
+    """Raise unless every scaffolded placeholder in *values* has been replaced.
+
+    Called at the bottom of a generated ``config.py`` with that module's
+    top-level names, so an unfilled deployment fails at **import** — before an
+    agent connects, and long before a FILL_ME could be sent somewhere as a URL
+    or a principal.
+
+    Reports **every** unfilled field in one message rather than the first.
+    Fixing one placeholder per traceback is the slowest possible way to stand a
+    config up, and the same reasoning is why ``hawcx validate`` prints every
+    template error at once.
+
+    Recurses through dataclasses (:class:`McpTool`), dicts, lists and tuples,
+    so ``TOOLS["mail.read"].url`` is named by its path rather than reported as
+    an opaque "something in TOOLS".
+    """
+    unfilled: list[str] = []
+    for name, value in values.items():
+        _scan_unfilled(value, name, unfilled)
+    if unfilled:
+        raise ValueError(
+            f"{len(unfilled)} unfilled config value(s): " + ", ".join(unfilled)
+            + ". Replace every FILL_ME with the value for this deployment. "
+            "`principal_allowlist` has no default on purpose: it is the "
+            "fail-closed gate on `acting_for_user`, so pass the explicit set of "
+            "permitted principals, or [] to forbid runtime principal switching "
+            "entirely."
+        )
+
+
+def _scan_unfilled(node: Any, path: str, out: list[str]) -> None:
+    if isinstance(node, str):
+        # `==`, not `is`: the generated config imports the constant, but a
+        # developer who pasted the literal string around still gets caught.
+        if node == FILL_ME:
+            out.append(path)
+    elif is_dataclass(node) and not isinstance(node, type):
+        for f in dc_fields(node):
+            _scan_unfilled(getattr(node, f.name), f"{path}.{f.name}", out)
+    elif isinstance(node, dict):
+        for k, v in node.items():
+            _scan_unfilled(v, f"{path}[{k!r}]", out)
+    elif isinstance(node, (list, tuple)):
+        for i, v in enumerate(node):
+            _scan_unfilled(v, f"{path}[{i}]", out)
