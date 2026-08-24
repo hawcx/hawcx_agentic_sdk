@@ -31,10 +31,13 @@ is the documented escape hatch for agents that genuinely need native deps.
 DETERMINISM SCOPE
 -----------------
 Two builds of the same input on one machine produce the same digest: staged
-file mtimes are normalised to the zip epoch, byte-compilation is disabled, and
-``zipapp`` walks the tree in sorted order. Full cross-machine reproducibility
-is NOT claimed -- ``pip`` resolves wheels for the running interpreter and
-platform, and zip timestamps are written in local time. That is roadmap.
+file mtimes are normalised to the zip epoch, byte-compilation is disabled,
+pip-generated console-script launchers are dropped (see
+``_drop_generated_launchers`` -- on Windows they are the one thing mtime
+normalisation cannot reach inside), and ``zipapp`` walks the tree in sorted
+order. Full cross-machine reproducibility is NOT claimed -- ``pip`` resolves
+wheels for the running interpreter and platform, and zip timestamps are
+written in local time. That is roadmap.
 
 Stdlib only: ``hawcx-haap`` ships ``dependencies = []`` and this must not be
 the thing that adds a build tool.
@@ -45,6 +48,7 @@ from __future__ import annotations
 import hashlib
 import os
 import pathlib
+import posixpath
 import shutil
 import subprocess
 import sys
@@ -147,6 +151,78 @@ def _stage_dependencies(requirement: pathlib.Path, staging: pathlib.Path) -> Non
         )
 
 
+# `pip install --target` materialises a console-script launcher per entry
+# point, under `bin/`. Nothing inside a zipapp can ever execute one: the exec
+# target is the archive itself and its entry point is the staged
+# `__main__.py`. They are dead weight -- and on Windows they are also the
+# reason the digest drifts, because the launcher is a stub `.exe` with a zip
+# appended whose member is stamped with wall-clock time.
+#
+# `Scripts` is listed too because that is the Windows scheme name; current pip
+# normalises `--target` layouts to `bin/`, and this costs one loop iteration
+# rather than a bet on that staying true.
+_LAUNCHER_DIRS = ("bin", "Scripts")
+
+
+def _record_row_target(row_path: str) -> str:
+    """The staging-relative path a RECORD row refers to.
+
+    RECORD paths are written relative to the installing `.dist-info`
+    directory, and a script lands outside the purelib, so the row reads
+    `../../bin/hawcx.exe`. A `--target` install has no such layout to climb
+    out of, so the leading `..` segments are noise -- strip them and what
+    remains is the staging-relative path.
+    """
+    p = posixpath.normpath(row_path.replace("\\", "/"))
+    while p.startswith("../"):
+        p = p[3:]
+    return p
+
+
+def _drop_generated_launchers(
+    staging: pathlib.Path, pre_existing: frozenset[pathlib.Path]
+) -> list[str]:
+    """Delete pip-generated launchers and the RECORD rows that hash them.
+
+    Returns the staging-relative paths removed.
+
+    Deleting the launcher alone is NOT enough, and this is the part the
+    original bug report missed: the installing distribution's RECORD carries
+    `sha256=` of the launcher it generated, so the nondeterminism survives in
+    a second file. Measured on Windows: two builds seconds apart differed in
+    58 bytes across `bin/hawcx.exe` AND
+    `hawcx_haap-0.1.5.dist-info/RECORD`.
+
+    `pre_existing` is the staging tree as it stood before pip ran, so an agent
+    that ships its own `bin/` keeps every byte of it.
+    """
+    removed: list[str] = []
+    for name in _LAUNCHER_DIRS:
+        root = staging / name
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*"), reverse=True):
+            if path in pre_existing:
+                continue
+            if path.is_dir():
+                if not any(path.iterdir()):
+                    path.rmdir()
+            else:
+                removed.append(path.relative_to(staging).as_posix())
+                path.unlink()
+        if root not in pre_existing and not any(root.iterdir()):
+            root.rmdir()
+
+    if removed:
+        gone = frozenset(removed)
+        for record in sorted(staging.glob("*.dist-info/RECORD")):
+            rows = record.read_text(encoding="utf-8").splitlines(keepends=True)
+            kept = [r for r in rows if _record_row_target(r.split(",", 1)[0]) not in gone]
+            if len(kept) != len(rows):
+                record.write_text("".join(kept), encoding="utf-8")
+    return removed
+
+
 def _refuse_native_extensions(staging: pathlib.Path) -> None:
     """Refuse the bundle if any staged file is a compiled extension module."""
     offenders: list[tuple[str, str]] = []
@@ -243,7 +319,9 @@ def build_bundle(
         if requirement is not None:
             if not requirement.is_file():
                 raise BundleError(f"{requirement}: no such requirements file")
+            pre_existing = frozenset(staging.rglob("*"))
             _stage_dependencies(requirement, staging)
+            _drop_generated_launchers(staging, pre_existing)
 
         # Before the archive exists: a refusal must cost the developer nothing
         # and leave no half-built artifact behind.

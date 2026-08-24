@@ -6,6 +6,41 @@ versions track each language surface independently (Rust crate
 versions in `Cargo.toml`, Node version in `node/package.json`, Python
 version in `python/pyproject.toml`).
 
+## [0.1.6] - unreleased (Python surface only)
+
+`python/pyproject.toml` is bumped to `0.1.6`; nothing is published until a
+`python-v0.1.6` tag is pushed.
+
+- **`hawcx bundle` is now reproducible on Windows** (#92). `pip install
+  --target` materialises a console-script launcher per entry point under
+  `bin/`. On Windows that launcher is a stub `.exe` with a zip appended, and
+  the appended member is stamped with **wall-clock time** — two builds
+  seconds apart produced different bytes, so the digest moved for unchanged
+  input. `_normalize_mtimes` fixes filesystem mtimes and cannot reach inside
+  the bytes of a generated file.
+
+  The launchers are now dropped from the staged tree instead. Nothing is
+  lost: a zipapp's exec target is the archive itself and its entry point is
+  the staged `__main__.py`, so a launcher inside the archive could never
+  have been executed. An agent that ships its own `bin/` keeps it — the tree
+  is snapshotted before pip runs and only pip's additions are removed.
+
+  **The bug report understated the problem, and deleting the launcher alone
+  would not have fixed it.** The installing distribution's `RECORD` carries
+  `sha256=` of the launcher pip generated, so the drift lived in a second
+  file too. Measured here on Windows: two builds differed in **58 bytes**
+  across `bin/hawcx.exe` *and*
+  `hawcx_haap-0.1.5.dist-info/RECORD` — not the two bytes originally
+  reported. The matching `RECORD` rows are now dropped with the launcher.
+
+  Verified by rebuilding the same input twice on Windows: identical digest,
+  zero differing bytes, and the artifact 108,627 bytes smaller.
+
+- **Digests move with this release.** Dropping the launchers changes the
+  archive on every platform, not only Windows — the POSIX text launcher goes
+  too. Any bundle digest measured with 0.1.5 must be re-measured, and any
+  class manifest naming one re-signed. No digest is pinned in this
+  repository; `agent-bundle.yml` recomputes.
 ## [0.1.5] - unreleased (Python surface only)
 
 `python/pyproject.toml` is bumped to `0.1.5`; nothing is published until a
