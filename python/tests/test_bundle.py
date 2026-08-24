@@ -17,7 +17,13 @@ from pathlib import Path
 
 import pytest
 
-from hawcx_haap.bundle import BundleError, build_bundle, sha256_file
+from hawcx_haap.bundle import (
+    BundleError,
+    _drop_generated_launchers,
+    _record_row_target,
+    build_bundle,
+    sha256_file,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 GOLDEN_SRC = FIXTURES / "golden_agent"
@@ -293,3 +299,105 @@ def test_main_entry_returning_none_is_still_a_clean_zero(tmp_path):
 
     r = subprocess.run([sys.executable, str(out)], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+
+# -- #92: pip-generated launchers, the one thing mtime normalisation misses --
+
+def _staged_install(root: Path, *, agent_owns_bin: bool = False):
+    """A staging tree shaped like `pip install --target` left it.
+
+    `RECORD` rows for console scripts are written relative to the `.dist-info`
+    directory and climb out of the purelib, which is why they read `../../`.
+    """
+    staging = root / "app"
+    (staging / "bin").mkdir(parents=True)
+    (staging / "pkg").mkdir()
+    (staging / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (staging / "pkg" / "_bin").mkdir()
+    (staging / "pkg" / "_bin" / "helper.exe").write_bytes(b"package data, not a launcher")
+
+    dist = staging / "pkg-1.0.dist-info"
+    dist.mkdir()
+    (dist / "RECORD").write_text(
+        "../../bin/tool.exe,sha256=WALLCLOCK,108362\n"
+        "pkg/__init__.py,sha256=aaa,0\n"
+        "pkg/_bin/helper.exe,sha256=bbb,28\n"
+        "pkg-1.0.dist-info/RECORD,,\n",
+        encoding="utf-8",
+    )
+
+    pre_existing: set[Path] = set()
+    if agent_owns_bin:
+        (staging / "bin" / "keep-me.sh").write_text("#!/bin/sh\necho mine\n", encoding="utf-8")
+        pre_existing = set(staging.rglob("*"))
+
+    (staging / "bin" / "tool.exe").write_bytes(b"stub exe + appended zip stamped 18:38:16")
+    return staging, frozenset(pre_existing)
+
+
+def test_generated_launchers_and_their_record_rows_are_dropped(tmp_path):
+    """#92: a launcher's bytes drift, and its hash in RECORD drifts with them.
+
+    Deleting the launcher alone leaves the nondeterminism alive in a second
+    file -- measured on Windows as 58 differing bytes across `bin/hawcx.exe`
+    AND the installing distribution's `RECORD`. Both must go.
+
+    Nothing is lost: a zipapp's exec target is the archive, whose entry point
+    is `__main__.py`. A console-script launcher inside it can never run.
+    """
+    staging, pre_existing = _staged_install(tmp_path)
+
+    removed = _drop_generated_launchers(staging, pre_existing)
+
+    assert removed == ["bin/tool.exe"]
+    assert not (staging / "bin").exists(), "an emptied generated bin/ should not linger"
+
+    record = (staging / "pkg-1.0.dist-info" / "RECORD").read_text(encoding="utf-8")
+    assert "WALLCLOCK" not in record, "the launcher's drifting hash survived in RECORD"
+    assert "pkg/__init__.py,sha256=aaa,0" in record
+    assert "pkg-1.0.dist-info/RECORD,," in record
+
+    # `pkg/_bin/helper.exe` is package data that happens to be an .exe. It is
+    # not a launcher, it is readable from the archive, and removing it would
+    # silently amputate the agent.
+    assert (staging / "pkg" / "_bin" / "helper.exe").is_file()
+    assert "pkg/_bin/helper.exe,sha256=bbb,28" in record
+
+
+def test_an_agents_own_bin_directory_survives(tmp_path):
+    """The agent's tree is staged before pip runs, so `bin/` can be its own.
+
+    Removing every `bin/` unconditionally would delete the developer's files
+    with no warning and no way to opt out.
+    """
+    staging, pre_existing = _staged_install(tmp_path, agent_owns_bin=True)
+
+    removed = _drop_generated_launchers(staging, pre_existing)
+
+    assert removed == ["bin/tool.exe"]
+    assert (staging / "bin" / "keep-me.sh").is_file(), "the agent's own bin/ file was deleted"
+
+
+def test_record_row_target_climbs_out_of_the_dist_info_relative_path():
+    assert _record_row_target("../../bin/hawcx.exe") == "bin/hawcx.exe"
+    assert _record_row_target("../../../bin/x") == "bin/x"
+    assert _record_row_target("pkg/_bin/helper.exe") == "pkg/_bin/helper.exe"
+    # A `--target` install writes posix separators, but a RECORD carried in
+    # from elsewhere may not; normalising costs one replace.
+    assert _record_row_target("..\\..\\bin\\hawcx.exe") == "bin/hawcx.exe"
+
+
+def test_a_bundle_without_a_requirements_file_is_untouched(tmp_path):
+    """No pip step means no generated launchers and nothing to strip.
+
+    Guards against the strip becoming an unconditional pass over the tree.
+    """
+    proj = _tiny_project(tmp_path)
+    (proj / "bin").mkdir()
+    (proj / "bin" / "mine.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+
+    out = tmp_path / "a.pyz"
+    build_bundle(proj, out)
+
+    with zipfile.ZipFile(out) as z:
+        assert "bin/mine.sh" in z.namelist()
