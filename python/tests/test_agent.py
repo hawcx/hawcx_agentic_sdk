@@ -37,6 +37,7 @@ def test_default_endpoint_for_windows(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_agent_invoke_echo(mock_assembler, mock_assembler_endpoint: str) -> None:
     with HawcxAgent.connect(mock_assembler_endpoint, principal_allowlist=["alice", "bob"]) as agent:
         resp = agent.invoke(
+            acting_for_user=None,
             target_rs_url="https://api.example.com/echo",
             http_method="POST",
             headers={"Content-Type": "application/json"},
@@ -60,6 +61,7 @@ def test_agent_invoke_rejection(mock_assembler, mock_assembler_endpoint: str) ->
             agent.invoke(
                 target_rs_url="https://api.example.com/forbidden",
                 tool="forbidden",
+                acting_for_user=None,
             )
     assert "intent verification" in ei.value.reason
 
@@ -69,6 +71,7 @@ def test_agent_invoke_with_request_id_override(
 ) -> None:
     with HawcxAgent.connect(mock_assembler_endpoint, principal_allowlist=["alice", "bob"]) as agent:
         resp = agent.invoke(
+            acting_for_user=None,
             target_rs_url="https://api.example.com/",
             tool="x",
             request_id="custom-req-42",
@@ -86,27 +89,42 @@ def test_agent_close_idempotent(mock_assembler_endpoint: str) -> None:
 # ── Runtime principal switching (Q10 / Q13) ──────────────────────────────
 
 
-def test_invoke_without_acting_for_user_omits_field(
+def test_invoke_without_acting_for_user_raises_type_error(
     mock_assembler, mock_assembler_endpoint: str
 ) -> None:
-    """Default invoke must produce wire output identical to pre-v6.9 callers.
+    """Ask 2: omitting the required acting_for_user kwarg is a TypeError.
 
-    Backward-compat constraint: a caller that doesn't pass acting_for_user
-    must observe the exact same wire payload as before the field existed,
-    i.e. NO ``acting_for_user`` key in the JSON.
+    The silent default is gone — a caller must consciously pass a principal or
+    an explicit ``None``. This removes the wrong-human default when one instance
+    is shared across employees.
     """
+    import pytest
+
+    with HawcxAgent.connect(mock_assembler_endpoint, principal_allowlist=["alice", "bob"]) as agent:
+        with pytest.raises(TypeError):
+            agent.invoke(  # type: ignore[call-arg]
+                target_rs_url="https://api.example.com/echo",
+                tool="echo",
+                action=["query"],
+                body=b"x",
+            )
+    assert mock_assembler.received_request is None
+
+
+def test_invoke_with_explicit_none_omits_field(
+    mock_assembler, mock_assembler_endpoint: str
+) -> None:
+    """Explicit ``None`` reproduces the pre-field wire bytes: no acting_for_user key."""
     with HawcxAgent.connect(mock_assembler_endpoint, principal_allowlist=["alice", "bob"]) as agent:
         agent.invoke(
             target_rs_url="https://api.example.com/echo",
             tool="echo",
             action=["query"],
             body=b"x",
+            acting_for_user=None,
         )
     assert mock_assembler.received_request is not None
-    assert "acting_for_user" not in mock_assembler.received_request, (
-        "acting_for_user must be omitted when not set (backward-compat: "
-        "existing wire shape preserved)"
-    )
+    assert "acting_for_user" not in mock_assembler.received_request
 
 
 def test_invoke_with_acting_for_user_sets_wire_field(
@@ -247,6 +265,7 @@ def test_empty_allowlist_forbids_any_acting_for_user(
             )
         # Unprincipled call still works.
         agent.invoke(
+            acting_for_user=None,
             target_rs_url="https://api.example.com/echo",
             http_method="POST",
             tool="read",

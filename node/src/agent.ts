@@ -50,7 +50,7 @@ export interface HawcxAgentInvokeOptions {
    *
    * Use {@link HawcxAgent.invokeFor} for the sugar form.
    */
-  actingForUser?: string;
+  actingForUser: string | null;
   /**
    * Optional OAuth provider id (e.g. "slack") marking this call as
    * OAuth-protected, so the Assembler fetches the matching bearer from the
@@ -287,7 +287,18 @@ export class HawcxAgent {
    */
   async invoke(opts: HawcxAgentInvokeOptions): Promise<ToolCallResponse> {
     if (!this.client) throw new Error("agent already closed");
-    if (opts.actingForUser !== undefined) {
+    // Ask 2: the key is REQUIRED. A silently-omitted principal is the
+    // wrong-human default — one shared instance would serve the wrong
+    // employee. Pass `null` for an explicit unprincipled call (reproduces the
+    // pre-field wire bytes); only a MISSING key throws.
+    if (!("actingForUser" in opts)) {
+      throw new Error(
+        "actingForUser is required: pass a principal string, or null for an " +
+          "explicit unprincipled call. Omitting it silently defaulted to no " +
+          "principal, which serves the wrong human when an instance is shared.",
+      );
+    }
+    if (opts.actingForUser !== null) {
       this.assertPrincipalAllowed(opts.actingForUser);
     }
     const requestId = opts.requestId ?? `req-${randomUUID().replace(/-/g, "").slice(0, 16)}`;
@@ -305,7 +316,7 @@ export class HawcxAgent {
       toolArguments: opts.toolArguments,
       contentType: opts.contentType,
       transport: opts.transport,
-      actingForUser: opts.actingForUser,
+      actingForUser: opts.actingForUser ?? undefined,
       provider: opts.provider,
     });
   }
@@ -347,7 +358,7 @@ export class HawcxAgent {
     // letting `""` through is almost always a bug.
     if (principal === "") {
       throw new Error(
-        "actingForUser must be a non-empty string; omit the field to opt out of runtime principal switching",
+        "actingForUser must be a non-empty string; pass null (not the empty string) to opt out of runtime principal switching",
       );
     }
     if (!this.principalAllowlist.has(principal)) {

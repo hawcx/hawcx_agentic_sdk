@@ -297,7 +297,7 @@ class HawcxAgent:
         content_type: str | None = None,
         transport: TokenTransport | None = None,
         request_id: str | None = None,
-        acting_for_user: str | None = None,
+        acting_for_user: str | None,  # Ask 2: required kwarg (no silent default); pass None for an explicit unprincipled call
         provider: str | None = None,
     ) -> ToolCallResponse:
         """Profile E tool call.
