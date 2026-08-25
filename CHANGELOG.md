@@ -11,6 +11,15 @@ version in `python/pyproject.toml`).
 `python/pyproject.toml` is bumped to `0.1.6`; nothing is published until a
 `python-v0.1.6` tag is pushed.
 
+- **BREAKING (#84, Ask 2): `acting_for_user` is now a required keyword-only
+  argument** on `HawcxAgent.invoke`. The silent `= None` default is removed —
+  omitting it raises `TypeError`. Pass an explicit `None` for an unprincipled
+  call; that reproduces the pre-field wire bytes (no `acting_for_user` key), so
+  wire compatibility is preserved. The silent default was the wrong-human
+  default when one agent instance is shared across employees; the generator's
+  constructor binding (the root defect) moves to per-call via `invoke_for`,
+  paired with P0-45.
+
 - **New subcommand `hawcx init`** (#88) — scaffolds both halves of a customer
   agent from one `hawcx/agent-template/v1`: the `@generated`
   `hawcx_tools.py` that `hawcx wrap` already emitted, plus a
@@ -104,6 +113,20 @@ unchanged at `0.8.8`.
   parse must not read as a success. A JSON-RPC error outside the HAAP
   `-32005…-32000` range is still an allow: it is a downstream fault, and
   calling it a policy denial would manufacture a decision nobody made.
+
+## [0.1.5] - unreleased (Node surface only)
+
+`node/package.json` is bumped to `0.1.5`; nothing is published until a
+`node-v0.1.5` tag is pushed. (Ravi's Ask-2 answer named `0.1.4`, but the
+CHANGELOG dates `0.1.4` as released 2026-06-11, so the breaking change takes a
+new version — revert to `0.1.4` if that tag never actually shipped.)
+
+- **BREAKING (#84, Ask 2): `actingForUser` is now a required key** on
+  `HawcxAgent.invoke`. The `?` optional is dropped (`actingForUser: string |
+  null`) and a missing key throws (`actingForUser is required`). Pass `null` for
+  an explicit unprincipled call — that omits the wire field (pre-field bytes),
+  so wire compatibility is preserved. Removes the wrong-human default when one
+  instance is shared across employees.
 
 ## [0.1.4] - 2026-06-11
 

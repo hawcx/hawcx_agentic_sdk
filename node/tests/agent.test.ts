@@ -36,6 +36,7 @@ describe.skipIf(process.platform === "win32")("HawcxAgent", () => {
     });
     try {
       const resp = await agent.invoke({
+        actingForUser: null,
         targetRsUrl: "https://api.example.com/echo",
         httpMethod: "POST",
         headers: { "Content-Type": "application/json" },
@@ -61,6 +62,7 @@ describe.skipIf(process.platform === "win32")("HawcxAgent", () => {
     });
     try {
       await agent.invoke({
+        actingForUser: null,
         targetRsUrl: "https://example.com",
         httpMethod: "GET",
         tool: "fetch",
@@ -77,6 +79,7 @@ describe.skipIf(process.platform === "win32")("HawcxAgent", () => {
     });
     try {
       await agent.invoke({
+        actingForUser: null,
         targetRsUrl: "https://example.com",
         httpMethod: "GET",
         tool: "fetch",
@@ -96,6 +99,7 @@ describe.skipIf(process.platform === "win32")("HawcxAgent", () => {
     try {
       await expect(
         agent.invoke({
+        actingForUser: null,
           targetRsUrl: "https://forbidden.example.com",
           httpMethod: "GET",
           tool: "x",
@@ -120,6 +124,7 @@ describe.skipIf(process.platform === "win32")("HawcxAgent", () => {
     });
     try {
       await agent.invoke({
+        actingForUser: null,
         targetRsUrl: "https://example.com",
         httpMethod: "post",
         tool: "x",
@@ -162,8 +167,27 @@ describe.skipIf(process.platform === "win32")("runtime principal switching (acti
     await mock.close();
   });
 
-  it("omits acting_for_user from the wire when not set", async () => {
-    // Backward-compat: existing callers must observe identical wire shape.
+  it("throws when the actingForUser key is omitted (no silent unprincipled default)", async () => {
+    const agent = await HawcxAgent.connect(mock.socketPath, {
+      principalAllowlist: ["alice", "bob"],
+    });
+    try {
+      await expect(
+        // @ts-expect-error actingForUser is now a required key (Ask 2)
+        agent.invoke({
+          targetRsUrl: "https://api.example.com/echo",
+          httpMethod: "POST",
+          tool: "echo",
+          body: Buffer.from("x"),
+        }),
+      ).rejects.toThrow(/actingForUser is required/);
+    } finally {
+      agent.close();
+    }
+    // The `rejects.toThrow` above proves the throw fires before any IPC write.
+  });
+
+  it("explicit null omits acting_for_user from the wire (unprincipled, pre-field bytes)", async () => {
     const agent = await HawcxAgent.connect(mock.socketPath, {
       principalAllowlist: ["alice", "bob"],
     });
@@ -173,6 +197,7 @@ describe.skipIf(process.platform === "win32")("runtime principal switching (acti
         httpMethod: "POST",
         tool: "echo",
         body: Buffer.from("x"),
+        actingForUser: null,
       });
     } finally {
       agent.close();
@@ -285,6 +310,7 @@ describe.skipIf(process.platform === "win32")("runtime principal switching (acti
       ).rejects.toThrow(/principalAllowlist/);
       // But an unprincipled call still works.
       await agent.invoke({
+        actingForUser: null,
         targetRsUrl: "https://api.example.com/echo",
         httpMethod: "POST",
         tool: "read",
@@ -332,6 +358,7 @@ describe.skipIf(process.platform === "win32")("invoke transports", () => {
     });
     try {
       await agent.invoke({
+        actingForUser: null,
         targetRsUrl: "https://mcp.example.com",
         httpMethod: "POST",
         tool: "search",
