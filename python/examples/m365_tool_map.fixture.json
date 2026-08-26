@@ -1,0 +1,118 @@
+{
+  "_comment": [
+    "VENDORED from hx_m365_sync/tool_map.json \u2014 do not hand-edit.",
+    "",
+    "The example binds to three fields per tool: the dotted HAAP tool_id (the TBAC",
+    "scope the Assembler mints against), the kebab MCP tool names (params.name \u2014",
+    "the route the RSV resolves), and the routing tuple itself. Vendored because",
+    "the cross-repo test that used to check them SKIPS when hx_m365_sync is not",
+    "checked out alongside \u2014 which is most trees, including the reviewer's \u2014 so it",
+    "was never coverage in the environment where a rename would land.",
+    "",
+    "`upstream_sha256` is over the canonical re-serialization of this same subset.",
+    "test_langchain_m365_example.py recomputes it when the sibling repo IS present",
+    "and FAILS on drift, so an upstream rename breaks a test rather than silently",
+    "breaking the demo.",
+    "",
+    "Note `provider` is `microsoft-graph`, not `o365`: the \u00a745.7.2 scope-gate",
+    "matches it against the armed PolicySet's scope_mappings. The tool_ids stay",
+    "o365.* \u2014 a different vocabulary, correct as-is."
+  ],
+  "tools": [
+    {
+      "tool_id": "o365.groups.members_read",
+      "label": "Read group members",
+      "mcp_tools": [
+        "list-group-members"
+      ],
+      "routing": {
+        "provider": "microsoft-graph",
+        "action": "read",
+        "resource": "groups.members"
+      }
+    },
+    {
+      "tool_id": "o365.groups.members_write",
+      "label": "Add or remove group members",
+      "mcp_tools": [
+        "add-group-member",
+        "remove-group-member"
+      ],
+      "routing": {
+        "provider": "microsoft-graph",
+        "action": "write",
+        "resource": "groups.members"
+      }
+    },
+    {
+      "tool_id": "o365.groups.read",
+      "label": "Read group details",
+      "mcp_tools": [
+        "list-groups",
+        "get-group"
+      ],
+      "routing": {
+        "provider": "microsoft-graph",
+        "action": "read",
+        "resource": "groups"
+      }
+    },
+    {
+      "tool_id": "o365.groups.create",
+      "label": "Create a group",
+      "mcp_tools": [
+        "create-group"
+      ],
+      "routing": {
+        "provider": "microsoft-graph",
+        "action": "write",
+        "resource": "groups"
+      }
+    },
+    {
+      "tool_id": "o365.groups.delete",
+      "label": "Delete a group",
+      "mcp_tools": [
+        "delete-group"
+      ],
+      "routing": {
+        "provider": "microsoft-graph",
+        "action": "write",
+        "resource": "groups"
+      }
+    },
+    {
+      "tool_id": "o365.users.read",
+      "label": "Read user details",
+      "mcp_tools": [
+        "list-users"
+      ],
+      "routing": {
+        "provider": "microsoft-graph",
+        "action": "read",
+        "resource": "users"
+      }
+    },
+    {
+      "tool_id": "o365.users.write",
+      "label": "Update user details",
+      "mcp_tools": [],
+      "routing": {
+        "provider": "microsoft-graph",
+        "action": "write",
+        "resource": "users"
+      }
+    },
+    {
+      "tool_id": "o365.applications.read",
+      "label": "Read application registrations",
+      "mcp_tools": [],
+      "routing": {
+        "provider": "microsoft-graph",
+        "action": "read",
+        "resource": "applications"
+      }
+    }
+  ],
+  "upstream_sha256": "94d0937a86e7141a92224ced5dfbeead1aaf2751536fb8469f4081acfce68e59"
+}

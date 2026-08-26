@@ -1,17 +1,24 @@
-"""The LangChain M365 example, pinned against the two files it must agree with.
+"""The LangChain M365 example, pinned against the contracts it actually binds to.
 
-The example is a bridge between two vocabularies that live in other files: the
-agent template's DOTTED HAAP tool ids, and the downstream MCP server's KEBAB
-tool names. Nothing else checks that bridge, so a rename in either file would
-otherwise surface at demo time as an agent that silently never calls a tool.
+The example bridges two vocabularies that live elsewhere: the dotted HAAP tool
+ids policy is written against, and the kebab MCP names `params.name` carries.
 
-These tests import only ``ToolSpec``/``TOOL_SPECS`` — plain data — so they run
-without LangChain or pydantic installed. The adaptation itself
-(``build_m365_tools``) imports LangChain lazily for exactly that reason.
+An earlier version of this file cross-checked that bridge against
+`hx_m365_sync/tool_map.json` **when the sibling repo happened to be checked out
+alongside** — and skipped otherwise, silently, in most trees including the
+reviewer's. A test that skips in the environment where a rename would land is
+not coverage. The mapping is now vendored as
+`examples/m365_tool_map.fixture.json`, so these tests run everywhere, and the
+upstream comparison became a STALENESS check that fails on drift rather than
+skipping past it.
+
+These import only plain data — no LangChain, no pydantic — so they run in a
+bare test env. The adaptation imports LangChain lazily for that reason.
 """
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import pathlib
@@ -19,11 +26,13 @@ import sys
 
 import pytest
 
-from hawcx_haap.template import ACTIONS, RISK_ENUM, load_template
-
 _EXAMPLES = pathlib.Path(__file__).resolve().parents[1] / "examples"
 _TEMPLATE = _EXAMPLES / "m365_agent_template.yaml"
 _EXAMPLE = _EXAMPLES / "langchain_integration.py"
+_FIXTURE = _EXAMPLES / "m365_tool_map.fixture.json"
+_UPSTREAM = (
+    pathlib.Path(__file__).resolve().parents[3] / "hx_m365_sync" / "tool_map.json"
+)
 
 
 def _load_example():
@@ -34,9 +43,8 @@ def _load_example():
     spec = importlib.util.spec_from_file_location(name, _EXAMPLE)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
-    # Register BEFORE exec: @dataclass resolves its annotations through
-    # sys.modules[cls.__module__], which is None for a module that was created
-    # from a spec but never registered.
+    # Register BEFORE exec: @dataclass resolves annotations through
+    # sys.modules[cls.__module__], which is None for an unregistered module.
     sys.modules[name] = module
     try:
         spec.loader.exec_module(module)
@@ -46,138 +54,219 @@ def _load_example():
     return module
 
 
-def _load_agent_template() -> dict:
-    text = _TEMPLATE.read_text(encoding="utf-8")
-    try:
-        return load_template(text, path_hint=str(_TEMPLATE))
-    except Exception as e:  # noqa: BLE001 - PyYAML is a CLI extra, not a test dep
-        if "PyYAML" in str(e):
-            pytest.skip("PyYAML not installed (CLI extra); template parse skipped")
-        raise
+def _fixture() -> dict:
+    return json.loads(_FIXTURE.read_text(encoding="utf-8"))
 
 
-def test_the_shipped_agent_template_is_valid():
-    """`hawcx validate` in test form: the example's template must load."""
-    doc = _load_agent_template()
-    assert doc["framework"]["kind"] == "langchain"
-    for tool in doc["tools"]:
-        assert set(tool["actions"]) <= ACTIONS
-        assert tool["risk"] in RISK_ENUM
+def _subset_digest(tools: list[dict]) -> str:
+    """The same canonicalization the vendoring step used."""
+    return hashlib.sha256(
+        json.dumps(tools, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
-def test_every_spec_names_a_tool_id_the_template_actually_requests():
-    """A spec pointing at an id absent from the template is unbuildable.
-
-    `build_m365_tools` raises on this at construction, but only when someone
-    runs it with a generated module to hand — which is after the demo has been
-    set up. Catch it here instead.
-    """
-    doc = _load_agent_template()
-    template_ids = {t["id"] for t in doc["tools"]}
-    module = _load_example()
-    for spec in module.TOOL_SPECS:
-        assert spec.tool_id in template_ids, (
-            f"{spec.mcp_name} binds to {spec.tool_id!r}, which the agent template "
-            "does not request"
-        )
+# ── The vendored fixture ─────────────────────────────────────────────────────
 
 
-def test_the_template_and_the_specs_account_for_each_other_exactly():
-    """No template id is silently unreachable, and none is silently dropped.
-
-    Every requested id must either back at least one LangChain tool or be
-    listed as unimplemented. Without this, deleting a spec would quietly shrink
-    what the agent can do while the template still claims the entitlement.
-    """
-    doc = _load_agent_template()
-    template_ids = {t["id"] for t in doc["tools"]}
-    module = _load_example()
-    exposed = {spec.tool_id for spec in module.TOOL_SPECS}
-    accounted = exposed | set(module.UNIMPLEMENTED_TOOL_IDS)
-    assert accounted == template_ids, (
-        "template ids and example coverage disagree: "
-        f"unaccounted={template_ids - accounted}, unknown={accounted - template_ids}"
+def test_the_fixture_matches_its_own_recorded_digest():
+    """Catches a hand-edit of the vendored copy, which is explicitly forbidden."""
+    fx = _fixture()
+    assert _subset_digest(fx["tools"]) == fx["upstream_sha256"], (
+        "m365_tool_map.fixture.json was edited by hand — re-vendor it from "
+        "hx_m365_sync/tool_map.json instead"
     )
-    # An id cannot be both exposed and declared unimplemented.
-    assert not (exposed & set(module.UNIMPLEMENTED_TOOL_IDS))
 
 
-def test_specs_are_well_formed_for_langchain():
-    """Names, uniqueness, and argument shapes LangChain will not tolerate."""
+def test_the_fixture_is_not_stale_against_upstream():
+    """STALENESS check, not a cross-repo import.
+
+    Skips only when the sibling repo genuinely is not present — but unlike the
+    version this replaces, the fixture means every other assertion in this file
+    still runs in that case. Here, a skip costs one check rather than all of
+    them.
+    """
+    if not _UPSTREAM.exists():
+        pytest.skip("hx_m365_sync not checked out alongside; fixture digest still enforced")
+    upstream = json.loads(_UPSTREAM.read_text(encoding="utf-8"))
+    subset = [
+        {
+            "tool_id": t["tool_id"],
+            "label": t.get("label"),
+            "mcp_tools": t.get("mcp_tools") or [],
+            "routing": t.get("routing"),
+        }
+        for t in upstream["tools"]
+    ]
+    assert _subset_digest(subset) == _fixture()["upstream_sha256"], (
+        "tool_map.json has drifted from the vendored fixture. Re-vendor it — a "
+        "rename upstream silently breaks the demo otherwise."
+    )
+
+
+def test_the_provider_is_the_one_the_scope_gate_matches():
+    """`o365` finds no mapping in the armed PolicySet and refuses every call."""
     module = _load_example()
-    seen: set[str] = set()
-    for spec in module.TOOL_SPECS:
-        assert spec.mcp_name and spec.mcp_name.islower()
-        # LangChain tool names must be identifier-safe; the adapter converts
-        # dashes, so the converted form is what has to be unique and valid.
-        converted = spec.mcp_name.replace("-", "_")
-        assert converted.isidentifier(), f"{spec.mcp_name} is not identifier-safe"
-        assert converted not in seen, f"duplicate tool name {converted}"
-        seen.add(converted)
-        assert spec.description.strip(), f"{spec.mcp_name} has no description"
-        for arg, triple in spec.args.items():
-            assert arg.isidentifier(), f"{spec.mcp_name}.{arg} is not a valid argument name"
-            py_type, required, desc = triple
+    assert module.PROVIDER == "microsoft-graph"
+    providers = {
+        t["routing"]["provider"] for t in _fixture()["tools"] if t.get("routing")
+    }
+    assert providers == {"microsoft-graph"}
+
+
+# ── The tool surface handed to the model ─────────────────────────────────────
+
+
+def test_every_callable_tool_has_a_schema_and_a_description():
+    """The one hand-authored table must cover exactly the callable surface.
+
+    Without this the provisional schemas could drift out of step with the ids —
+    which is what made the previous free-standing spec table objectionable.
+    """
+    module = _load_example()
+    callable_names = {
+        name for t in _fixture()["tools"] for name in t["mcp_tools"]
+    }
+    assert set(module.ARGUMENT_SCHEMAS) == callable_names
+    assert set(module.DESCRIPTIONS) == callable_names
+    for name, schema in module.ARGUMENT_SCHEMAS.items():
+        for arg, (py_type, required, desc) in schema.items():
+            assert arg.isidentifier(), f"{name}.{arg} is not a valid argument name"
             assert isinstance(py_type, type)
             assert isinstance(required, bool)
-            assert desc.strip(), f"{spec.mcp_name}.{arg} has no description"
+            assert desc.strip(), f"{name}.{arg} has no description"
+
+
+def test_unimplemented_ids_are_derived_not_hand_maintained():
+    """They must follow the fixture, so implementing one upstream fixes this."""
+    module = _load_example()
+    expected = {t["tool_id"] for t in _fixture()["tools"] if not t["mcp_tools"]}
+    assert module.unimplemented_tool_ids() == expected
+    # Sanity: today that is exactly the two with no MCP tool.
+    assert expected == {"o365.users.write", "o365.applications.read"}
+
+
+def test_mcp_tools_carry_both_identifiers_and_the_routing_tuple():
+    """The whole point: one object holding the scope AND the route.
+
+    `tool_id` is what the Assembler mints against; `name` is what `params.name`
+    carries and the RSV routes on. A tool built with only one of them cannot
+    both be authorized and be delivered.
+    """
+    module = _load_example()
+    tools = module.m365_tools(endpoint="https://gw.example/mcp")
+    by_name = {t.name: t for t in tools}
+
+    # Not 1:1 — one id backs two names, which is why tools are per MCP name.
+    assert by_name["list-groups"].tool_id == "o365.groups.read"
+    assert by_name["get-group"].tool_id == "o365.groups.read"
+    assert by_name["add-group-member"].tool_id == "o365.groups.members_write"
+    assert by_name["remove-group-member"].tool_id == "o365.groups.members_write"
+
+    for t in tools:
+        assert t.tool_id and t.name and t.url
+        assert t.name != t.tool_id, "the two vocabularies must not be conflated"
+        assert t.actions, f"{t.name} has no action; the mint would be unscoped"
+        assert t.resource, f"{t.name} has no resource"
+
+    # Every callable fixture tool is present, and nothing else is.
+    assert set(by_name) == {n for t in _fixture()["tools"] for n in t["mcp_tools"]}
 
 
 def test_write_tools_require_their_target_explicitly():
     """A mutation must not have an all-optional signature.
 
-    A write tool whose arguments are all optional can be called with none of
-    them, which is how an agent ends up issuing an unscoped mutation that the
-    ceiling's argument predicates then cannot constrain — `member_of_set`
-    resolves Absent and denies, so the failure reads as a permission bug rather
-    than a missing argument.
+    A write callable with every argument optional can be invoked with none of
+    them, which is how an agent issues an unscoped mutation that the ceiling's
+    argument predicates then cannot constrain — `member_of_set` resolves Absent
+    and denies, so it reads as a permission bug rather than a missing argument.
     """
-    doc = _load_agent_template()
-    writes = {t["id"] for t in doc["tools"] if "write" in t["actions"]}
     module = _load_example()
-    for spec in module.TOOL_SPECS:
-        if spec.tool_id in writes:
-            required = [a for a, (_, req, _) in spec.args.items() if req]
-            assert required, f"{spec.mcp_name} is a write tool with no required argument"
+    writes = {
+        name
+        for t in _fixture()["tools"]
+        if (t.get("routing") or {}).get("action") == "write"
+        for name in t["mcp_tools"]
+    }
+    for name in writes:
+        required = [a for a, (_, req, _) in module.ARGUMENT_SCHEMAS[name].items() if req]
+        assert required, f"{name} is a write tool with no required argument"
 
 
-@pytest.mark.parametrize("tool_map_path", [
-    pathlib.Path(__file__).resolve().parents[3] / "hx_m365_sync" / "tool_map.json",
-])
-def test_the_bridge_matches_tool_map_json_when_it_is_available(tool_map_path):
-    """`tool_map.json` is the mapping's home; this file must not diverge from it.
+# ── The wire request ─────────────────────────────────────────────────────────
 
-    Skipped when the sibling repo is not checked out — the example has to stand
-    alone in a clone of just this repo — but when it IS present, a disagreement
-    is a real defect: the same pair drives the gateway's routing map, so a
-    mismatch here means the agent calls something the gateway will not route.
+
+def test_the_built_request_carries_a_json_rpc_body_naming_the_mcp_tool():
+    """The defect this rewrite fixes, pinned.
+
+    The previous version called `agent.invoke()` with no `body`, so no JSON-RPC
+    document existed and `params.name` was never set — the RSV forwarded an
+    empty POST and there was nothing to route on. `Caller.invoke_kwargs` is the
+    supported way to build it, so assert against that rather than reimplementing
+    the envelope here.
     """
-    if not tool_map_path.exists():
-        pytest.skip("hx_m365_sync not checked out alongside this repo")
-    doc = json.loads(tool_map_path.read_text(encoding="utf-8"))
-    canonical: dict[str, str] = {}
-    for entry in doc["tools"]:
-        for mcp in entry.get("mcp_tools") or []:
-            canonical[mcp] = entry["tool_id"]
+    from hawcx_haap.mcp_caller import Caller
 
     module = _load_example()
-    for spec in module.TOOL_SPECS:
-        assert spec.mcp_name in canonical, (
-            f"{spec.mcp_name} is not an MCP tool name tool_map.json knows"
-        )
-        assert canonical[spec.mcp_name] == spec.tool_id, (
-            f"{spec.mcp_name}: example binds {spec.tool_id!r}, "
-            f"tool_map.json says {canonical[spec.mcp_name]!r}"
-        )
+    tool = next(
+        t for t in module.m365_tools(endpoint="https://gw.example/mcp")
+        if t.name == "add-group-member"
+    )
+    kwargs = Caller(provider=module.PROVIDER).invoke_kwargs(
+        tool, "employee@hawcx.com", {"group_id": "g-1", "user_id": "u-1"}
+    )
 
-    # And the reverse: an MCP tool tool_map.json knows, for an id this agent
-    # requests, must be exposed — otherwise the agent silently cannot make a
-    # call the deployment believes it can.
-    requested = {t["id"] for t in _load_agent_template()["tools"]}
-    exposed = {spec.mcp_name for spec in module.TOOL_SPECS}
-    for mcp, tid in canonical.items():
-        if tid in requested:
-            assert mcp in exposed, (
-                f"tool_map.json maps {mcp} -> {tid}, which this agent requests, "
-                "but the example exposes no tool for it"
-            )
+    # The dotted id goes on `tool=` (the TBAC scope)...
+    assert kwargs["tool"] == "o365.groups.members_write"
+    # ...and the kebab name goes in the JSON-RPC body (the route).
+    body = json.loads(kwargs["body"])
+    assert body["method"] == "tools/call"
+    assert body["params"]["name"] == "add-group-member"
+    assert body["params"]["arguments"] == {"group_id": "g-1", "user_id": "u-1"}
+    # No stray routing hint smuggled in as an argument — the old `mcp_tool=`
+    # kwarg landed here and would have reached Graph as a bogus field.
+    assert "mcp_tool" not in body["params"]["arguments"]
+    # `provider` set is what selects the /proxy path this demo is pinned to.
+    assert kwargs["provider"] == "microsoft-graph"
+    assert kwargs["content_type"] == "application/json"
+
+
+def test_the_agent_never_forges_the_hawcx_meta_envelope():
+    """`params._meta` is the Assembler's to write; an agent writing it forges
+    the one thing it is supposed to be unable to forge (§45.7.5)."""
+    from hawcx_haap.mcp_caller import Caller
+
+    module = _load_example()
+    tool = module.m365_tools(endpoint="https://gw.example/mcp")[0]
+    body = json.loads(
+        Caller(provider=module.PROVIDER).invoke_kwargs(tool, "e@hawcx.com", {})["body"]
+    )
+    assert "_meta" not in body["params"]
+
+
+# ── The agent template ───────────────────────────────────────────────────────
+
+
+def test_the_template_and_the_fixture_account_for_each_other():
+    """Every requested id is either callable or declared unimplemented."""
+    from hawcx_haap.template import ACTIONS, RISK_ENUM, load_template
+
+    try:
+        doc = load_template(_TEMPLATE.read_text(encoding="utf-8"), path_hint=str(_TEMPLATE))
+    except Exception as e:  # noqa: BLE001 - PyYAML is a CLI extra, not a test dep
+        if "PyYAML" in str(e):
+            pytest.skip("PyYAML not installed (CLI extra)")
+        raise
+
+    assert doc["framework"]["kind"] == "langchain"
+    for tool in doc["tools"]:
+        assert set(tool["actions"]) <= ACTIONS
+        assert tool["risk"] in RISK_ENUM
+
+    module = _load_example()
+    template_ids = {t["id"] for t in doc["tools"]}
+    callable_ids = {t.tool_id for t in module.m365_tools(endpoint="https://gw.example/mcp")}
+    accounted = callable_ids | module.unimplemented_tool_ids()
+    assert accounted == template_ids, (
+        f"unaccounted={template_ids - accounted}, unknown={accounted - template_ids}"
+    )
+    assert not (callable_ids & module.unimplemented_tool_ids())
