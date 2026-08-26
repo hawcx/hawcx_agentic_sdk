@@ -101,6 +101,12 @@ class ToolSpec:
     args: dict[str, tuple[type, bool, str]] = field(default_factory=dict)
 
 
+#: The OAuth provider these tools resolve under. MUST equal the `provider` in the
+#: armed PolicySet's `scope_mappings` or the §45.7.2 gate finds no mapping — see
+#: the note at the call site. Deliberately not tool_map.json's `o365`.
+PROVIDER = "microsoft-graph"
+
+
 #: PROVISIONAL ARGUMENT SCHEMAS.
 #:
 #: The agent template carries only ``{id, actions, risk}`` — ``tool_entries()``
@@ -255,7 +261,14 @@ def build_m365_tools(
         call_haap = wrapper_cls(
             haap_agent,
             endpoint,
-            provider="o365",
+            # `microsoft-graph`, NOT tool_map.json's `o365`. The provider string
+            # is not free: the §45.7.2 scope-gate matches it against the armed
+            # PolicySet's `scope_mappings`, and that value is `microsoft-graph`
+            # — the same string the RSV's HAAP_RSV_MCP_PROVIDER was retargeted
+            # to for the O365 run, and the provider the EIB stores the delegated
+            # Graph grant under. Naming `o365` here finds no mapping, so every
+            # call is refused for a reason that looks nothing like the real one.
+            provider=PROVIDER,
             acting_for_user=user_principal_id,
         )
 
