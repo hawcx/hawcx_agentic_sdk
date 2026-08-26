@@ -1,0 +1,73 @@
+# M365 (Microsoft 365 / Entra directory) agent — hawcx/agent-template/v1
+#
+# The tool set a LangChain agent asks for when it acts on an employee's behalf
+# against the customer's M365 directory. Feed it to the SDK toolchain:
+#
+#   hawcx wrap m365_agent_template.yaml -o m365_tools.py     # generated wrappers
+#   hawcx init m365_agent_template.yaml -d ./m365-agent      # + a config.py you own
+#
+# `langchain_integration.py` in this directory adapts the generated callables
+# into LangChain StructuredTools and drives them from an agent loop.
+#
+# THIS DOCUMENT GRANTS NOTHING. It is a request: the tool ids an agent intends
+# to call. What the agent may ACTUALLY do is the intersection of this, the
+# org-signed class manifest, and the per-user scope ceiling — decided elsewhere
+# and enforced at the RSV. The schema enforces that framing: any key that claims
+# authority (`granted`, `approved`, `scope_ceiling`, `signature`, …) invalidates
+# the document at any depth.
+#
+# The ids below are the DOTTED HAAP tool ids that policy binds to, taken
+# verbatim from hx_m365_sync/tool_map.json — the same file that supplies the
+# gateway's routing map. Do not confuse them with the KEBAB-case MCP tool names
+# (`list-groups`, `add-group-member`) that the downstream MCP server exposes;
+# tool_map.json maps between the two and states they can never be interchanged.
+
+template: hawcx/agent-template/v1
+name: m365-directory-agent
+version: 0.1.0
+
+framework:
+  kind: langchain
+
+tools:
+  # ── Read ────────────────────────────────────────────────────────────────
+  - id: o365.groups.read
+    actions: [read]
+    # read_internal, not read_public: a directory group list is org-internal
+    # even though it carries no financial data.
+    risk: read_internal
+
+  - id: o365.groups.members_read
+    actions: [read]
+    risk: read_internal
+
+  - id: o365.users.read
+    actions: [read]
+    risk: read_internal
+
+  - id: o365.applications.read
+    actions: [read]
+    risk: read_internal
+
+  # ── Write ───────────────────────────────────────────────────────────────
+  - id: o365.groups.members_write
+    actions: [write]
+    # The demo's headline mutation: adding/removing a member changes who can
+    # reach what, so it is the call the per-user ceiling most needs to fence.
+    risk: write_internal
+
+  - id: o365.groups.create
+    actions: [write]
+    risk: write_internal
+
+  - id: o365.groups.delete
+    actions: [write]
+    # admin, not write_internal: deleting a group destroys an access-control
+    # object and is not recoverable from the agent's side. Declaring it higher
+    # than its siblings is deliberate — a ceiling can grant create without
+    # inheriting delete.
+    risk: admin
+
+  - id: o365.users.write
+    actions: [write]
+    risk: write_internal
