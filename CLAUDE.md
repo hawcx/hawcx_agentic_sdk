@@ -40,10 +40,15 @@ the two CAA channels.
 
 ## Version
 
-- **HAAP Protocol Spec:** v7.2.5 (§45.7.5 MCP transport bearer carriage,
-  2026-05-20). Canonical at
-  `hx_agent_canonical_spec/spec/canonical/HAAP-Canonical-Specification-v7_2_5.md`
-  (sibling repo).
+- **HAAP Protocol Spec:** v7.8.1. Canonical pointer — no version in the path,
+  so it always names the live spec:
+  `hx_agent_canonical_spec/spec/canonical/CURRENT` (sibling repo). That file
+  holds the active spec's filename; read it rather than trusting the number
+  here, which is a snapshot and will go stale again.
+  This line read **v7.2.5** until 2026-08-26 — six minor revisions behind, and
+  stale enough to be cited as authority in a review. The §45.7.5 substance
+  (MCP transport bearer carriage) is unchanged across those revisions, so
+  nothing built against it was wrong; the risk was the citation, not the code.
 - **SDK version (release line):** `v0.1.0-alpha.13` (current). Used for
   Docker tags, the 6 published npm packages (`@hawcx/hawcx-haap` + 5
   platform packages), and tarballs. `hawcx-manager` ships at crate
