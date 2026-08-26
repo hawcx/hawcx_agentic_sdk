@@ -1,12 +1,12 @@
 {
   "_comment": [
-    "VENDORED from hx_m365_sync/tool_map.json \u2014 do not hand-edit.",
+    "VENDORED from hx_m365_sync/tool_map.json — do not hand-edit.",
     "",
     "The example binds to three fields per tool: the dotted HAAP tool_id (the TBAC",
-    "scope the Assembler mints against), the kebab MCP tool names (params.name \u2014",
+    "scope the Assembler mints against), the kebab MCP tool names (params.name —",
     "the route the RSV resolves), and the routing tuple itself. Vendored because",
     "the cross-repo test that used to check them SKIPS when hx_m365_sync is not",
-    "checked out alongside \u2014 which is most trees, including the reviewer's \u2014 so it",
+    "checked out alongside — which is most trees, including the reviewer's — so it",
     "was never coverage in the environment where a rename would land.",
     "",
     "`upstream_sha256` is over the canonical re-serialization of this same subset.",
@@ -14,9 +14,9 @@
     "and FAILS on drift, so an upstream rename breaks a test rather than silently",
     "breaking the demo.",
     "",
-    "Note `provider` is `microsoft-graph`, not `o365`: the \u00a745.7.2 scope-gate",
+    "Note `provider` is `microsoft-graph`, not `o365`: the §45.7.2 scope-gate",
     "matches it against the armed PolicySet's scope_mappings. The tool_ids stay",
-    "o365.* \u2014 a different vocabulary, correct as-is."
+    "o365.* — a different vocabulary, correct as-is."
   ],
   "tools": [
     {
@@ -28,7 +28,7 @@
       "routing": {
         "provider": "microsoft-graph",
         "action": "read",
-        "resource": "groups.members"
+        "resource": "groups/members"
       }
     },
     {
@@ -40,8 +40,8 @@
       ],
       "routing": {
         "provider": "microsoft-graph",
-        "action": "write",
-        "resource": "groups.members"
+        "action": "members_write",
+        "resource": "groups/members"
       }
     },
     {
@@ -65,7 +65,7 @@
       ],
       "routing": {
         "provider": "microsoft-graph",
-        "action": "write",
+        "action": "create",
         "resource": "groups"
       }
     },
@@ -77,7 +77,7 @@
       ],
       "routing": {
         "provider": "microsoft-graph",
-        "action": "write",
+        "action": "delete",
         "resource": "groups"
       }
     },
@@ -114,5 +114,5 @@
       }
     }
   ],
-  "upstream_sha256": "94d0937a86e7141a92224ced5dfbeead1aaf2751536fb8469f4081acfce68e59"
+  "upstream_sha256": "be79a3be8c07c7c2388481735a5a9f171bb6613c0f39630d9ca895f5b3dc3f7a"
 }
