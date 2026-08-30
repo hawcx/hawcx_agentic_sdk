@@ -76,6 +76,50 @@ from hawcx_haap.agent import HawcxAgent
 from hawcx_haap.errors import RequestRejected
 from hawcx_haap.ipc import TokenTransport
 
+
+def _default_transport() -> TokenTransport:
+    """Outbound token carriage, overridable with HAAP_SDK_TOKEN_TRANSPORT.
+
+    This used to be a hard-coded `TokenTransport.MCP_META_V7_2_5`, which no
+    shipped Assembler can parse. Measured against the published crates on
+    cargo.hawcx.com -- haap-core through 0.13.1, haap-assembler-bin through
+    0.2.2, haap-assembler-mcp through 0.10.20 -- the string `mcp_meta_v7_2_5`
+    appears in NONE of them. The Rust side knows `http_header` and `mcp_meta`
+    only, so a real tool call dies at the Assembler with:
+
+        agent request error: invalid payload: ToolCallRequest JSON:
+        unknown variant `mcp_meta_v7_2_5`, expected `http_header` or `mcp_meta`
+
+    That is every SDK agent's first tool call, i.e. the SDK's primary purpose.
+
+    `TokenTransport`'s own docstring says v7.2.5 is opt-in and that the
+    Assembler advertises support via the `experimental.hawcx-haap-v7-2-5`
+    capability at MCP `initialize` -- so the selector was meant to follow a
+    negotiation. Hard-coding it opts every caller into a carriage the peer may
+    not implement, with no way to say otherwise.
+
+    Defaulting to `mcp_meta` is the conservative half of that: it is the
+    carriage every shipped Assembler accepts, and the docstring keeps it
+    precisely "for compatibility with MCP servers that have not yet negotiated
+    v7.2.5". Deployments whose Assembler does support the newer envelope can
+    set HAAP_SDK_TOKEN_TRANSPORT=mcp_meta_v7_2_5.
+
+    The real fix is to read the capability from the `initialize` response and
+    choose accordingly; this makes the wrong default configurable rather than
+    fatal, without inventing a negotiation the wire does not yet carry here.
+    """
+    raw = os.environ.get("HAAP_SDK_TOKEN_TRANSPORT", "").strip()
+    if not raw:
+        return TokenTransport.MCP_META
+    try:
+        return TokenTransport(raw)
+    except ValueError:
+        valid = ", ".join(t.value for t in TokenTransport)
+        raise ValueError(
+            f"HAAP_SDK_TOKEN_TRANSPORT={raw!r} is not a known transport; "
+            f"expected one of: {valid}"
+        ) from None
+
 #: HAAP v7.2.5 §45.7.5 JSON-RPC rejection codes: -32005 … -32000 inclusive.
 #: An ``error.code`` inside this range is a HAAP policy denial. One outside it
 #: (``-32601`` "method not found", say) is a downstream fault, and reporting
@@ -205,7 +249,7 @@ class Caller:
             "acting_for_user": principal,
             "body": json.dumps(self.envelope(tool, arguments)).encode("utf-8"),
             "content_type": "application/json",
-            "transport": TokenTransport.MCP_META_V7_2_5,
+            "transport": _default_transport(),
             "provider": self.provider,
         }
 
