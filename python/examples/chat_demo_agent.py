@@ -137,6 +137,24 @@ def send_error(sock: socket.socket, message: str) -> None:
     write_frame(sock, MSG_CHAT_ERROR, json.dumps({"message": message}).encode())
 
 
+def try_send_error(sock: socket.socket, message: str) -> bool:
+    """Report a failed turn, tolerating a chat channel that has already gone.
+
+    This is a real path, not defensive padding: the Manager drops the
+    connection when a turn exceeds its frame timeout, so a slow tool call
+    ends with the agent holding a closed socket. Letting the write raise
+    would exit with a traceback that reads like an agent bug, and send
+    whoever runs the demo looking for one. Returns False when the channel is
+    gone, which the caller treats as "nothing left to talk to, stop".
+    """
+    try:
+        send_error(sock, message)
+        return True
+    except OSError as e:
+        log(f"chat channel gone while reporting an error ({e}); exiting")
+        return False
+
+
 # ── the part that proves something ─────────────────────────────────────
 
 
@@ -252,12 +270,14 @@ def main() -> int:
                 run_gated_tool_calls(chat, agent, prompt)
             except HawcxError as e:
                 log(f"tool call failed: {e}")
-                send_error(chat, f"tool call failed: {e}")
+                if not try_send_error(chat, f"tool call failed: {e}"):
+                    return 0
             except Exception as e:  # noqa: BLE001
                 # A turn must always terminate. Leaving one open hangs the
                 # Manager until its frame timeout.
                 log(f"unexpected error: {e}\n{traceback.format_exc()}")
-                send_error(chat, f"agent error: {e}")
+                if not try_send_error(chat, f"agent error: {e}"):
+                    return 0
 
 
 if __name__ == "__main__":
