@@ -35,6 +35,11 @@ def main() -> int:
             tool="search",
             action=["read"],
             body=b'{"query": "agent authentication"}',
+            # Required, with no default, and deliberately so: `invoke` refuses
+            # to guess whether a call is made on a user's behalf. `None` is the
+            # explicit "unprincipled call" answer, which is what this example
+            # means. Omitting it is a TypeError, not a silent default.
+            acting_for_user=None,
         )
         print(f"http_status={response.http_status}")
         print(f"body[:200]={response.body[:200]!r}")
