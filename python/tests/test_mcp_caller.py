@@ -75,7 +75,14 @@ def test_the_only_egress_path_is_invoke() -> None:
     assert first["resource"] == "mailbox"
     assert first["target_rs_url"] == MAIL_READ.url
     assert first["acting_for_user"] == "alice@example.invalid"
-    assert first["transport"] is TokenTransport.MCP_META_V7_2_5
+    # mcp_meta, NOT mcp_meta_v7_2_5. The newer selector is not implemented by
+    # any shipped Assembler -- the string appears in no published crate
+    # (haap-core <=0.13.1, haap-assembler-bin <=0.2.2, haap-assembler-mcp
+    # <=0.10.20) -- so hard-coding it made every agent's first real tool call
+    # die with "unknown variant `mcp_meta_v7_2_5`, expected `http_header` or
+    # `mcp_meta`". Overridable via HAAP_SDK_TOKEN_TRANSPORT for deployments
+    # whose Assembler does negotiate the v7.2.5 envelope.
+    assert first["transport"] is TokenTransport.MCP_META
     assert first["provider"] == "example"
     assert second["action"] == ["write"]
 
@@ -125,7 +132,7 @@ def test_invoke_kwargs_needs_no_agent_and_serializes_through_the_sdk() -> None:
 
     assert wire["acting_for_user"] == "alice@example.invalid"
     assert wire["action"] == ["write"]
-    assert wire["transport"] == "mcp_meta_v7_2_5"
+    assert wire["transport"] == "mcp_meta"
     assert wire["provider"] == "example"
     assert "_meta" not in wire
 
@@ -339,3 +346,32 @@ def test_the_principal_allowlist_gate_runs_before_any_ipc() -> None:
     # And the permitted principal does get through the same gate.
     caller.call(MAIL_READ, "alice@example.invalid")
     assert len(client.calls) == 1
+
+
+def test_token_transport_is_overridable_and_rejects_nonsense(monkeypatch):
+    """The default must be selectable, and a typo must fail loudly.
+
+    Both polarities matter. Stuck on one value, a deployment whose Assembler
+    DOES negotiate the v7.2.5 envelope has no way to say so. Silently accepting
+    an unknown string would put a garbage selector on the wire, where it
+    surfaces as the Assembler rejecting the payload -- which reads as a broken
+    agent rather than a bad env var.
+    """
+    from hawcx_haap.mcp_caller import _default_transport
+
+    monkeypatch.delenv("HAAP_SDK_TOKEN_TRANSPORT", raising=False)
+    assert _default_transport() is TokenTransport.MCP_META
+
+    monkeypatch.setenv("HAAP_SDK_TOKEN_TRANSPORT", "mcp_meta_v7_2_5")
+    assert _default_transport() is TokenTransport.MCP_META_V7_2_5
+
+    monkeypatch.setenv("HAAP_SDK_TOKEN_TRANSPORT", "http_header")
+    assert _default_transport() is TokenTransport.HTTP_HEADER
+
+    monkeypatch.setenv("HAAP_SDK_TOKEN_TRANSPORT", "mcp_meta_v9")
+    try:
+        _default_transport()
+    except ValueError as e:
+        assert "not a known transport" in str(e)
+    else:
+        raise AssertionError("an unknown transport must raise, not silently pass")
