@@ -403,12 +403,27 @@ function validateIpcSocketPath(endpoint: string): fs.Stats | null {
       `HAAP_SDK_EXPECTED_PEER_UID=${expectedUidEnv} is not a valid uid`,
     );
   }
-  if (sockStat.uid !== expectedUid) {
-    throw new IpcError(
-      `IPC socket ${endpoint} is owned by uid ${sockStat.uid}, expected ${expectedUid}; ` +
-        "refusing to connect to a socket created by another user",
-    );
-  }
+  // H-4's inode-owner-vs-expected-peer comparison is REMOVED (Ravi, 2026-08-30).
+  //
+  // It compared a file OWNERSHIP stat against a peer-PROCESS expectation, and
+  // `agent-assembler-N.sock` is the one socket where those are deliberately
+  // different principals: root binds it, `bind_peer_owned_uds` fchowns it to the
+  // LLM principal (ownership governs connect()), and the Assembler accepts on the
+  // inherited fd as the CREDENTIAL principal -- which is what
+  // HAAP_SDK_EXPECTED_PEER_UID names. See graph.rs:4318-4333 and 5781-5785.
+  //
+  // The comparison could never fire correctly:
+  //   unset -> expectedUid = sockStat.uid, so the test is `x !== x`
+  //   set   -> CAS deliberately makes the two differ: guaranteed false positive
+  //
+  // The surviving control is stronger and untouched: verifyPeerAfterConnect
+  // reads SO_PEERCRED off the CONNECTED socket and compares it to the credential
+  // principal -- kernel-attested and immune to the path swap a pre-connect stat
+  // can never catch. `expectedUid` is still resolved above because that path
+  // reuses the same env resolution.
+  //
+  // This removes a check that was structurally incapable of working; it does not
+  // loosen the peer-identity guarantee.
 
   // Validate the parent directory. The socket's mode is necessarily
   // 0o600 (set by the supervisor at bind time, per haap-sdk-ipc's
@@ -423,7 +438,17 @@ function validateIpcSocketPath(endpoint: string): fs.Stats | null {
       `stat parent dir ${parent} failed: ${(err as Error).message}`,
     );
   }
-  if (parentStat.uid !== ourUid) {
+  // Root is a trusted creator, matching the Rust side's rule.
+  //
+  // `validateSocketParentDir`'s Rust counterpart requires every ancestor to be
+  // "owned by this process's own euid (or root)". Dropping the root allowance
+  // makes this SDK strictly stricter than Rust in a way that can never succeed:
+  // the supervisor creates <base>/<agentId>/ as root before dropping to the
+  // per-agent uid -- and it MUST, or its own `bind_peer_owned_uds` refuses to
+  // bind there -- so a supervisor-spawned agent always sees a root-owned parent.
+  // The write-bit check below still rejects anything an unprivileged attacker
+  // could plant.
+  if (parentStat.uid !== ourUid && parentStat.uid !== 0) {
     throw new IpcError(
       `IPC parent dir ${parent} is owned by uid ${parentStat.uid}, this process is uid ${ourUid}; ` +
         "refusing to use a dir created by another user",
@@ -431,14 +456,30 @@ function validateIpcSocketPath(endpoint: string): fs.Stats | null {
   }
   // Stats.mode in Node includes the file type bits. Mask to permission bits.
   const parentPerms = parentStat.mode & 0o777;
-  if ((parentPerms & 0o077) !== 0) {
-    // Allow operators to opt out for /tmp/hawcx/ with the same env
-    // flag the Rust side honours, but require explicit opt-in.
+  // Group/other WRITE, not group/other anything -- again matching Rust.
+  //
+  // `validate_socket_parent_dir` requires the chain carry "no group/other write
+  // bit" (0o022). Masking 0o077 additionally rejects the execute bit, and execute
+  // is exactly what the supervisor's layout needs: the per-agent dir is 0711 so
+  // the agent principal can TRAVERSE to the socket without listing the directory.
+  // 0700 is the configuration measured to break every consumer with EACCES, and
+  // the supervisor resets the dir to 0711 on next launch anyway.
+  //
+  // Write is the bit that matters: it is what would let another principal plant
+  // or swap a socket. Execute-only traversal grants none of that.
+  if ((parentPerms & 0o022) !== 0) {
+    // Allow operators to opt out for /tmp/hawcx/ with the same env flag the Rust
+    // side honours, but require explicit opt-in. NOTE: this gates the mode branch
+    // ONLY -- not the owner check above.
     if (process.env.HAAP_SDK_ALLOW_TMP_IPC !== "1") {
       throw new IpcError(
         `IPC parent dir ${parent} has mode ${parentPerms.toString(8)}; ` +
-          "refusing to use a dir with group/other bits set. " +
-          "chmod 700 the dir, or set HAAP_SDK_ALLOW_TMP_IPC=1 to opt into the legacy /tmp/hawcx/ path.",
+          "refusing to use a dir that is group- or other-WRITABLE. " +
+          "Do NOT chmod 700 a supervisor-managed dir: the per-agent dir is " +
+          "deliberately 0711 so the agent principal can traverse it, 0700 makes " +
+          "every consumer fail with EACCES, and the supervisor resets it to 0711 " +
+          "on next launch. HAAP_SDK_ALLOW_TMP_IPC=1 opts into the legacy " +
+          "/tmp/hawcx/ path and does not apply here.",
       );
     }
   }

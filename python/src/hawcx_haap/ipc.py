@@ -329,12 +329,27 @@ def _validate_ipc_socket_path(socket_path: str) -> os.stat_result | None:
     else:
         expected_uid = sock_stat.st_uid
 
-    if sock_stat.st_uid != expected_uid:
-        raise IpcError(
-            f"IPC socket {socket_path} is owned by uid {sock_stat.st_uid}, "
-            f"expected {expected_uid}; refusing to connect to a socket "
-            "created by another user"
-        )
+    # H-4's inode-owner-vs-expected-peer comparison is REMOVED (Ravi, 2026-08-30).
+    #
+    # It compared a file OWNERSHIP stat against a peer-PROCESS expectation, and
+    # `agent-assembler-N.sock` is the one socket where those are deliberately
+    # different principals: root binds it, `bind_peer_owned_uds` fchowns it to
+    # the LLM principal (ownership governs connect()), and the Assembler accepts
+    # on the inherited fd as the CREDENTIAL principal -- which is what
+    # HAAP_SDK_EXPECTED_PEER_UID names. See graph.rs:4318-4333 and 5781-5785.
+    #
+    # The comparison could never fire correctly:
+    #   unset -> expected_uid = sock_stat.st_uid, so the test is `x != x`
+    #   set   -> CAS deliberately makes the two differ: guaranteed false positive
+    #
+    # The surviving control is stronger and untouched: `_verify_peer_after_connect`
+    # reads SO_PEERCRED off the CONNECTED socket and compares it to the credential
+    # principal -- kernel-attested and immune to the path swap a pre-connect stat
+    # can never catch. `expected_uid` is still resolved above because that
+    # function reuses the same env resolution.
+    #
+    # This removes a check that was structurally incapable of working; it does
+    # not loosen the peer-identity guarantee.
 
     parent = sock_path.parent
     try:
@@ -343,27 +358,57 @@ def _validate_ipc_socket_path(socket_path: str) -> os.stat_result | None:
         raise IpcError(f"stat parent dir {parent} failed: {e}") from e
 
     our_uid = os.getuid()
-    if parent_stat.st_uid != our_uid:
+    # Root is a trusted creator, matching the Rust side's rule.
+    #
+    # `validate_socket_parent_dir` (haap-proc-hardening) requires every ancestor
+    # to be "owned by this process's own euid (or root)". Dropping the root
+    # allowance here makes the Python SDK strictly stricter than the Rust one in
+    # a way that can never succeed under the shipping layout: the supervisor
+    # creates <base>/<agent_id>/ as root before dropping to the per-agent uid, so
+    # a supervisor-spawned agent ALWAYS sees a root-owned parent and refuses
+    # every connect. A dir root created is not "created by another user" in the
+    # sense this check exists to catch -- root is the one principal that could
+    # subvert us anyway, and the mode check below still rejects group/other
+    # write, so an unprivileged attacker cannot plant anything here.
+    if parent_stat.st_uid not in (our_uid, 0):
         raise IpcError(
             f"IPC parent dir {parent} is owned by uid {parent_stat.st_uid}, "
             f"this process is uid {our_uid}; refusing to use a dir "
             "created by another user"
         )
     parent_perms = parent_stat.st_mode & 0o777
-    if parent_perms & 0o077 != 0:
-        # INF-08: setting HAAP_SDK_ALLOW_TMP_IPC=1 relaxes the parent-dir
-        # mode (and owner) requirement for the legacy /tmp/hawcx/ path. That
-        # REOPENS the stat→connect TOCTOU window for that path, since a
-        # group/other-writable parent lets another user swap the socket. The
-        # post-connect SO_PEERCRED / re-stat check in
-        # _verify_peer_after_connect is the backstop that still catches a
-        # swap on that opt-in path.
+    # Group/other WRITE, not group/other anything -- again matching Rust.
+    #
+    # `validate_socket_parent_dir` requires the chain carry "no group/other
+    # write bit" (0o022). Checking 0o077 additionally rejects the execute bit,
+    # and execute is exactly what the supervisor's layout needs: <base>/<id>/ is
+    # root-owned and mode 711 so the per-agent uid can TRAVERSE to the socket
+    # without being able to list the directory. Demanding 700 is unsatisfiable
+    # here -- a root-owned 700 dir is one the agent cannot enter at all, so the
+    # stricter rule does not harden this path, it closes it.
+    #
+    # Write is the bit that matters: it is what would let another principal
+    # plant or swap a socket. Execute-only traversal grants none of that.
+    if parent_perms & 0o022 != 0:
+        # INF-08: setting HAAP_SDK_ALLOW_TMP_IPC=1 relaxes the parent-dir MODE
+        # requirement for the legacy /tmp/hawcx/ path. That REOPENS the
+        # stat→connect TOCTOU window for that path, since a group/other-WRITABLE
+        # parent lets another user swap the socket. The post-connect
+        # SO_PEERCRED / re-stat check in _verify_peer_after_connect is the
+        # backstop that still catches a swap on that opt-in path.
+        #
+        # It gates the mode branch ONLY -- not the owner check above. An earlier
+        # version of this comment claimed "(and owner)", which is wrong and sends
+        # an operator to set a flag that stops them one check earlier.
         if os.environ.get("HAAP_SDK_ALLOW_TMP_IPC") != "1":
             raise IpcError(
                 f"IPC parent dir {parent} has mode {parent_perms:o}; "
-                "refusing to use a dir with group/other bits set. "
-                "chmod 700 the dir, or set HAAP_SDK_ALLOW_TMP_IPC=1 to "
-                "opt into the legacy /tmp/hawcx/ path."
+                "refusing to use a dir that is group- or other-WRITABLE. "
+                "Do NOT chmod 700 a supervisor-managed dir: the per-agent dir is "
+                "deliberately 0711 so the agent principal can traverse it, 0700 "
+                "makes every consumer fail with EACCES, and the supervisor resets "
+                "it to 0711 on next launch. HAAP_SDK_ALLOW_TMP_IPC=1 opts into "
+                "the legacy /tmp/hawcx/ path and does not apply here."
             )
 
     return sock_stat
