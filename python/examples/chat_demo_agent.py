@@ -48,6 +48,26 @@ Never print to stdout for user-visible output: the supervisor redirects it to
 ``agent-stdout.log`` precisely so a stray ``print()`` cannot inject frames into
 the chat channel. stderr is the log.
 
+Wiring it, and the one way to get that wrong
+--------------------------------------------
+
+Point ``agent_bin`` at **this file**, not at the interpreter::
+
+    agent_bin = "/opt/hawcx/chat_demo_agent.py"     # correct
+    agent_bin = "/usr/bin/python3"                  # defeats the gate
+
+``agent_bin`` is the one child bound by ``MeasuredExec`` (ADR-0043 D43-2): in
+heavy/native mode the supervisor hashes **the bytes it is about to exec** and
+checks that digest against the class manifest's
+``runtime.allowed_workload_selectors``. Pointing it at ``python3`` measures
+the *interpreter* and leaves the script an unmeasured argument -- the gate
+still passes, while the thing actually running was never checked. The shebang
+above is what makes the correct form work.
+
+That also means this file's digest has to be in the manifest for any
+deployment where the code-identity gate is enforced. It is a demo agent, not
+an exemption from the gate.
+
 CIBA is deliberately not exercised here. It needs ``HAAP_ENABLE_CIBA`` at the
 JIT plus ``require_ciba`` in policy -- a policy change, not agent code.
 """
