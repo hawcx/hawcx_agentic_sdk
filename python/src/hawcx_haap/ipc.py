@@ -39,6 +39,20 @@ from typing import Any
 
 from hawcx_haap.errors import HandshakeError, IpcError, RequestRejected
 
+# Default deadline for the Assembler connect + handshake.
+#
+# Was a hardcoded 5.0. On a supervisor-spawned agent the Assembler is still
+# completing its own handshake when the agent dials, and 5s expires mid-flight:
+# the agent reports a connect timeout while the Assembler reports nothing at
+# all, which reads as "the socket is dead" rather than "we were early". 30s is
+# long enough to cover a cold TQS/Authenticator start and short enough that a
+# genuinely absent Assembler still fails the turn rather than hanging it.
+#
+# Env-overridable because the right value is deployment-shaped, not a constant:
+# a laptop cold-start and a warm pod are minutes apart in what they need.
+_DEFAULT_IPC_TIMEOUT = float(os.environ.get("HAAP_SDK_IPC_TIMEOUT_SECS", "30"))
+
+
 # ── Protocol constants (mirror crates/haap-ipc/src/handshake.rs) ─────
 
 PROTOCOL_VERSION: int = 1
@@ -492,7 +506,7 @@ def _connect_named_pipe(path: str, timeout_secs: float | None) -> _WindowsPipeSo
     return pipe_win.connect(path, timeout_secs=timeout_secs)
 
 
-def connect_assembler(endpoint: str, *, timeout_secs: float | None = 5.0) -> socket.socket:
+def connect_assembler(endpoint: str, *, timeout_secs: float | None = _DEFAULT_IPC_TIMEOUT) -> socket.socket:
     """Open a transport to the Assembler endpoint.
 
     On Unix, ``endpoint`` is a filesystem path to a UDS. On Windows, it is a
@@ -533,7 +547,7 @@ class AssemblerClient:
         cls,
         endpoint: str,
         *,
-        timeout_secs: float | None = 5.0,
+        timeout_secs: float | None = _DEFAULT_IPC_TIMEOUT,
         experimental_capabilities: tuple[str, ...] = (),
     ) -> AssemblerClient:
         """Connect, handshake, and return a client.
@@ -561,14 +575,72 @@ class AssemblerClient:
             raise IpcError(
                 f"expected peer role Assembler (0x05), got 0x{peer_role:02x}"
             )
-        return cls(sock, experimental_capabilities=experimental_capabilities)
+        client = cls(sock, experimental_capabilities=experimental_capabilities)
+        # Remember how we got here so `invoke` can re-dial. The Assembler
+        # serves ONE request per accepted connection (its accept loop calls
+        # `handle_agent_request`, which reads exactly one frame and returns,
+        # dropping the stream), while this client holds `self._sock` for the
+        # life of the object. Without the endpoint we cannot recover.
+        client._endpoint = endpoint
+        client._timeout_secs = timeout_secs
+        return client
+
+    def _reconnect(self) -> None:
+        """Re-dial the Assembler and redo the handshake.
+
+        Needed because the Assembler is single-request-per-connection: after
+        it answers (or REJECTS) one ToolCallRequest it drops the stream, so
+        the second `invoke` on the same client writes into a closed socket
+        and raises BrokenPipeError. That looked like a transport fault for a
+        long time; it is a protocol mismatch between the two sides.
+        """
+        if not getattr(self, "_endpoint", None):
+            raise IpcError(
+                "assembler connection is closed and this client has no endpoint "
+                "to re-dial (it was constructed from a bare socket)"
+            )
+        try:
+            self._sock.close()
+        except Exception:
+            pass
+        fresh = type(self).connect(
+            self._endpoint,
+            timeout_secs=getattr(self, "_timeout_secs", _DEFAULT_IPC_TIMEOUT),
+            experimental_capabilities=self._experimental_capabilities,
+        )
+        self._sock = fresh._sock
 
     def invoke(self, req: ToolCallRequest) -> ToolCallResponse:
         """Send a ToolCallRequest; await ToolCallResponse or RequestRejected.
 
         Raises :class:`RequestRejected` if the Assembler rejects.
         Raises :class:`IpcError` on framing / transport errors.
+
+        Transparently re-dials once if the connection was already spent: the
+        Assembler closes it after every request, so any call after the first
+        would otherwise fail with a broken pipe rather than a verdict. A
+        RequestRejected is a VERDICT and is raised, never retried — retrying a
+        refusal would turn one denial into two attempts at the same action.
         """
+        try:
+            return self._invoke_once(req)
+        except (BrokenPipeError, ConnectionResetError, EOFError):
+            # The WRITE hit the closed socket.
+            self._reconnect()
+            return self._invoke_once(req)
+        except IpcError as e:
+            # The write landed in the socket buffer and the READ found the
+            # peer gone: `read_frame` reports that as IpcError("IPC peer
+            # closed connection mid-message"), not an OSError. Only that
+            # shape is retried — a genuine framing violation (bad length,
+            # unknown opcode, short handshake) is a protocol error and
+            # must surface, not be papered over by a second attempt.
+            if "closed connection" not in str(e):
+                raise
+            self._reconnect()
+            return self._invoke_once(req)
+
+    def _invoke_once(self, req: ToolCallRequest) -> ToolCallResponse:
         wire = req.to_wire()
         # Forward the connection-level experimental capability list on
         # every call so the Assembler can re-key its MCP initialize
