@@ -260,7 +260,7 @@ behavior changes vs. alpha.7.
   - Windows: Named Pipes with DACL restricting to current user SID
     + SYSTEM, `FILE_FLAG_FIRST_PIPE_INSTANCE`,
     `reject_remote_clients(true)` — implementation in
-    `hx_labs::haap_ipc::win_dacl` (CS v7.2.5 §39.12.2).
+    `haap_ipc::win_dacl` (CS v7.2.5 §39.12.2).
 - **`haap-rsv` stays Unix-only** (#16): the MCP server-side
   verifier sidecar continues to ship Linux + macOS only. It uses
   UDS + peer-credential checks for the local-sidecar trust model
@@ -271,7 +271,7 @@ behavior changes vs. alpha.7.
   (CLI ↔ helpers, not on the protocol surface per
   `docs/ARCHITECTURE.md` §IPC); on Windows it builds as a stub
   exposing `error` / `framing` / `paths` only. Named-pipe parity
-  via `hx_labs::haap_ipc::win_dacl` is a follow-up.
+  via `haap_ipc::win_dacl` is a follow-up.
 
 ### Per-platform binary set
 

@@ -3,7 +3,7 @@
 ## Option X distribution model
 
 The SDK is a **distribution source**, not a wrapper layer. Customer
-binaries come from `hx_labs` directly. The SDK contributes:
+binaries come from the ancestor monorepo directly. The SDK contributes:
 
 1. The publishable `haap-rsv` library (in-process embed for Rust MCP servers).
 2. The `haap-rsv` HTTP sidecar binary (cross-language MCP servers).
@@ -102,7 +102,7 @@ doesn't need to re-decode the token to encrypt the response.
 - Customer Redis SessionMaterial substrate access
 - RSV orchestration (substrate access + replay + cascade delegation)
 
-**hx_labs-owned (consumed via path-dep):**
+**ancestor-owned (consumed via path-dep):**
 - X3DH ceremony (`haap_auth::v6_3_registration::perform_agent_registration`)
 - Token wire format (`haap_wire::ParsedToken`, encode/decode)
 - HKDF v3 derivation (`haap_crypto::zkp`)
@@ -113,15 +113,15 @@ doesn't need to re-decode the token to encrypt the response.
 
 **Decision test for any new SDK code**: "Does this line compute or
 verify a value the HAAP spec defines?" If yes, it belongs in
-`hx_labs` — the SDK calls into the library. If no (it's transport,
+the ancestor monorepo — the SDK calls into the library. If no (it's transport,
 persistence, lifecycle, distribution packaging), the SDK owns it.
 
 ## IPC
 
 The five customer-side processes (Authenticator, TQS-precompute,
 TQS-JIT, Assembler, External Identity Broker) communicate over IPC
-managed by `hx_labs`'s `haap-supervisor`. The SDK does NOT define
-their IPC envelope — that lives in `hx_labs::haap-ipc`.
+managed by the ancestor monorepo's `haap-supervisor`. The SDK does NOT define
+their IPC envelope — that lives in `haap-ipc` (in hx_agent_crypto_core).
 
 The SDK's own `haap-sdk-ipc` crate is a generic UDS framing + SO_PEERCRED
 primitive for SDK-internal use (CLI ↔ helpers, future bin-to-bin
@@ -138,7 +138,7 @@ coordination). It is not on the protocol surface.
 - **Sealed-at-rest material**: Argon2id-derived passphrase key +
   AES-256-GCM protects identity bundles on disk.
 - **Network observer**: all on-wire encryption uses AES-256-GCM via
-  `hx_labs` primitives; the SDK never constructs AEADs on the protocol
+  the ancestor monorepo primitives; the SDK never constructs AEADs on the protocol
   surface.
 
 Not protected against:

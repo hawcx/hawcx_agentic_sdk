@@ -1,4 +1,5 @@
-"""Assembler IPC client — speaks the wire protocol from ``hx_labs/crates/haap-ipc``.
+"""Assembler IPC client — speaks the wire protocol from ``crates/haap-ipc``
+(in ``hx_agent_crypto_core``).
 
 Wire format (verified against ``crates/haap-ipc/src/framing.rs``):
 

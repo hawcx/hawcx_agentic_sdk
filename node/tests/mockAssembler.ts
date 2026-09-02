@@ -1,7 +1,7 @@
 /**
  * In-process mock Assembler used by vitest tests.
  *
- * Speaks the wire protocol from `hx_labs/crates/haap-ipc`:
+ * Speaks the wire protocol from `crates/haap-ipc` (in `hx_agent_crypto_core`):
  *
  *   [msg_len: u32 BE][msg_type: u8][payload]
  *

@@ -45,7 +45,7 @@ describe("framing", () => {
 // Skips on Windows: the AssemblerClient transport currently binds Unix
 // domain sockets, which Node on the Windows GHA runner image rejects
 // with EACCES. Named-pipe parity for the Node binding mirrors the Rust
-// SDK's CS v7.2.5 §39.12.2 implementation (hx_labs::haap_ipc::win_dacl)
+// SDK's CS v7.2.5 §39.12.2 implementation (haap_ipc::win_dacl)
 // and is tracked as a follow-up.
 describe.skipIf(process.platform === "win32")("AssemblerClient (UDS)", () => {
   let mock: MockAssembler;

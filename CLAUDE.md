@@ -64,7 +64,7 @@ the two CAA channels.
 
 ## Repo topology
 
-One of the sibling repos that replaced the retired `hx_labs` monorepo.
+One of the sibling repos that replaced the ancestor monorepo.
 Full map: `hx_agent_canonical_spec/HAAP-TOPOLOGY-MAPPING.md`.
 
 This repo is **release-only**. Source ownership map (post 2026-05-21

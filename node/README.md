@@ -139,7 +139,7 @@ await agent.invoke({
 ## Wire protocol
 
 `@hawcx/hawcx-haap` speaks the IPC wire protocol defined in
-[`hx_labs/crates/haap-ipc`](../README.md). Each frame is:
+[`crates/haap-ipc` (in `hx_agent_crypto_core`)](../README.md). Each frame is:
 
 ```
 [msg_len: u32 BE][msg_type: u8][payload: msg_len-1 bytes]

@@ -1,7 +1,7 @@
-# RSV Cascade Adapter — hx_labs Helper Signatures
+# RSV Cascade Adapter — the ancestor monorepo Helper Signatures
 
 **Date:** 2026-05-15
-**hx_labs HEAD verified:** `17da98a` (Merge pull request #62 from
+**the ancestor monorepo HEAD verified:** `17da98a` (Merge pull request #62 from
 hawcx/feature/mode-c-provision-session-material-dispatch-2026-05-27)
 
 ## verify_and_decrypt_request
@@ -265,7 +265,7 @@ without one of:
    *Today: neither field exists.*
 2. **Trait extension**: change the Authorizer trait to take
    `&SessionRecord` so it can compare against any session-stored
-   value. Requires a hx_labs PR + cascade-wide signature update.
+   value. Requires an ancestor-monorepo PR + cascade-wide signature update.
    *Today: not feasible in PR A scope.*
 3. **Permissive alpha + future Cedar**: ship alpha with a
    permissive `Authorizer` (always returns true) that defers all
@@ -311,7 +311,7 @@ Missing critical fields:
 
 **Decision applied**: Phase 1 replaces `SubstrateMaterial` with a
 re-export of `haap_redis::RawSessionRecord` (path-dep'd from
-hx_labs). The SDK already path-deps `haap-redis` indirectly via
+the ancestor monorepo). The SDK already path-deps `haap-redis` indirectly via
 `haap-core`'s `redis-backend` feature; adding it directly as a
 dependency of `haap-substrate-reader` lets us re-use the CAA's
 substrate schema verbatim.

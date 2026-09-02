@@ -1,5 +1,5 @@
 /**
- * Assembler IPC client — speaks the wire protocol from `hx_labs/crates/haap-ipc`.
+ * Assembler IPC client — speaks the wire protocol from `crates/haap-ipc` (in `hx_agent_crypto_core`).
  *
  * Wire format (verified against `crates/haap-ipc/src/framing.rs`):
  *
@@ -686,7 +686,7 @@ export class AssemblerClient {
     // (the common path — caller already chose `number`).
     //
     // BREAKING WIRE CHANGE (bigint path only): a follow-up bug filed
-    // against `hx_labs/crates/haap-ipc/src/messages/assembler.rs`
+    // against `hx_agent_crypto_core`'s `crates/haap-ipc/src/messages/assembler.rs`
     // tracks adding a serde `deserialize_with` helper so `u64` will
     // accept both a JSON number and a string-encoded decimal. Until
     // that lands, callers passing `bigint` values above 2^53 will
