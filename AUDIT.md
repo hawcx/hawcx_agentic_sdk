@@ -128,7 +128,7 @@ Bundle build steps (verbatim from `release.yml`, lines 35–80):
 
 ### Is the bundle reproducible from sources in this repo?
 
-**No.** The workspace `Cargo.toml` (lines 21–26) explicitly declares path-deps to `../the ancestor monorepo`:
+**No.** The workspace `Cargo.toml` (lines 21–26) explicitly declares path-deps to `../<ancestor>`:
 
 ```toml
 haap-core   = { path = "../<ancestor>/crates/haap-core", default-features = false, features = ["redis-backend"] }
