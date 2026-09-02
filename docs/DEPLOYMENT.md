@@ -13,7 +13,7 @@ export HAAP_SEALER_KEYCHAIN_SERVICE=haap-agentic-sdk
 export HAAP_SEALER_KEYCHAIN_ACCOUNT=prod
 export HAAP_CUSTOMER_REDIS_URL=redis://customer-redis:6379
 
-# 3. Launch the pipeline (uses haap-supervisor from hx_labs):
+# 3. Launch the pipeline (uses haap-supervisor from the ancestor monorepo):
 haap-sdk run-pipeline
 # or directly:
 haap-supervisor
@@ -55,7 +55,7 @@ For Rust MCP servers, embed the `haap-rsv` library instead — see
 | `HAAP_AUDIENCE_HASH` | RSV | SHA-256 of audience URL (UTF-8 bytes) hex |
 | `HAAP_REPLAY_LRU_CAPACITY` | RSV | Default: 4096 |
 | `HAAP_RSV_LISTEN` | RSV bin | HTTP listen addr (default: `127.0.0.1:8443`) |
-| `HAAP_SUPERVISOR_LISTEN` | Supervisor | (consumed by hx_labs binary) |
+| `HAAP_SUPERVISOR_LISTEN` | Supervisor | (consumed by the ancestor monorepo binary) |
 
 ## Pre-flight checklist
 
@@ -66,7 +66,7 @@ For Rust MCP servers, embed the `haap-rsv` library instead — see
   - File backend: the path is writable, the passphrase env var is set
     via secret manager (Kubernetes Secret, AWS Secrets Manager, etc.)
   - OS keychain: tested by an initial seal+unseal cycle.
-- [ ] Six hx_labs binaries on `$PATH` of the Supervisor (or use
+- [ ] Six the ancestor monorepo binaries on `$PATH` of the Supervisor (or use
     `--supervisor-bin` to point at a tarball install dir).
 - [ ] Customer Redis sized: ~1 KB per active session, plus replay-store
     entries (~50 bytes each, TTL-expiring).

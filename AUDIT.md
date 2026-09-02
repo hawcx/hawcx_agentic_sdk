@@ -1,9 +1,9 @@
-# hx_agentic_sdk — Migration Audit (vs hx_labs)
+# hx_agentic_sdk — Migration Audit (vs the ancestor monorepo)
 **Audit date:** 2026-05-21
 **Canonical spec ref:** v7.2.5 (`hx_agent_canonical_spec/spec/canonical/HAAP-Canonical-Specification-v7_2_5.md`)
 **Auditor:** backend-eng (Claude Opus 4.7)
 **Repo under audit:** `/Users/raviramaraju/Projects/hx_agentic_sdk/`
-**Reference:** `/Users/raviramaraju/Projects/hx_labs/`
+**Reference:** `/Users/raviramaraju/Projects/<ancestor>/`
 
 ---
 
@@ -31,7 +31,7 @@ Top-level tree of `/Users/raviramaraju/Projects/hx_agentic_sdk/`:
 |---|---|
 | `Cargo.toml` | Workspace root (7 SDK-internal crates) |
 | `Cargo.lock` | Locked dependency graph |
-| `Dockerfile` | Multi-stage distroless build, requires `hx_labs/` as sibling in build context |
+| `Dockerfile` | Multi-stage distroless build, requires `<ancestor>/` as sibling in build context |
 | `Dockerfile.fast` | Local-dev variant |
 | `crates/haap-sdk-types/` | Shared SDK types (substrate, errors, IPC payloads) |
 | `crates/haap-sdk-ipc/` | UDS framed protocol, peer-UID verification (`SO_PEERCRED`) |
@@ -50,29 +50,29 @@ Top-level tree of `/Users/raviramaraju/Projects/hx_agentic_sdk/`:
 | `CLAUDE.md` | Repo-local agent context |
 | `README.md` | Public README (refs v7.2.0) |
 
-**SDK version (claimed):** This repo's CHANGELOG and crate versions are all `0.1.0-alpha.7` / `0.1.0-alpha.1`. The hx_labs `CLAUDE.md` states "SDK Version: 0.8.0", and this is the **first material version-skew finding** — see §8 F-1.
+**SDK version (claimed):** This repo's CHANGELOG and crate versions are all `0.1.0-alpha.7` / `0.1.0-alpha.1`. The ancestor monorepo `CLAUDE.md` states "SDK Version: 0.8.0", and this is the **first material version-skew finding** — see §8 F-1.
 
 No `dist/` for binary artifacts in-tree; binaries are produced by `release.yml` and uploaded as GitHub release assets. Python `src/hawcx_haap/__pycache__` and a `.egg-info` are checked-in build droppings (minor hygiene issue, see F-7).
 
 ---
 
-## 3. Surface Mapping (hx_labs → hx_agentic_sdk)
+## 3. Surface Mapping (the ancestor monorepo → hx_agentic_sdk)
 
-| hx_labs path | hx_agentic_sdk equivalent | Status |
+| the ancestor monorepo path | hx_agentic_sdk equivalent | Status |
 |---|---|---|
 | `crates/haap-napi` | (none) | **Not migrated.** Node SDK here is pure-TS UDS client, no NAPI. Two completely different designs. |
 | `crates/haap-pyo3` | (none) | **Not migrated.** Python SDK here is pure-Python UDS client, no pyo3 native module. |
 | `crates/haap-wasm` | (none) | **Not migrated.** No WASM target in this repo at all. |
 | `crates/haap-cli` | `crates/haap-sdk-cli` (binary `haap-sdk`) | Renamed surface; intent overlaps but cannot confirm feature parity without diffing both `src/`. |
 | `crates/haap-manager` | (none) | **Not migrated.** Not present here. |
-| `ts/haap-ipc/` (194-line `ipc-client.ts`, 110-line `types.ts`, ~543 LOC total) | `node/src/` (635-line `ipc.ts`, 341-line `agent.ts`, 1089 LOC total) | **Diverged and rewritten, not ported.** The SDK version is roughly 2x the line count and carries new H-3/H-4 hardening (`principalAllowlist`, `SO_PEERCRED`, socket-parent stat checks) that does not exist in `hx_labs/ts/haap-ipc/`. |
+| `ts/haap-ipc/` (194-line `ipc-client.ts`, 110-line `types.ts`, ~543 LOC total) | `node/src/` (635-line `ipc.ts`, 341-line `agent.ts`, 1089 LOC total) | **Diverged and rewritten, not ported.** The SDK version is roughly 2x the line count and carries new H-3/H-4 hardening (`principalAllowlist`, `SO_PEERCRED`, socket-parent stat checks) that does not exist in `<ancestor>/ts/haap-ipc/`. |
 | `ts/nemoclaw/` | (none) | **Not migrated.** OpenClaw plugin stays NemoClaw-specific and is unrelated to the customer SDK surface. |
 | `packages/@hx/shared-types`, `@hx/cedar-wasm`, `@hx/ui-components`, `@hx/api-client`, `@hx/auth` | (none) | **None migrated.** These are admin-console / user-console workspace packages, correctly out of scope for the customer SDK. They belong with the console repos (`hx_agent_admin_console`, `hx_user_console` per related audits). |
-| `crates/haap-auth-bin`, `haap-tqs-precompute-bin`, `haap-tqs-jit-bin`, `haap-assembler-bin`, `haap-eib-bin`, `haap-supervisor` | (none — built **from** hx_labs, **bundled** here) | The Dockerfile + release.yml clone `hx_labs` as a sibling, run `cargo build --release --bin …` against it, then `COPY` the binaries into the SDK image / tarball. **Bundle is not source-resident in this repo.** |
+| `crates/haap-auth-bin`, `haap-tqs-precompute-bin`, `haap-tqs-jit-bin`, `haap-assembler-bin`, `haap-eib-bin`, `haap-supervisor` | (none — built **from** the ancestor monorepo, **bundled** here) | The Dockerfile + release.yml clone the ancestor monorepo as a sibling, run `cargo build --release --bin …` against it, then `COPY` the binaries into the SDK image / tarball. **Bundle is not source-resident in this repo.** |
 
 **File-count diff per directory** (informational — for full surface diff, run `diff -rq` after both repos are pinned to release tags):
 
-| Area | hx_labs | hx_agentic_sdk |
+| Area | the ancestor monorepo | hx_agentic_sdk |
 |---|---|---|
 | Rust `.rs` files in `crates/` | 700+ across 30 crates | 30 across 7 crates |
 | TS files in node-equivalent | 5 (`ts/haap-ipc/src/`) | 4 (`node/src/`) |
@@ -82,21 +82,21 @@ No `dist/` for binary artifacts in-tree; binaries are produced by `release.yml` 
 
 ## 4. Binary Bundle Audit
 
-**This is the critical migration risk.** The Dockerfile (`/Users/raviramaraju/Projects/hx_agentic_sdk/Dockerfile`) and `release.yml` (`/Users/raviramaraju/Projects/hx_agentic_sdk/.github/workflows/release.yml`) **both require `hx_labs` to be checked out as a sibling directory**.
+**This is the critical migration risk.** The Dockerfile (`/Users/raviramaraju/Projects/hx_agentic_sdk/Dockerfile`) and `release.yml` (`/Users/raviramaraju/Projects/hx_agentic_sdk/.github/workflows/release.yml`) **both require the ancestor monorepo to be checked out as a sibling directory**.
 
 Bundle build steps (verbatim from `release.yml`, lines 35–80):
 
 ```yaml
-- name: Checkout hx_labs (sibling)
+- name: Checkout the ancestor monorepo (sibling)
   uses: actions/checkout@v4
   with:
-    repository: hawcx/hx_labs
+    repository: the ancestor monorepo
     token: ${{ secrets.HX_LABS_READ_TOKEN }}
-    path: hx_labs
+    path: the ancestor monorepo
     ref: main
 ...
-- name: Build hx_labs binaries
-  working-directory: hx_labs
+- name: Build the ancestor monorepo binaries
+  working-directory: the ancestor monorepo
   run: |
     cargo build --release --target ${{ matrix.target }} \
       --bin haap-authenticator \
@@ -112,33 +112,33 @@ Bundle build steps (verbatim from `release.yml`, lines 35–80):
       --bin haap-rsv --bin haap-sdk
 ```
 
-### Which hx_labs `*-bin` crates are built and bundled
+### Which the ancestor monorepo `*-bin` crates are built and bundled
 
-| hx_labs binary crate | Bundled? | Build location |
+| the ancestor monorepo binary crate | Bundled? | Build location |
 |---|---|---|
-| `haap-auth-bin` (binary `haap-authenticator`) | yes | hx_labs |
-| `haap-tqs-precompute-bin` (binary `haap-tqs-precompute`) | yes | hx_labs |
-| `haap-tqs-jit-bin` (binary `haap-tqs-jit`) | yes | hx_labs |
-| `haap-assembler-bin` (binary `haap-assembler`) | yes | hx_labs |
-| `haap-eib-bin` (binary `haap-eib`) | yes | hx_labs |
-| `haap-supervisor` (binary `haap-supervisor`) | yes | hx_labs |
-| `haap-admin-auth-bin` (CAA Admin Authenticator) | **no** | — (correctly excluded; CAA ships from `hx_agent_client_admin_service`, see hx_labs `CLAUDE.md` ownership note) |
+| `haap-auth-bin` (binary `haap-authenticator`) | yes | the ancestor monorepo |
+| `haap-tqs-precompute-bin` (binary `haap-tqs-precompute`) | yes | the ancestor monorepo |
+| `haap-tqs-jit-bin` (binary `haap-tqs-jit`) | yes | the ancestor monorepo |
+| `haap-assembler-bin` (binary `haap-assembler`) | yes | the ancestor monorepo |
+| `haap-eib-bin` (binary `haap-eib`) | yes | the ancestor monorepo |
+| `haap-supervisor` (binary `haap-supervisor`) | yes | the ancestor monorepo |
+| `haap-admin-auth-bin` (CAA Admin Authenticator) | **no** | — (correctly excluded; CAA ships from `hx_agent_client_admin_service`, see the ancestor monorepo `CLAUDE.md` ownership note) |
 | `haap-rsv` (SDK-owned) | yes | hx_agentic_sdk |
 | `haap-sdk` (SDK-owned) | yes | hx_agentic_sdk |
 
 ### Is the bundle reproducible from sources in this repo?
 
-**No.** The workspace `Cargo.toml` (lines 21–26) explicitly declares path-deps to `../hx_labs`:
+**No.** The workspace `Cargo.toml` (lines 21–26) explicitly declares path-deps to `../the ancestor monorepo`:
 
 ```toml
-haap-core   = { path = "../hx_labs/crates/haap-core", default-features = false, features = ["redis-backend"] }
-haap-crypto = { path = "../hx_labs/crates/haap-crypto" }
-haap-ipc    = { path = "../hx_labs/crates/haap-ipc" }
-haap-wire   = { path = "../hx_labs/crates/haap-wire" }
-haap-redis  = { path = "../hx_labs/crates/haap-redis" }
+haap-core   = { path = "../<ancestor>/crates/haap-core", default-features = false, features = ["redis-backend"] }
+haap-crypto = { path = "../<ancestor>/crates/haap-crypto" }
+haap-ipc    = { path = "../<ancestor>/crates/haap-ipc" }
+haap-wire   = { path = "../<ancestor>/crates/haap-wire" }
+haap-redis  = { path = "../<ancestor>/crates/haap-redis" }
 ```
 
-The repo cannot build standalone. When `hx_labs` retires (per the migration brief), every CI release, every local developer build, and every customer-side `docker build` here breaks. This is **F-2, the load-bearing migration blocker**.
+The repo cannot build standalone. When the ancestor monorepo retires (per the migration brief), every CI release, every local developer build, and every customer-side `docker build` here breaks. This is **F-2, the load-bearing migration blocker**.
 
 The Dockerfile is hardened — protoc is pinned by SHA-256 (L-2 hardening, 2026-05-20), distroless cc-debian12 runtime, ENTRYPOINT defaults to `haap-supervisor`. Good craft. None of that helps if the input sources disappear.
 
@@ -157,27 +157,27 @@ The Dockerfile is hardened — protoc is pinned by SHA-256 (L-2 hardening, 2026-
 | WASM | (none) | n/a | n/a | n/a | **Not shipped** |
 | Rust crate | `haap-rsv` from `cargo publish` (other 6 crates marked `publish = false`) | n/a | `0.1.0-alpha.1` | crates.io–publishable per `publish = true` flag | unconfirmed |
 
-**Version alignment:** All TS / Python / Rust SDK crates carry an alpha-1 family version. **None of them are `0.8.0`.** The hx_labs `CLAUDE.md` line "SDK Version: 0.8.0" refers to the legacy in-repo TS package versions in `packages/@hx/*` / `ts/haap-ipc`, **not** to the `hx_agentic_sdk` numbering. The two are completely independent version timelines and there is no cross-repo coherence today. See F-1.
+**Version alignment:** All TS / Python / Rust SDK crates carry an alpha-1 family version. **None of them are `0.8.0`.** The ancestor monorepo `CLAUDE.md` line "SDK Version: 0.8.0" refers to the legacy in-repo TS package versions in `packages/@hx/*` / `ts/haap-ipc`, **not** to the `hx_agentic_sdk` numbering. The two are completely independent version timelines and there is no cross-repo coherence today. See F-1.
 
 ---
 
 ## 6. Workspace & Dependency Audit
 
-`Cargo.toml` is well-structured: 7-member workspace, workspace-level `[workspace.package]` for edition/license/authors/repository/rust-version (1.75), workspace-level `[workspace.dependencies]` for all third-party crates so versions are pinned in one place. Pinning discipline is at Tailscale/Cloudflare level — `subtle = "2.6"` carries an inline comment explaining why constant-time compare is hard-pinned through hx_labs's vetted version chain, and `hyper`/`hyper-util`/`tower` have a paragraph explaining why axum 0.7's UDS-incompatible `serve()` forces the per-connection hyper wiring.
+`Cargo.toml` is well-structured: 7-member workspace, workspace-level `[workspace.package]` for edition/license/authors/repository/rust-version (1.75), workspace-level `[workspace.dependencies]` for all third-party crates so versions are pinned in one place. Pinning discipline is at Tailscale/Cloudflare level — `subtle = "2.6"` carries an inline comment explaining why constant-time compare is hard-pinned through the ancestor monorepo's vetted version chain, and `hyper`/`hyper-util`/`tower` have a paragraph explaining why axum 0.7's UDS-incompatible `serve()` forces the per-connection hyper wiring.
 
-### Path-deps to hx_labs (these will break on retirement)
+### Path-deps to the ancestor monorepo (these will break on retirement)
 
 Lines 22–26 of `/Users/raviramaraju/Projects/hx_agentic_sdk/Cargo.toml`:
 
-- `haap-core   = { path = "../hx_labs/crates/haap-core", default-features = false, features = ["redis-backend"] }`
-- `haap-crypto = { path = "../hx_labs/crates/haap-crypto" }`
-- `haap-ipc    = { path = "../hx_labs/crates/haap-ipc" }`
-- `haap-wire   = { path = "../hx_labs/crates/haap-wire" }`
-- `haap-redis  = { path = "../hx_labs/crates/haap-redis" }`
+- `haap-core   = { path = "../<ancestor>/crates/haap-core", default-features = false, features = ["redis-backend"] }`
+- `haap-crypto = { path = "../<ancestor>/crates/haap-crypto" }`
+- `haap-ipc    = { path = "../<ancestor>/crates/haap-ipc" }`
+- `haap-wire   = { path = "../<ancestor>/crates/haap-wire" }`
+- `haap-redis  = { path = "../<ancestor>/crates/haap-redis" }`
 
-Comment on line 21 acknowledges the dependency: `# Path-deps to hx_labs (RSV needs cascade + types; sealer + ipc + substrate-reader are SDK-owned)`.
+Comment on line 21 acknowledges the dependency: `# Path-deps to the ancestor monorepo (RSV needs cascade + types; sealer + ipc + substrate-reader are SDK-owned)`.
 
-**`hx-crypto-core` resolution:** Not directly used here. `haap-crypto` (in hx_labs) is the consumer of `hx-crypto-core` and re-exports the necessary primitives. When hx_labs retires, `haap-crypto`'s 45 HAAP + 8 HAAPI + 55 EID domain separators (per hx_labs `CLAUDE.md`) must travel with it — either bundled into a new `hawcx-protocol-lib` crate or split into `crates.io`-published crates (per the canonical migration brief).
+**`hx-crypto-core` resolution:** Not directly used here. `haap-crypto` (in the ancestor monorepo) is the consumer of `hx-crypto-core` and re-exports the necessary primitives. When the ancestor monorepo retires, `haap-crypto`'s 45 HAAP + 8 HAAPI + 55 EID domain separators (per the ancestor monorepo `CLAUDE.md`) must travel with it — either bundled into a new `hawcx-protocol-lib` crate or split into `crates.io`-published crates (per the canonical migration brief).
 
 ---
 
@@ -188,7 +188,7 @@ Comment on line 21 acknowledges the dependency: `# Path-deps to hx_labs (RSV nee
 | README.md | Present (60 KB-ish from `wc`-like estimate, content references **v7.2.0** — stale, see F-3) |
 | CHANGELOG.md | Present, well-maintained, latest **2026-05-21 v0.1.0-alpha.7** with explicit Security / Migration sections. **Stripe-level discipline.** |
 | CLAUDE.md | Present, accurate on architectural facts, references **v7.2.0** (stale, see F-3) |
-| Dockerfile | Present, pinned protoc, distroless runtime, multi-stage. **Reproducibility blocker: requires sibling hx_labs.** |
+| Dockerfile | Present, pinned protoc, distroless runtime, multi-stage. **Reproducibility blocker: requires sibling the ancestor monorepo.** |
 | Dockerfile.fast | Present, dev build variant |
 | Publishing config | npm provenance + PyPI twine + crates.io (`publish = true` on `haap-rsv`) all set up; GH workflows in place |
 | CI | Three workflows: `release.yml` (Rust + Docker tarballs), `release-node.yml` (npm test matrix across Linux/mac/Win × Node 18/20/22 then publish), `release-python.yml` (sdist + wheel + py 3.10–3.13 matrix). No PR-level test/lint workflow visible from filename inspection — see F-5. |
@@ -198,33 +198,33 @@ Comment on line 21 acknowledges the dependency: `# Path-deps to hx_labs (RSV nee
 
 ## 8. Findings — Gaps & Risks
 
-### F-1 [SEV-HIGH] SDK version skew between hx_labs and hx_agentic_sdk
-- hx_labs `CLAUDE.md` declares `SDK Version: 0.8.0`. **hx_agentic_sdk crate / npm / PyPI versions are all `0.1.0-alpha.{1,7}`.** These are independent timelines with no shared truth.
-- **Risk:** Customers reading hx_labs docs ("SDK 0.8.0") and looking for `@hawcx/hawcx-haap@0.8.0` on npm will not find it. Even after migration to a published surface, the version is `0.1.0-alpha`.
-- **Action:** Decide whether to (a) rev `hx_agentic_sdk` to `0.8.0` to match the legacy designation at the point of public release, or (b) declare the `0.1.0-alpha` line authoritative and erase the `0.8.0` reference from all retiring hx_labs docs. Either way, do this before public publish.
+### F-1 [SEV-HIGH] SDK version skew between the ancestor monorepo and hx_agentic_sdk
+- the ancestor monorepo `CLAUDE.md` declares `SDK Version: 0.8.0`. **hx_agentic_sdk crate / npm / PyPI versions are all `0.1.0-alpha.{1,7}`.** These are independent timelines with no shared truth.
+- **Risk:** Customers reading the ancestor monorepo docs ("SDK 0.8.0") and looking for `@hawcx/hawcx-haap@0.8.0` on npm will not find it. Even after migration to a published surface, the version is `0.1.0-alpha`.
+- **Action:** Decide whether to (a) rev `hx_agentic_sdk` to `0.8.0` to match the legacy designation at the point of public release, or (b) declare the `0.1.0-alpha` line authoritative and erase the `0.8.0` reference from all retiring the ancestor monorepo docs. Either way, do this before public publish.
 
-### F-2 [SEV-CRITICAL] Repo cannot build without hx_labs as a sibling checkout
-- Workspace `Cargo.toml` has 5 path-deps into `../hx_labs/crates/`. Dockerfile and `release.yml` both clone hx_labs first.
-- **Risk:** When hx_labs retires (the explicit goal of this migration), this repo's CI, Docker builds, and customer-side `cargo build` all break instantly. **This is the migration's load-bearing dependency.**
-- **Action:** Per the cross-repo migration brief, extract a `hawcx-protocol-lib` (carrying `haap-core` + `haap-crypto` + `haap-ipc` + `haap-wire` + `haap-redis`) into either (a) a new shared library repo with versioned releases, or (b) crates.io-published crates under the `hawcx-*` namespace. Then replace the 5 path-deps with `version = "…"`-pinned deps. Do this before the hx_labs retirement cut-over.
+### F-2 [SEV-CRITICAL] Repo cannot build without the ancestor monorepo as a sibling checkout
+- Workspace `Cargo.toml` has 5 path-deps into `../<ancestor>/crates/`. Dockerfile and `release.yml` both clone the ancestor monorepo first.
+- **Risk:** When the ancestor monorepo retires (the explicit goal of this migration), this repo's CI, Docker builds, and customer-side `cargo build` all break instantly. **This is the migration's load-bearing dependency.**
+- **Action:** Per the cross-repo migration brief, extract a `hawcx-protocol-lib` (carrying `haap-core` + `haap-crypto` + `haap-ipc` + `haap-wire` + `haap-redis`) into either (a) a new shared library repo with versioned releases, or (b) crates.io-published crates under the `hawcx-*` namespace. Then replace the 5 path-deps with `version = "…"`-pinned deps. Do this before the ancestor monorepo retirement cut-over.
 
 ### F-3 [SEV-MED] Spec version references stale (v7.2.0 not v7.2.5)
 - README.md, CLAUDE.md, `python/pyproject.toml`, and likely inline `// CS v7.2.0 §…` comments throughout reference v7.2.0. Canonical spec is **v7.2.5 as of 2026-05-20** (§45.7.5 MCP transport bearer carriage).
 - **Risk:** Customers integrating today get docs that point at a superseded spec. MCP JSON-RPC `-32001…-32005` error mapping (new in v7.2.5) is not documented here.
 - **Action:** Sweep README / CLAUDE / pyproject / `git grep "v7\.2\.0"` and update to v7.2.5. Add a v7.2.5 mention to CHANGELOG (next release entry).
 
-### F-4 [SEV-MED] Surface mismatch — hx_labs lists `haap-napi`, `haap-pyo3`, `haap-wasm` as the migration source
-- The migration brief frames this repo as "Corresponds to hx_labs surface: `crates/haap-napi`, `crates/haap-pyo3`, `crates/haap-wasm`, `crates/haap-cli`, `crates/haap-manager`". In reality, the bindings here are **pure-language UDS clients** and do not link to any Rust core. There is no NAPI, no pyo3, no WASM target.
-- **Risk:** Mismatched expectation in migration plan. Either (a) the legacy NAPI/pyo3/WASM crates were dropped from the product surface intentionally and this needs to be documented as a deprecation, or (b) functionality that lives in those legacy crates needs to be ported into the pure-TS / pure-Python clients before hx_labs retirement.
-- **Action:** Diff `hx_labs/crates/haap-napi/src/`, `haap-pyo3/src/`, `haap-wasm/src/` against `node/src/`, `python/src/` to confirm zero functional gap before retiring hx_labs. If the legacy crates are unused, mark them dead in hx_labs's retirement PR.
+### F-4 [SEV-MED] Surface mismatch — the ancestor monorepo lists `haap-napi`, `haap-pyo3`, `haap-wasm` as the migration source
+- The migration brief frames this repo as "Corresponds to the ancestor monorepo surface: `crates/haap-napi`, `crates/haap-pyo3`, `crates/haap-wasm`, `crates/haap-cli`, `crates/haap-manager`". In reality, the bindings here are **pure-language UDS clients** and do not link to any Rust core. There is no NAPI, no pyo3, no WASM target.
+- **Risk:** Mismatched expectation in migration plan. Either (a) the legacy NAPI/pyo3/WASM crates were dropped from the product surface intentionally and this needs to be documented as a deprecation, or (b) functionality that lives in those legacy crates needs to be ported into the pure-TS / pure-Python clients before the ancestor monorepo retirement.
+- **Action:** Diff `<ancestor>/crates/haap-napi/src/`, `haap-pyo3/src/`, `haap-wasm/src/` against `node/src/`, `python/src/` to confirm zero functional gap before retiring the ancestor monorepo. If the legacy crates are unused, mark them dead in the ancestor monorepo's retirement PR.
 
 ### F-5 [SEV-LOW] No PR-level CI workflow visible
 - The three workflows in `.github/workflows/` are all `release-*.yml`, gated on tag pushes. There appears to be no `ci.yml` running `cargo test --workspace`, `cargo clippy`, `tsc`, `pytest` on pull-request open.
 - **Risk:** Regressions land on main undetected until release tag.
 - **Action:** Verify (this audit did not exhaustively read `.github/`); if absent, add a `ci.yml` matching the test matrix already used in the release workflows.
 
-### F-6 [SEV-LOW] `haap-manager` from hx_labs has no equivalent here
-- hx_labs ships `crates/haap-manager` (per `CLAUDE.md` it's one of the 30 crates and explicitly called out in the migration brief). Not present in `hx_agentic_sdk`.
+### F-6 [SEV-LOW] `haap-manager` from the ancestor monorepo has no equivalent here
+- the ancestor monorepo ships `crates/haap-manager` (per `CLAUDE.md` it's one of the 30 crates and explicitly called out in the migration brief). Not present in `hx_agentic_sdk`.
 - **Risk:** Functional gap if `haap-manager` is required by any customer-facing flow. If it's an internal admin tool, fine.
 - **Action:** Confirm `haap-manager` ownership — likely belongs in `hx_agent_admin_console` or `hx_agent_client_admin_service`, not the SDK. Document the placement in the migration plan.
 
@@ -234,7 +234,7 @@ Comment on line 21 acknowledges the dependency: `# Path-deps to hx_labs (RSV nee
 - **Action:** Add `__pycache__/`, `*.egg-info/`, `dist/`, `build/`, `.venv/` to `.gitignore`; remove tracked copies with `git rm -r --cached`.
 
 ### F-8 [SEV-MED] Docker bundle pins to a single CAA image but CAA has three production-tracked sibling repos
-- `docker/bundle/docker-compose.yml` pins `ghcr.io/hawcx/hx-caa:${HAAP_VERSION}`. Per hx_labs `CLAUDE.md`, the deployed CAA lives in `hx_agent_client_admin_service` with `_n8` (NVIDIA-NemoClaw) and `_w4b` (W4-broad-audit) sibling branches.
+- `docker/bundle/docker-compose.yml` pins `ghcr.io/hawcx/hx-caa:${HAAP_VERSION}`. Per the ancestor monorepo `CLAUDE.md`, the deployed CAA lives in `hx_agent_client_admin_service` with `_n8` (NVIDIA-NemoClaw) and `_w4b` (W4-broad-audit) sibling branches.
 - **Risk:** Bundle consumers using NemoClaw or W4b deployments will get the wrong CAA image. Not strictly a SDK bug, but customer-facing confusion.
 - **Action:** Either document image-tag variants in `docker/bundle/README.md`, or expose `CAA_IMAGE` as a compose env var and default to the broadest base.
 
@@ -247,15 +247,15 @@ Comment on line 21 acknowledges the dependency: `# Path-deps to hx_labs (RSV nee
 
 ## 9. Recommended Actions (priority order)
 
-1. **F-2 (CRITICAL):** Define the post-hx_labs source of `haap-core` + `haap-crypto` + `haap-ipc` + `haap-wire` + `haap-redis`. This blocks every other action. Recommended: lift them into a new `hawcx-protocol-lib` repo published to crates.io under the `hawcx-*` namespace, with version-pinned (not path-) deps.
-2. **F-1 (HIGH):** Reconcile the `0.8.0` (hx_labs claim) vs `0.1.0-alpha.7` (this repo) version-skew before any public publish. Pick one timeline.
-3. **F-4 (MED):** Confirm whether legacy `haap-napi` / `haap-pyo3` / `haap-wasm` crates carry any unported functionality. If they don't, delete them from hx_labs in the retirement PR.
+1. **F-2 (CRITICAL):** Define the post-the ancestor monorepo source of `haap-core` + `haap-crypto` + `haap-ipc` + `haap-wire` + `haap-redis`. This blocks every other action. Recommended: lift them into a new `hawcx-protocol-lib` repo published to crates.io under the `hawcx-*` namespace, with version-pinned (not path-) deps.
+2. **F-1 (HIGH):** Reconcile the `0.8.0` (the ancestor monorepo claim) vs `0.1.0-alpha.7` (this repo) version-skew before any public publish. Pick one timeline.
+3. **F-4 (MED):** Confirm whether legacy `haap-napi` / `haap-pyo3` / `haap-wasm` crates carry any unported functionality. If they don't, delete them from the ancestor monorepo in the retirement PR.
 4. **F-3 (MED):** Bump all docs and inline comments from v7.2.0 → v7.2.5; add §45.7.5 MCP JSON-RPC error-mapping coverage to `docs/RSV_HTTP_API.md` (the RSV currently does HTTP error responses, not JSON-RPC).
 5. **F-5 (LOW):** Add a PR-gate `ci.yml` running the same test matrix as `release-*.yml`.
 6. **F-8 (MED):** Document or parameterize CAA image variant for the local-eval bundle.
 7. **F-7, F-6, F-9 (LOW):** Hygiene — gitignore the Python build droppings, document `haap-manager` placement, plan image-split for next minor.
 
-Once F-1 / F-2 / F-3 land, this repo is ready to be the canonical customer-facing SDK distribution channel post-hx_labs.
+Once F-1 / F-2 / F-3 land, this repo is ready to be the canonical customer-facing SDK distribution channel post-the ancestor monorepo.
 
 ---
 
@@ -263,7 +263,7 @@ Once F-1 / F-2 / F-3 land, this repo is ready to be the canonical customer-facin
 
 ### Rust crates (workspace members, all `version = "0.1.0-alpha.1"`)
 
-| Crate | `publish` | Binary | Path-deps to hx_labs |
+| Crate | `publish` | Binary | Path-deps to the ancestor monorepo |
 |---|---|---|---|
 | `haap-sdk-types` | false | — | `haap-redis` |
 | `haap-sdk-ipc` | false | — | (none — external only: tokio/nix/libc) |
@@ -281,9 +281,9 @@ Once F-1 / F-2 / F-3 land, this repo is ready to be the canonical customer-facin
 | `hawcx-haap` | `0.1.0a1` | PyPI | No — pure Python |
 | (none) | — | crates.io: `haap-rsv` planned (`publish = true`) | yes (RSV cascade) |
 
-### Bundled binaries from hx_labs (built by Dockerfile / release.yml)
+### Bundled binaries from the ancestor monorepo (built by Dockerfile / release.yml)
 
-| Binary | hx_labs source crate | Bundled? |
+| Binary | the ancestor monorepo source crate | Bundled? |
 |---|---|---|
 | `haap-authenticator` | `haap-auth-bin` | yes |
 | `haap-tqs-precompute` | `haap-tqs-precompute-bin` | yes |

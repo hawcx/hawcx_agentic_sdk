@@ -1,16 +1,16 @@
 # Integration Test Setup
 
 The `full_pipeline` test exercises the SDK's RSV against the
-6-process hx_labs binary pipeline (per HAAP CS v7.2.0 §45.2,
+6-process the ancestor monorepo binary pipeline (per HAAP CS v7.2.0 §45.2,
 Pattern Z). Default `cargo test` skips this test (feature flag
 `integration-tests` is off by default).
 
 ## Prerequisites
 
-1. **hx_labs binaries built**:
+1. **the ancestor monorepo binaries built**:
 
    ```bash
-   cd ~/Projects/hx_labs
+   cd ~/Projects/hx_agent_client_auth_service
    cargo build --release \
        --bin haap-authenticator --bin haap-tqs-precompute \
        --bin haap-tqs-jit --bin haap-assembler --bin haap-eib \
@@ -32,7 +32,7 @@ Pattern Z). Default `cargo test` skips this test (feature flag
 
 4. **Running AS** — the test needs an Authentication Service for the
    Authenticator to register against. Either:
-   - Run hx_labs's `haap-server` locally with test fixtures
+   - Run `hx_agent_auth_service`'s `haap-server` locally with test fixtures
    - Point at a development environment AS
    - Use an embedded test AS (planned, not yet wired)
 
@@ -40,7 +40,7 @@ Pattern Z). Default `cargo test` skips this test (feature flag
 
 ```bash
 HAAP_INTEGRATION_REDIS_URL=redis://localhost:6379 \
-HAAP_INTEGRATION_HX_LABS_BIN_DIR=~/Projects/hx_labs/target/release \
+HAAP_INTEGRATION_PIPELINE_BIN_DIR=~/Projects/hx_agent_client_auth_service/target/release \
 HAAP_INTEGRATION_SDK_BIN_DIR=~/Projects/hx_agentic_sdk/target/release \
 HAAP_INTEGRATION_AS_URL=https://agent-auth.dev.hawcx.com \
 cargo test --features integration-tests \
@@ -84,5 +84,5 @@ explicit local runs when adapter changes are being validated.
 
 The skeleton lives at `crates/haap-rsv/tests/full_pipeline.rs` and
 currently `panic!`s with a reference to this doc. Wire-up depends on
-hx_labs Supervisor pipeline orchestration support — see
+the ancestor monorepo Supervisor pipeline orchestration support — see
 `docs/STATUS_2026-06-02.md` for the dependency.

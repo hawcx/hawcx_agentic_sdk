@@ -229,7 +229,7 @@ The SDK speaks the same wire as the in-process Rust crates:
 - `0x54` — `RequestRejected` (JSON: `{request_id, reason}`)
 - `0x61` — `ClarificationAnswer` (JSON; Profile E first hop)
 
-Reference: `crates/haap-ipc/src/messages/assembler.rs` in `hx_labs`.
+Reference: `crates/haap-ipc/src/messages/assembler.rs` in `hx_agent_crypto_core`.
 
 ## Threat model — runtime principal
 

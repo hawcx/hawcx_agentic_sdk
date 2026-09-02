@@ -2,25 +2,25 @@
 
 **Date:** 2026-05-17
 **Branch:** `feature/priority2-foundation-py-node-2026-05-17` on `hx_agentic_sdk`
-**Sibling branch:** `feature/mark-legacy-sdk-packages-2026-05-17` on `hx_labs`
+**Sibling branch:** `feature/mark-legacy-sdk-packages-2026-05-17` on the ancestor monorepo
 **Author:** Claude Opus 4.7 (autonomous)
-**Driver:** [`docs/implementation_inventory_2026-05-17.md`](https://github.com/hawcx/hx_labs/blob/main/docs/implementation_inventory_2026-05-17.md) and the
-[Priority 2-Foundation halt-state docs](https://github.com/hawcx/hx_labs/tree/main/docs)
+**Driver:** `docs/implementation_inventory_2026-05-17.md` (in the ancestor monorepo) and the
+Priority 2-Foundation halt-state docs (in the ancestor monorepo's `docs/`)
 from 2026-05-17 and 2026-05-18 (resolved by this work).
 
 ## TL;DR
 
 Greenfield Python (`hawcx-haap`) and Node (`@hawcx/hawcx-haap`) customer SDK
 packages are landed at `hx_agentic_sdk/python/` and `hx_agentic_sdk/node/`.
-They speak the IPC wire protocol defined in `hx_labs/crates/haap-ipc` and
+They speak the IPC wire protocol defined in `crates/haap-ipc` (in `hx_agent_crypto_core`) and
 connect to a customer-deployed `haap-supervisor`'s Assembler agent socket.
 Tests pass against in-process mock Assemblers (15/15 Python, 18/18 Node).
 End-to-end against the real 5-process pipeline depends on alpha-2 closure
 of the RSV cascade adapter.
 
-The legacy packages at `hx_labs/packages/haap-sdk-{python,node}` and
+The legacy packages at `<ancestor>/packages/haap-sdk-{python,node}` and
 `haap-verify-{python,node}` are marked `LEGACY.md` with redirect banners
-in their READMEs (separate PR in `hx_labs`).
+in their READMEs (separate PR in the ancestor monorepo).
 
 ## What landed
 
@@ -30,12 +30,12 @@ in their READMEs (separate PR in `hx_labs`).
 | Node SDK (greenfield) | `hx_agentic_sdk/node/` | ✅ package.json + src + tests + README + example |
 | Python publish workflow | `.github/workflows/release-python.yml` | ✅ sdist + wheel + matrix test + PyPI trusted publishing |
 | Node publish workflow | `.github/workflows/release-node.yml` | ✅ matrix test + npm publish with provenance |
-| `hx_labs` legacy markers | `hx_labs/packages/haap-{sdk,verify}-{python,node}/LEGACY.md + README banners` | ✅ separate PR on `feature/mark-legacy-sdk-packages-2026-05-17` |
+| the ancestor monorepo legacy markers | `<ancestor>/packages/haap-{sdk,verify}-{python,node}/LEGACY.md + README banners` | ✅ separate PR on `feature/mark-legacy-sdk-packages-2026-05-17` |
 | This closure report | `hx_agentic_sdk/docs/priority2_foundation_closure_2026-05-17.md` | ✅ this file |
 
 ## Phase 0 — IPC wire format (confirmed)
 
-Wire framing in `hx_labs/crates/haap-ipc/src/framing.rs`:
+Wire framing in `hx_agent_crypto_core`'s `crates/haap-ipc/src/framing.rs`:
 
 ```
 [msg_len: u32 BE][msg_type: u8][payload: msg_len-1 bytes]
@@ -44,7 +44,7 @@ Wire framing in `hx_labs/crates/haap-ipc/src/framing.rs`:
 Max message size: 64 KiB. `msg_len` includes the `msg_type` byte.
 
 Agent ↔ Assembler messages (from
-`hx_labs/crates/haap-ipc/src/messages/assembler.rs`):
+`hx_agent_crypto_core`'s `crates/haap-ipc/src/messages/assembler.rs`):
 
 | msg_type | Direction          | Name                  | Encoding |
 |----------|--------------------|-----------------------|----------|
@@ -61,7 +61,7 @@ Agent socket discovery:
 
 - **Unix:** `{ipc_dir}/{agent_id}/agent-assembler-{index}.sock` (default
   `ipc_dir = /tmp/hawcx` or `$XDG_RUNTIME_DIR/hawcx` per
-  `hx_labs/crates/haap-supervisor/src/paths.rs`)
+  `<ancestor>/crates/haap-supervisor/src/paths.rs`)
 - **Windows:** `\\.\pipe\haap-{agent_id}-agent-assembler-{index}`
 
 The Assembler binary reads `HAAP_ASSEMBLER_AGENT_SOCK` from its environment;
@@ -72,7 +72,7 @@ supervisor's `graph.rs` for the exact propagation.
 
 The original prompt template imagined `HawcxAgent(...)` spawning
 `haap-supervisor` as a subprocess and parsing a `"READY assembler=<path>"`
-line from its stdout. **That convention does not exist** in `hx_labs`. The
+line from its stdout. **That convention does not exist** in the ancestor monorepo. The
 supervisor is a long-lived service:
 
 - Reads a TOML config from `HAWCX_CONFIG` env var (default
@@ -209,9 +209,9 @@ Both workflows are deliberately simpler than the prompt's plan because the
 SDKs do not bundle the 5 Rust binaries — those are shipped via the existing
 `release.yml` tarball + Docker image pipeline.
 
-## Phase 4 — hx_labs legacy markers
+## Phase 4 — the ancestor monorepo legacy markers
 
-Separate PR on `hx_labs` branch `feature/mark-legacy-sdk-packages-2026-05-17`:
+Separate PR on the ancestor monorepo branch `feature/mark-legacy-sdk-packages-2026-05-17`:
 
 - `packages/haap-sdk-python/LEGACY.md` + README banner → redirect to `hawcx-haap`
 - `packages/haap-sdk-node/LEGACY.md` + README banner → redirect to `@hawcx/hawcx-haap`
@@ -231,7 +231,7 @@ workstream.
 | 4. Python tests pass against mock Assembler; mypy / ruff clean | ✅ 15/15 |
 | 5. Node tests pass against mock Assembler; `tsc --noEmit` clean | ✅ 18/18 |
 | 6. release-python.yml + release-node.yml committed | ✅ |
-| 7. hx_labs legacy markers PR opened (separate PR in hx_labs repo) | ✅ (commit in place; PR to open) |
+| 7. the ancestor monorepo legacy markers PR opened (separate PR in the ancestor monorepo repo) | ✅ (commit in place; PR to open) |
 | 8. Closure report committed | ✅ this file |
 | 9. Main PR opened on hx_agentic_sdk | ✅ next step |
 

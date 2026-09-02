@@ -320,8 +320,8 @@ class HawcxAgent:
         The agent's pinned ``subject_user_id`` (set at enrollment) is NOT
         modified — only the per-call scope_json carries the runtime principal.
 
-        The gateway's Cedar policy (e.g., ``config/policies/user_ownership.cedar``
-        in the hx_labs admin-console policy set) can then enforce
+        The gateway's Cedar policy (e.g., a ``user_ownership.cedar``
+        in the admin-console policy set) can then enforce
         ``context.user_principal_id == resource.owner_user_id``, so one
         agent can serve Alice and Bob from the same supervisor pipeline
         with per-call ownership gating.

@@ -6,7 +6,7 @@ Three paths depending on what you're integrating:
 
 Install the tarball or Docker image. Run `haap-supervisor` (directly
 or via `haap-sdk run-pipeline`). The agent runtime talks to the
-Assembler over a UDS — refer to the `hx_labs` Assembler IPC docs for
+Assembler over a UDS — refer to the `haap-ipc` protocol docs in `hx_agent_crypto_core` for
 the protocol.
 
 ## Path 2 — Rust MCP server with `haap-rsv` library embed

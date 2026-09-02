@@ -14,9 +14,9 @@ Per Phase 0.2's explicit halt guard:
 
 Two additional halt guards also fire:
 
-- **Phase 1.4 — `registered_scope` already partial in flight in hx_labs.** `registered_scope_json: None` appears at 3 call sites in `hx_labs/crates/haap-server/src/caa_control_plane.rs` (lines 297, 575) and `hx_labs/crates/haap-caa-test-fixtures/src/fixtures.rs:56`. Some other v6.8.0 workstream is plumbing the field on the CAA control-plane side. Phase 1.4's halt-on-mismatch guard ("don't introduce a duplicate") triggers.
+- **Phase 1.4 — `registered_scope` already partial in flight in the ancestor monorepo.** `registered_scope_json: None` appears at 3 call sites in `<ancestor>/crates/haap-server/src/caa_control_plane.rs` (lines 297, 575) and `<ancestor>/crates/haap-caa-test-fixtures/src/fixtures.rs:56`. Some other v6.8.0 workstream is plumbing the field on the CAA control-plane side. Phase 1.4's halt-on-mismatch guard ("don't introduce a duplicate") triggers.
 
-- **Phase 1.5 — fail-closed-on-None contradicts the design memo.** The prompt's "default to None (fail-closed via `AuthError::MissingRegisteredScope`)" is the *opposite* of what `~/Projects/hx_labs/docs/v6_8_design_memos/registration_scope_authorizer.md` §2.3 specifies (the memo's reference impl returns `true` when `registered_scope` is None, with reject-at-registration-time enforcement at the AS layer — see memo §5.3 and §5.4). Implementing the prompt's behavior would break every existing v6.7.4 substrate.
+- **Phase 1.5 — fail-closed-on-None contradicts the design memo.** The prompt's "default to None (fail-closed via `AuthError::MissingRegisteredScope`)" is the *opposite* of what `~/Projects/<ancestor>/docs/v6_8_design_memos/registration_scope_authorizer.md` §2.3 specifies (the memo's reference impl returns `true` when `registered_scope` is None, with reject-at-registration-time enforcement at the AS layer — see memo §5.3 and §5.4). Implementing the prompt's behavior would break every existing v6.7.4 substrate.
 
 I halted before creating any branches, before making any changes, and before invoking any tooling that would alter repo state. No PRs opened.
 
@@ -66,7 +66,7 @@ The closure report (`docs/rsv_cascade_adapter_closure_2026-05-15.md`) documents 
 
 ### Why the prompt got this wrong
 
-The implementation inventory the prompt cites (`docs/implementation_inventory_2026-05-17.md` — verified to live in `hx_labs/docs/`, not `hx_agentic_sdk/docs/`) lists the cascade adapter as a "Known unknown requiring user input" in its Executive Summary:
+The implementation inventory the prompt cites (`docs/implementation_inventory_2026-05-17.md` — verified to live in `<ancestor>/docs/`, not `hx_agentic_sdk/docs/`) lists the cascade adapter as a "Known unknown requiring user input" in its Executive Summary:
 
 > **Known unknowns requiring user input** (after this survey, in priority order): (1) **alpha-2 dependency** — `hx_agentic_sdk/crates/haap-rsv::Rsv::verify_and_decrypt_request` currently returns `Internal("RSV cascade adapter wire-up lands in a focused follow-up PR")`; does the Python/Node Foundation work proceed without RSV verification (just the agent-side pipeline) or wait for cascade adapter completion?
 
@@ -74,7 +74,7 @@ This was written on 2026-05-17 — the same day the cascade adapter PR was merge
 
 The Priority 2-α prompt then derived its premise from that "Known unknown" line.
 
-### Mismatch 2 — `registered_scope_json` is partially in flight in hx_labs
+### Mismatch 2 — `registered_scope_json` is partially in flight in the ancestor monorepo
 
 Prompt §Phase 1.4:
 > Update the substrate (Redis) schema in `haap-redis::set_session` to serialize the new field. Backward-compatible: alpha-1 substrate records without `registered_scope` deserialize as `None`...
@@ -82,7 +82,7 @@ Prompt §Phase 1.4:
 Prompt §"Halt-on-mismatch guards":
 > **Phase 1.4 — registered_scope conflicts with existing SessionRecord.** If `SessionRecord` already has a similar field (different name, same purpose) added by other v6.8.0 work, halt with state document; don't introduce a duplicate.
 
-**Reality** (`grep -rn "registered_scope" hx_labs/crates/`):
+**Reality** (`grep -rn "registered_scope" <ancestor>/crates/`):
 
 ```
 crates/haap-server/src/caa_control_plane.rs:297:            registered_scope_json: None,
@@ -90,11 +90,11 @@ crates/haap-server/src/caa_control_plane.rs:575:            registered_scope_jso
 crates/haap-caa-test-fixtures/src/fixtures.rs:56:        registered_scope_json: None,
 ```
 
-Three call sites in hx_labs already reference a `registered_scope_json` field. All pass `None` (placeholder values), but the field name is set, the type appears to be `Option<String>` (JSON-serialized canonical form), and it threads through `SessionMaterial` in the CAA control plane.
+Three call sites in the ancestor monorepo already reference a `registered_scope_json` field. All pass `None` (placeholder values), but the field name is set, the type appears to be `Option<String>` (JSON-serialized canonical form), and it threads through `SessionMaterial` in the CAA control plane.
 
 This is **partial work on the same problem with a different field name** (`registered_scope_json` rather than `registered_scope`). The Phase 1.4 halt guard fires.
 
-The field-name divergence matters: the memo specifies `registered_scope: Option<CanonicalJSON>` (a typed canonical-JSON wrapper). The in-flight hx_labs work has `registered_scope_json: Option<String>` (a string of serialized JSON). Either choice is defensible, but reconciling them now requires coordination with whoever owns the in-flight work — I cannot identify the owner from local state, and there is no in-flight PR visible on `main` (the field appears already merged with the placeholder values; the population logic is what's missing).
+The field-name divergence matters: the memo specifies `registered_scope: Option<CanonicalJSON>` (a typed canonical-JSON wrapper). The in-flight the ancestor monorepo work has `registered_scope_json: Option<String>` (a string of serialized JSON). Either choice is defensible, but reconciling them now requires coordination with whoever owns the in-flight work — I cannot identify the owner from local state, and there is no in-flight PR visible on `main` (the field appears already merged with the placeholder values; the population logic is what's missing).
 
 ### Mismatch 3 — Fail-closed-on-None contradicts the design memo
 
@@ -152,7 +152,7 @@ Memo §3 ("Impact analysis"):
 
 | Repo | Memo's LOC estimate |
 |---|---|
-| hx_labs (haap-core types + trait + cascade + tests) | 150–200 |
+| the ancestor monorepo (haap-core types + trait + cascade + tests) | 150–200 |
 | CAA (hx_agent_client_admin_service) | 30–40 |
 | AS (hx_agent_auth_service — `/v3/register_agent` ceremony) | 80–100 |
 | SDK (hx_agentic_sdk) | 150 |
@@ -162,7 +162,7 @@ Memo §3 ("Impact analysis"):
 
 Memo's calendar estimate: *"Probably 1–2 weeks of focused work for one engineer per repo, with coordination."*
 
-The prompt allocates Phase 1 of 4 phases inside a 3–5 day envelope to do that work. Even at 3× LOC velocity, the prompt's envelope assumes all 6 repo touches happen in roughly one engineer-day — which would require pre-existing partial work in all 6 repos (only one of which — the `registered_scope_json` placeholder in hx_labs — is observable today).
+The prompt allocates Phase 1 of 4 phases inside a 3–5 day envelope to do that work. Even at 3× LOC velocity, the prompt's envelope assumes all 6 repo touches happen in roughly one engineer-day — which would require pre-existing partial work in all 6 repos (only one of which — the `registered_scope_json` placeholder in the ancestor monorepo — is observable today).
 
 Crucially: without the AS `/v3/register_agent` extension (~80–100 LOC) and the Admin Console registration UI (~150 LOC), no real session will ever carry a populated `registered_scope`. RSV's `RegistrationScopeAuthorizer` would always observe `None`. With the memo's recommended permissive fallback, that's a no-op authorizer. With the prompt's fail-closed semantic, it's a hard outage.
 
@@ -170,7 +170,7 @@ The cascade adapter closure team already reached this verdict and documented it 
 
 > **Conclusion C-prime**: The prompt's `RegistrationScopeAuthorizer` design — strict equality between claimed scope and registration scope — cannot be implemented against the current Authorizer trait without one of:
 > 1. **Stateful Authorizer** — requires substrate field that does not exist yet
-> 2. **Trait extension** — requires hx_labs PR + cascade-wide signature update
+> 2. **Trait extension** — requires ancestor-monorepo PR + cascade-wide signature update
 > 3. **Permissive alpha + future Cedar** — ship alpha with `PermissiveAuthorizer`
 >
 > **Decision applied: option 3 for alpha.**
@@ -191,8 +191,8 @@ What is **not** yet established is whether the operator has tagged `v0.1.0-alpha
 
 This is the **third prompt** in the Priority 2 series whose premise was derived from the 2026-05-17 implementation inventory and proved stale against current `main`:
 
-1. **2026-05-17** — Priority 2-Foundation halted; premise (`hx_agentic_sdk/packages/haap-sdk-{python,node}/`) was wrong against the actual Rust-workspace architecture. State doc: `hx_labs/docs/halt_state_priority2_foundation_2026-05-17.md`.
-2. **2026-05-18** — Priority 2-0a halted; premise (Windows IPC was never shipped) was wrong against the DACL-hardened Windows Named Pipe code already on `main`. State doc: `hx_labs/docs/halt_state_priority2_0a_2026-05-18.md`.
+1. **2026-05-17** — Priority 2-Foundation halted; premise (`hx_agentic_sdk/packages/haap-sdk-{python,node}/`) was wrong against the actual Rust-workspace architecture. State doc: `<ancestor>/docs/halt_state_priority2_foundation_2026-05-17.md`.
+2. **2026-05-18** — Priority 2-0a halted; premise (Windows IPC was never shipped) was wrong against the DACL-hardened Windows Named Pipe code already on `main`. State doc: `<ancestor>/docs/halt_state_priority2_0a_2026-05-18.md`.
 3. **2026-05-17 (this)** — Priority 2-α halted; premise (RSV cascade adapter stubbed) was wrong against the wire-up merged in PR #5 on 2026-05-15.
 
 The common factor is the inventory's "Known unknowns" / "Recommended next prompt" section being read as gospel. The inventory is a snapshot, not a planning document. Each subsequent prompt should re-verify the inventory's claims against `main` HEAD before treating them as load-bearing premises.
@@ -205,7 +205,7 @@ The common factor is the inventory's "Known unknowns" / "Recommended next prompt
 - No `git tag` operations.
 - No CI workflow runs triggered.
 - No PRs opened.
-- This halt-state doc is currently untracked on `feature/priority2-foundation-py-node-2026-05-17`. It mirrors the convention of the two prior halt-state docs (which landed on hx_labs `main` as untracked artifacts). The user can move it where appropriate or commit it on a dedicated halt-state branch.
+- This halt-state doc is currently untracked on `feature/priority2-foundation-py-node-2026-05-17`. It mirrors the convention of the two prior halt-state docs (which landed on the ancestor monorepo `main` as untracked artifacts). The user can move it where appropriate or commit it on a dedicated halt-state branch.
 
 ## Recommended revised scope
 
@@ -234,10 +234,10 @@ Followed by running the existing `docker/bundle/smoke-test.sh` against a tenant 
 
 A read-only audit prompt that:
 
-1. Re-verifies each "Known unknown" in `hx_labs/docs/implementation_inventory_2026-05-17.md` against current `main` HEAD on both repos.
+1. Re-verifies each "Known unknown" in `<ancestor>/docs/implementation_inventory_2026-05-17.md` against current `main` HEAD on both repos.
 2. Identifies which unknowns are now resolved (cascade adapter, Windows IPC, docker bundle) and which remain genuinely open.
 3. Lists in-flight partial work observable in source (e.g., `registered_scope_json` placeholders in haap-server) and who owns it.
-4. Produces a corrected inventory at `hx_labs/docs/implementation_inventory_2026-05-19.md` (or wherever the project convention prefers).
+4. Produces a corrected inventory at `<ancestor>/docs/implementation_inventory_2026-05-19.md` (or wherever the project convention prefers).
 
 **Effort:** 0.5 day, read-only. **Risk:** zero. **Output:** a reliable basis for any future Priority 2-α / 2-β / 2-γ prompt.
 
@@ -245,14 +245,14 @@ A read-only audit prompt that:
 
 If the user wants registration-scope binding to ship, the right shape per the memo (§3 Impact analysis) is a **coordinated multi-repo workstream**, not an alpha-2 closure:
 
-1. **hx_labs PR** — `SessionRecord` field, `Authorizer` trait extension (breaking), `PermissiveAuthorizer` signature update, `RegistrationScopeAuthorizer` reference impl, cascade-internal plumbing, `RawSessionRecord` field-name reconciliation with the in-flight `registered_scope_json: Option<String>` placeholder.
+1. **ancestor-monorepo PR** — `SessionRecord` field, `Authorizer` trait extension (breaking), `PermissiveAuthorizer` signature update, `RegistrationScopeAuthorizer` reference impl, cascade-internal plumbing, `RawSessionRecord` field-name reconciliation with the in-flight `registered_scope_json: Option<String>` placeholder.
 2. **CAA PR** (hx_agent_client_admin_service) — `ProvisionSessionMaterial` carries the new field; substrate writer serializes it.
 3. **AS PR** (hx_agent_auth_service) — `/v3/register_agent` ceremony captures the agent's stated scope; reject-at-registration enforcement for invalid/missing scope.
 4. **Admin Console PR** — registration UI captures the operator's intended scope.
 5. **SDK PR** (hx_agentic_sdk) — adapter wires `RegistrationScopeAuthorizer` as the alpha-2+1 default, replaces `PermissiveAuthorizer` in `crates/haap-rsv/src/rsv.rs`.
 6. **Spec PR** — v6.8.0 §13.6 / §8.1 / §44.4.2 amendments.
 
-**Effort:** 1–2 weeks (memo estimate). **Sequencing:** hx_labs first (trait + types), then CAA + AS in parallel, then SDK, then Admin Console, then spec. **Risk:** medium — coordination across 6 repos with at least one breaking trait change. **Not** an alpha-2 closure.
+**Effort:** 1–2 weeks (memo estimate). **Sequencing:** the ancestor monorepo first (trait + types), then CAA + AS in parallel, then SDK, then Admin Console, then spec. **Risk:** medium — coordination across 6 repos with at least one breaking trait change. **Not** an alpha-2 closure.
 
 ### Not recommended
 
@@ -263,7 +263,7 @@ If the user wants registration-scope binding to ship, the right shape per the me
 ## Open questions for the user
 
 1. **Is the cascade-adapter wire-up sufficient for what you mean by "alpha-2"?** If yes, Option α (tag-and-validate) is the closure path. The prompt's framing of alpha-2 as gated on `RegistrationScopeAuthorizer` doesn't match either the memo (which targets v6.8.0) or the closure report (which calls v0.1.0-alpha.2 the cascade-wire-up tag).
-2. **Who owns the in-flight `registered_scope_json` work in hx_labs?** Three call sites with `None` placeholders suggest active development. Without knowing the owner, any SDK-side `RegistrationScopeAuthorizer` work would land in conflict.
+2. **Who owns the in-flight `registered_scope_json` work in the ancestor monorepo?** Three call sites with `None` placeholders suggest active development. Without knowing the owner, any SDK-side `RegistrationScopeAuthorizer` work would land in conflict.
 3. **Should the inventory be corrected before the next Priority 2 prompt?** Three of three Priority 2 prompts so far have built on inventory premises that turned out to be stale. Option β fixes the upstream cause.
 4. **Should the Priority 2-α prompt be retired, deferred to v6.8.0 cycle, or rewritten as a coordinated multi-repo workstream?** If retired, the alpha-2 closure simply ships as Option α. If deferred, the memo's design lands as part of v6.8.0 work. If rewritten, Option γ is the shape.
 
@@ -278,10 +278,10 @@ If the user wants registration-scope binding to ship, the right shape per the me
 
 - `docs/rsv_cascade_adapter_closure_2026-05-15.md` — the cascade-adapter wire-up closure report (the artifact the prompt's Phase 1 asks me to produce)
 - `docs/rsv_adapter_helper_signatures.md` — Phase 0.4 verdict on why `RegistrationScopeAuthorizer` cannot be alpha-2 scope
-- `~/Projects/hx_labs/docs/v6_8_design_memos/registration_scope_authorizer.md` — the design memo the prompt references; its own §3 estimates 700–800 LOC across 6 repos
-- `~/Projects/hx_labs/docs/implementation_inventory_2026-05-17.md` — the upstream survey whose "Known unknowns" section drove the prompt's premise
-- `~/Projects/hx_labs/docs/halt_state_priority2_foundation_2026-05-17.md` — first halt in this series
-- `~/Projects/hx_labs/docs/halt_state_priority2_0a_2026-05-18.md` — second halt in this series
+- `~/Projects/<ancestor>/docs/v6_8_design_memos/registration_scope_authorizer.md` — the design memo the prompt references; its own §3 estimates 700–800 LOC across 6 repos
+- `~/Projects/<ancestor>/docs/implementation_inventory_2026-05-17.md` — the upstream survey whose "Known unknowns" section drove the prompt's premise
+- `~/Projects/<ancestor>/docs/halt_state_priority2_foundation_2026-05-17.md` — first halt in this series
+- `~/Projects/<ancestor>/docs/halt_state_priority2_0a_2026-05-18.md` — second halt in this series
 - `crates/haap-rsv/src/rsv.rs:110, :168` — the actual cascade call sites (proving wire-up exists)
 - `crates/haap-rsv/src/authorizer.rs:1–32` — module-doc explaining the `RegistrationScopeAuthorizer` deferral rationale
-- `~/Projects/hx_labs/crates/haap-server/src/caa_control_plane.rs:297, :575`, `~/Projects/hx_labs/crates/haap-caa-test-fixtures/src/fixtures.rs:56` — in-flight `registered_scope_json: None` placeholders
+- `~/Projects/<ancestor>/crates/haap-server/src/caa_control_plane.rs:297, :575`, `~/Projects/<ancestor>/crates/haap-caa-test-fixtures/src/fixtures.rs:56` — in-flight `registered_scope_json: None` placeholders

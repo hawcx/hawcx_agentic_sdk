@@ -10,15 +10,15 @@
 The pre-existing SDK (PR #1 + PR #2 work) contained no protocol
 implementation code. The 7-pattern audit found zero hits in
 `crates/*/src/` for HKDF, X3DH, AEAD outside sealer, Schnorr,
-hardcoded byte vectors, or hx_labs function names (apart from two
+hardcoded byte vectors, or the ancestor monorepo function names (apart from two
 doc-comment mentions).
 
 The wipe is therefore **structural**, not contamination-driven.
 Option X mandates removing the wrapper crates
 (`haap-authenticator`, `haap-tqs`, `haap-assembler`, `haap-supervisor`)
-because the corresponding hx_labs binaries ship directly. PR #1's
+because the corresponding the ancestor monorepo binaries ship directly. PR #1's
 ChaCha20Poly1305-based sealer is rebuilt with AES-256-GCM to align
-with hx_labs's AEAD conventions. The RSV is split into a publishable
+with the ancestor monorepo's AEAD conventions. The RSV is split into a publishable
 library + HTTP binary instead of a single combined crate.
 
 Full audit details: see commit `29fdd8f` on the legacy branch and
@@ -93,11 +93,11 @@ pending crate name reservation and an explicit `cargo publish` call.
 Per Mechanism 2 CI (`.github/workflows/release.yml`):
 
 - Six platform-specific tarballs containing 7 binaries each (5 from
-  `hx_labs`, 2 from this repo).
+  the ancestor monorepo, 2 from this repo).
 - Multi-arch Docker image at `ghcr.io/hawcx/hx-agent-sdk:<tag>`.
 - Tag-triggered (`v*`) with `workflow_dispatch` fallback.
 - Requires `HX_LABS_READ_TOKEN` repo secret (PAT with read access to
-  the private `hawcx/hx_labs`).
+  the private the ancestor monorepo).
 
 The Dockerfile + CI workflow are configured but the secret is not
 provisioned by the agent (requires operator action via repository
@@ -134,7 +134,7 @@ references them in the description as historical context.
 1. **RSV cascade adapter** (Phase 7 wire-up). Calling
    `haap_core::cascade::verify_and_decrypt_request` requires
    constructing `CascadeContext` and impl-ing `ReplayCheck` +
-   `Authorizer` traits against the hx_labs surface. The 6-step
+   `Authorizer` traits against the ancestor monorepo surface. The 6-step
    adapter blueprint is documented in
    `crates/haap-rsv/src/rsv.rs`. Lands in a focused follow-up PR
    with the integration test fixture.
@@ -144,7 +144,7 @@ references them in the description as historical context.
 5. **Mobile FFI** via UniFFI (alpha+1).
 6. **System packages** (.deb, .rpm, Homebrew, scoop) — post-alpha.
 7. **Native TLS variants** for environments that mandate it.
-8. **Integration test fixtures**: depend on hx_labs Supervisor
+8. **Integration test fixtures**: depend on the ancestor monorepo Supervisor
    pipeline orchestration support; the integration test landed as
    an `#[ignore]` stub here and lands properly alongside the
    cascade adapter follow-up.
@@ -155,10 +155,10 @@ references them in the description as historical context.
 
 ## Cross-references
 
-- AS-side cascade implementation: `hx_labs/crates/haap-core/src/cascade.rs::verify_and_decrypt_request`.
-- Client-side X3DH ceremony: `hx_labs/crates/haap-auth/src/v6_3_registration.rs::perform_agent_registration`.
+- AS-side cascade implementation: `<ancestor>/crates/haap-core/src/cascade.rs::verify_and_decrypt_request`.
+- Client-side X3DH ceremony: `<ancestor>/crates/haap-auth/src/v6_3_registration.rs::perform_agent_registration`.
 - Customer Redis writer (CAA): `hx_agent_client_admin_service` (separate repo).
-- Five customer-side binaries: `hx_labs/crates/haap-auth-bin`,
+- Five customer-side binaries: `<ancestor>/crates/haap-auth-bin`,
   `haap-tqs-precompute-bin`, `haap-tqs-jit-bin`, `haap-assembler-bin`,
   `haap-supervisor`.
 - Phase 0 forensic preflight (legacy): preserved on
@@ -166,7 +166,7 @@ references them in the description as historical context.
 
 ## What this PR does NOT do
 
-- Modify `~/Projects/hx_labs/`.
+- Modify `~/Projects/<ancestor>/`.
 - Delete the GitHub repository.
 - Delete PR #1 or PR #2 (already merged; preserved historically).
 - Delete the `main-legacy-pre-option-x` branch.
@@ -175,6 +175,6 @@ references them in the description as historical context.
 - Create system packages.
 - Modify the v6.7.4 canonical spec.
 - Auto-merge any PR.
-- Fix gaps in hx_labs's Supervisor pipeline orchestration.
+- Fix gaps in the ancestor monorepo's Supervisor pipeline orchestration.
 - Provision GitHub secrets or change the default branch (operator
   permissions needed).

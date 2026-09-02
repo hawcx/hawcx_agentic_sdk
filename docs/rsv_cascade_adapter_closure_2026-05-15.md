@@ -16,8 +16,8 @@ operational; v0.1.0-alpha.2 is the first functional release.
 
 ### Phase 0 — Forensic preflight + Phase 0.4 verdict
 
-`docs/rsv_adapter_helper_signatures.md` pins the actual hx_labs API
-(verified against hx_labs HEAD `17da98a`). Documents critical
+`docs/rsv_adapter_helper_signatures.md` pins the actual the ancestor monorepo API
+(verified against the ancestor monorepo HEAD `17da98a`). Documents critical
 divergences from the prompt's blueprint:
 
 - **JTI is `[u8; 16]`** (raw CSPRNG from TokenBody), NOT `[u8; 22]`
@@ -50,7 +50,7 @@ over `hawcx:session:{session_id}`), not bincode-blob GET.
 
 - `InMemReplayCheck`: HashSet-backed for unit tests
 - `RedisReplayCheck`: sync Redis SETNX via `redis::Connection`, using
-  `haap_redis::replay_key_v070` for key naming. Mirrors hx_labs's
+  `haap_redis::replay_key_v070` for key naming. Mirrors the ancestor monorepo's
   `replay_adapter::RedisReplayCheck` pattern so the SDK doesn't take a
   dep on haap-server (which has unrelated AS concerns).
 
@@ -97,7 +97,7 @@ over `hawcx:session:{session_id}`), not bincode-blob GET.
   `rsv_new_requires_reachable_redis`.
 - Mapping coverage is enforced by the exhaustive `match` in
   `rsv.rs::map_cascade_reject`. A new `CascadeRejectReason` variant
-  added to hx_labs without updating the SDK's mapping function
+  added to the ancestor monorepo without updating the SDK's mapping function
   triggers a compile error here.
 - Per-variant positive tests (one for each rejection condition)
   require full token-mint machinery — defer to the integration test
@@ -109,7 +109,7 @@ over `hawcx:session:{session_id}`), not bincode-blob GET.
 
 - Gated behind `integration-tests` feature flag.
 - Test is `#[ignore]` and currently `panic!`s with a doc reference.
-- Wire-up depends on hx_labs Supervisor pipeline orchestration
+- Wire-up depends on the ancestor monorepo Supervisor pipeline orchestration
   support (see `docs/STATUS_2026-06-02.md` for the dependency).
 - `docs/INTEGRATION_TEST_SETUP.md` documents the env vars + binary
   prerequisites + invocation.
@@ -124,7 +124,7 @@ has no access to `SessionRecord`, and the SDK's substrate (now
 field. Two prerequisites for `RegistrationScopeAuthorizer`:
 
 1. Substrate schema extension: add `registered_scope` field to
-   `RawSessionRecord` (hx_labs PR), have the CAA write it.
+   `RawSessionRecord` (ancestor-monorepo PR), have the CAA write it.
 2. Authorizer trait extension OR stateful per-request Authorizer
    constructed from the substrate.
 
@@ -138,7 +138,7 @@ layer.
 Async `ConnectionManager` for substrate (fits the async `fetch_session`
 API) + sync `redis::Client` for replay (the cascade's `ReplayCheck`
 trait is sync, called from sync `verify_and_decrypt_request`). This
-avoids `block_on()` hazards and matches hx_labs's `RedisReplayCheck`
+avoids `block_on()` hazards and matches the ancestor monorepo's `RedisReplayCheck`
 pattern.
 
 ### `[u8; 16]` JTI in `VerifiedRequest`
@@ -149,7 +149,7 @@ SDK callers.
 
 ## What this PR does NOT do
 
-- Does NOT modify `~/Projects/hx_labs/`.
+- Does NOT modify `~/Projects/<ancestor>/`.
 - Does NOT touch the `cargo package -p haap-rsv` publication blocker
   (PR B will handle path-dep version metadata).
 - Does NOT add Cedar policy evaluation.
@@ -183,7 +183,7 @@ SDK callers.
 ## Open follow-ups
 
 1. **PR B** (separate): haap-rsv crates.io publication readiness —
-   version metadata on hx_labs path-deps, optional `cargo publish`.
+   version metadata on the ancestor monorepo path-deps, optional `cargo publish`.
 2. **RegistrationScopeAuthorizer**: substrate schema + Authorizer
    trait pattern as prerequisites.
 3. **Cedar Authorizer**: production scope-policy enforcement
@@ -191,18 +191,18 @@ SDK callers.
 4. **Cascade-context configurability**: RsvConfig knobs for
    `operation`, `resource`, `token_ttl_secs` overrides if MCP server
    operators need them per-request.
-5. **Full-pipeline integration test wire-up**: depends on hx_labs
+5. **Full-pipeline integration test wire-up**: depends on the ancestor monorepo
    Supervisor pipeline orchestration verification.
 6. **`/verify` HTTP API request-body parameter**: extend
    `haap-rsv-bin` to accept optional encrypted-request bytes; today
    the endpoint passes `None` for `encrypted_request`.
 
-## hx_labs version pinning
+## the ancestor monorepo version pinning
 
-hx_labs HEAD at adapter implementation: `17da98a` (Merge PR #62,
+the ancestor monorepo HEAD at adapter implementation: `17da98a` (Merge PR #62,
 2026-05-27 mode-c-provision-session-material-dispatch).
 
-Future hx_labs changes to `verify_and_decrypt_request` signature,
+Future the ancestor monorepo changes to `verify_and_decrypt_request` signature,
 `CascadeRejectReason` variants, `SessionRecord` field list, or
 `RawSessionRecord` schema may require adapter updates.
 `docs/rsv_adapter_helper_signatures.md` captures the API surface as
