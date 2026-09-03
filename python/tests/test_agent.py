@@ -169,6 +169,33 @@ def test_invoke_for_is_equivalent_to_invoke_with_acting_for_user(
     assert mock_assembler.received_request.get("acting_for_user") == "bob"
 
 
+def test_invoke_for_forwards_the_downstream_mcp_tool_name(
+    mock_assembler, mock_assembler_endpoint: str
+) -> None:
+    """invoke_for must carry mcp_tool_name, or it silently fail-closes.
+
+    On the mcp_meta flight the Assembler rebuilds params.name from
+    mcp_tool_name, falling back to `tool` — the dotted TBAC id, which
+    matches no key in the gateway routing map. So a sugar method that
+    drops the field does not degrade gracefully: every call it makes is
+    denied UNMAPPED_TOOL at the gateway. invoke() already forwards it;
+    this pins that invoke_for does too.
+    """
+    with HawcxAgent.connect(mock_assembler_endpoint, principal_allowlist=["bob"]) as agent:
+        agent.invoke_for(
+            "bob",
+            target_rs_url="https://api.example.com/echo",
+            tool="o365.groups.read",
+            mcp_tool_name="list-groups",
+            body=b"hi",
+        )
+    assert mock_assembler.received_request is not None
+    assert mock_assembler.received_request.get("mcp_tool_name") == "list-groups"
+    # The dotted id must still travel as `tool` — the two are different fields
+    # with different consumers, not alternatives.
+    assert mock_assembler.received_request.get("tool") == "o365.groups.read"
+
+
 def test_invoke_for_rejects_empty_principal(mock_assembler_endpoint: str) -> None:
     """invoke_for must reject an empty user_principal_id at call time.
 
