@@ -44,6 +44,7 @@ def test_tool_call_request_to_wire_minimal() -> None:
     assert wire["action"] == []
     assert "plaintext_request_body" not in wire
     assert "transport" not in wire
+    assert "mcp_tool_name" not in wire  # omitted, never emitted as null
 
 
 def test_tool_call_request_to_wire_full() -> None:
@@ -53,6 +54,7 @@ def test_tool_call_request_to_wire_full() -> None:
         http_method="POST",
         headers={"X-Trace": "abc"},
         tool="write",
+        mcp_tool_name="write-doc",
         action=["create", "update"],
         resource="*",
         plaintext_request_body=b'{"a":1}',
@@ -65,6 +67,8 @@ def test_tool_call_request_to_wire_full() -> None:
     assert wire["plaintext_request_body"] == "eyJhIjoxfQ=="  # base64 of {"a":1}
     assert wire["transport"] == "mcp_meta"
     assert wire["claimed_intent_hash"] == "0xdead"
+    assert wire["mcp_tool_name"] == "write-doc"
+    assert wire["tool"] == "write"  # dotted TBAC id stays distinct from the kebab route
 
 
 def test_assembler_client_round_trip(mock_assembler_endpoint: str) -> None:

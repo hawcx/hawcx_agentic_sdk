@@ -236,6 +236,7 @@ class Caller:
         result to :class:`~hawcx_haap.ipc.ToolCallRequest` (moving ``body`` to
         ``plaintext_request_body``) to see the serialization too.
         """
+        envelope = self.envelope(tool, arguments)
         return {
             "target_rs_url": tool.url,
             "http_method": "POST",
@@ -244,10 +245,18 @@ class Caller:
             # Saying so is what makes the SSE branch below reachable.
             "headers": {"Accept": "application/json, text/event-stream"},
             "tool": tool.tool_id,
+            # #370: the kebab MCP route, mirrored beside `tool` so the
+            # Assembler can rebuild `params.name` on the `mcp_meta` flight
+            # instead of falling back to the dotted TBAC id.
+            "mcp_tool_name": tool.name,
             "action": list(tool.actions),
             "resource": tool.resource,
             "acting_for_user": principal,
-            "body": json.dumps(self.envelope(tool, arguments)).encode("utf-8"),
+            "body": json.dumps(envelope).encode("utf-8"),
+            # Wire-equivalent to `envelope()`'s `params.arguments`, so the
+            # Assembler's rebuilt `params` matches what the encrypted body
+            # already shows.
+            "tool_arguments": envelope["params"]["arguments"],
             "content_type": "application/json",
             "transport": _default_transport(),
             "provider": self.provider,
