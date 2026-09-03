@@ -140,6 +140,11 @@ class ToolCallRequest:
     http_method: str
     headers: dict[str, str] = field(default_factory=dict)
     tool: str = ""
+    # #370: the downstream MCP tool name (kebab route) that becomes the
+    # JSON-RPC `params.name` on the `mcp_meta` flight. Distinct from
+    # `tool`, which is the dotted TBAC id used for policy/scope matching.
+    # `None` leaves the wire unchanged (Assembler falls back to `tool`).
+    mcp_tool_name: str | None = None
     action: list[str] = field(default_factory=list)
     resource: str = "*"
     constraints: dict[str, Any] = field(default_factory=dict)
@@ -167,6 +172,8 @@ class ToolCallRequest:
             "resource": self.resource,
             "constraints": self.constraints,
         }
+        if self.mcp_tool_name is not None:
+            out["mcp_tool_name"] = self.mcp_tool_name
         if self.plaintext_request_body is not None:
             out["plaintext_request_body"] = base64.b64encode(
                 self.plaintext_request_body

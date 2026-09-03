@@ -85,6 +85,10 @@ def test_the_only_egress_path_is_invoke() -> None:
     assert first["transport"] is TokenTransport.MCP_META
     assert first["provider"] == "example"
     assert second["action"] == ["write"]
+    # #370: the kebab MCP route the Assembler rebuilds `params.name` from on
+    # the `mcp_meta` flight -- distinct from `tool`, the dotted TBAC id.
+    assert first["mcp_tool_name"] == "list_messages"
+    assert second["mcp_tool_name"] == "send_message"
 
 
 def test_the_body_is_an_mcp_tools_call_with_no_forged_hawcx_envelope() -> None:
@@ -105,6 +109,21 @@ def test_call_arguments_override_the_tool_defaults() -> None:
     caller, agent = _caller()
     caller.call(MAIL_READ, "alice@example.invalid", {"top": 99})
     assert json.loads(agent.calls[0]["body"])["params"]["arguments"] == {"top": 99}
+
+
+def test_tool_arguments_matches_the_envelopes_params_arguments() -> None:
+    """`tool_arguments` must be wire-equivalent to what `envelope()` puts in
+    `params.arguments` -- for the tool's own defaults and for a call-time
+    override -- so the Assembler's rebuilt `params` matches the encrypted
+    body it can no longer read as a route.
+    """
+    caller, agent = _caller()
+    caller.call(MAIL_READ, "alice@example.invalid")  # non-empty default args
+    caller.call(MAIL_SEND, "alice@example.invalid", {})  # explicit empty args
+    caller.call(MAIL_READ, "alice@example.invalid", {"top": 99})  # override
+
+    for kwargs in agent.calls:
+        assert kwargs["tool_arguments"] == json.loads(kwargs["body"])["params"]["arguments"]
 
 
 def test_jsonrpc_ids_are_unique_per_caller() -> None:
@@ -135,6 +154,8 @@ def test_invoke_kwargs_needs_no_agent_and_serializes_through_the_sdk() -> None:
     assert wire["transport"] == "mcp_meta"
     assert wire["provider"] == "example"
     assert "_meta" not in wire
+    assert wire["mcp_tool_name"] == MAIL_SEND.name
+    assert wire["tool_arguments"] == dict(MAIL_SEND.arguments)
 
 
 # ── Classification ───────────────────────────────────────────────────
