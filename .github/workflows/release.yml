@@ -317,6 +317,68 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.arch_suffix }}
           cache-to: type=gha,scope=${{ matrix.arch_suffix }},mode=max
 
+      # Actually START the image and check the orchestrator role RUNS.
+      #
+      # This runs here, in the per-arch job, because the runner's own
+      # architecture matches `matrix.platform` — so the image executes
+      # natively with no emulation.
+      #
+      # Why an execution check and not just a file check: v0.1.4 was
+      # measured (2026-09-04) to fail at the dynamic linker on EVERY
+      # entrypoint — `libdbus-1.so.3: cannot open shared object file`,
+      # exit 127, no Rust code reached. A check that only looked for a
+      # filename would have passed that image. This one cannot: a linker
+      # failure prints neither marker below.
+      #
+      # The discriminator, measured both ways on real images:
+      #   - working route (0.11.8 + the symlink): the orchestrator's OWN
+      #     code runs and refuses on its own hardening check —
+      #     "ERROR haap.audit.security: startup hardening failed:
+      #     unseal-orch: running as root (UID 0)". Non-zero exit is
+      #     CORRECT and expected here; the container has no IdP endpoint,
+      #     certs or per-agent uids. Both hardening paths (root, and
+      #     non-root without HAAP_SHARED_INFRA_UIDS) emit that target, so
+      #     the check survives adding a USER to the Dockerfile.
+      #   - no route (0.8.8 + the symlink): argv[0] falls through to
+      #     `Role::Direct` and prints the USAGE banner instead — a
+      #     silently wrong start, which is why the version pin and the
+      #     symlink are one change.
+      #
+      # `haap.audit.security` is a tracing target emitted only by the
+      # binary. That matters: the obvious needle, "unseal-orch", ALSO
+      # appears in docker's own "no such file" error, because the failing
+      # entrypoint PATH contains it — so an image with no symlink at all
+      # passed a draft of this check. Caught by running the check against
+      # a known-bad image rather than by rereading it.
+      - name: Smoke test — the image executes and the orchestrator role dispatches
+        shell: bash
+        run: |
+          set -uo pipefail
+          IMG="ghcr.io/hawcx/hx-agent-sdk:${{ github.ref_name }}-${{ matrix.arch_suffix }}"
+
+          # 1. The image can execute at all, and carries the pin we asked
+          #    for. v0.1.4 failed exactly here: every entrypoint died at
+          #    the dynamic linker on a missing libdbus-1.so.3 (exit 127).
+          ver=$(docker run --rm --entrypoint /usr/local/bin/hawcx-manager "$IMG" --version 2>&1) || true
+          echo "hawcx-manager --version: $ver"
+          if [[ "$ver" != "hawcx-manager ${HAWCX_MANAGER_VERSION}" ]]; then
+            echo "::error::expected 'hawcx-manager ${HAWCX_MANAGER_VERSION}', got '$ver'. A dynamic-linker error here means the image cannot execute at all."
+            exit 1
+          fi
+
+          # 2. argv[0] routes to the orchestrator role.
+          out=$(docker run --rm --entrypoint /usr/local/bin/haap-unseal-orch "$IMG" 2>&1) || true
+          echo "--- haap-unseal-orch output ---"; echo "$out"; echo "-------------------------------"
+          if grep -q 'USAGE' <<<"$out"; then
+            echo "::error::haap-unseal-orch printed the USAGE banner — argv[0] did not route to the unseal-orch role. The pinned hawcx-manager (${HAWCX_MANAGER_VERSION}) predates that route (>= 0.10.21, CAS #434)."
+            exit 1
+          fi
+          if ! grep -q 'haap.audit.security' <<<"$out"; then
+            echo "::error::no haap.audit.security output from haap-unseal-orch — the role never ran. If docker reported 'no such file', the symlink is missing from the image."
+            exit 1
+          fi
+          echo "OK: $IMG executes at ${HAWCX_MANAGER_VERSION} and the unseal-orch role dispatches"
+
   docker_manifest:
     name: docker multi-arch manifest
     runs-on: ubuntu-latest
