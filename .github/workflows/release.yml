@@ -27,6 +27,16 @@ on:
 # resolve to `Role::Direct` and print help instead of running the role —
 # a silently wrong start rather than a spawn error. The pin and the
 # symlink are therefore one change, not two.
+#
+# THIS PIN IS NOW AHEAD OF release-node.yml / release-python.yml (both
+# still 0.8.8), against the "keep in sync" line above. Do NOT close that
+# gap by copying 0.11.8 into them: both ALSO run
+# `cargo install haap-unseal-orch --version "=${HAWCX_MANAGER_VERSION}"`,
+# and the highest published haap-unseal-orch is 0.10.49 — there is no
+# 0.11.8 of that crate, so the install would fail outright. Bumping them
+# means first decoupling that second version (or dropping the separate
+# install in favour of the argv[0] route, which is what #434 concluded).
+# Deliberate divergence, not an oversight.
 env:
   HAWCX_MANAGER_VERSION: "0.11.8"
 
