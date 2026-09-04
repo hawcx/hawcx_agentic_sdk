@@ -38,9 +38,14 @@
 # Phases 3-5 cutover (2026-05-22): this image previously built and shipped
 # 7 individual binaries (haap-authenticator, haap-tqs-precompute,
 # haap-tqs-jit, haap-assembler, haap-eib, haap-supervisor, haap-sdk).
-# It now builds ONE binary, `hawcx-manager`, and installs 7 symlinks
+# It now builds ONE binary, `hawcx-manager`, and installs 8 symlinks
 # under the legacy names so existing supervisor fork/exec call sites
-# continue to work via argv0 dispatch. See
+# continue to work via argv0 dispatch. The 8th, `haap-unseal-orch`
+# (added 2026-09-04), is not a compatibility alias: it is how the
+# supervisor reaches the §35.4 unseal orchestrator, which it resolves
+# as `[orchestrator] orch_bin` → a sibling of its own binary → $PATH,
+# all three of which are /usr/local/bin here. See
+# scripts/check-image-orch-target.py and Dockerfile.fast. See also
 # /hx_agent_canonical_spec/DESIGN-MEMO-MULTICALL-BINARY.md and
 # /hx_agent_canonical_spec/SDK-BUILD-WITH-HAWCX-MANAGER.md.
 #
@@ -107,7 +112,8 @@ RUN mkdir -p /staging/usr/local/bin && \
        /staging/usr/local/bin/hawcx-manager && \
     cd /staging/usr/local/bin && \
     for n in haap-authenticator haap-tqs-precompute haap-tqs-jit \
-             haap-assembler haap-eib haap-supervisor haap-sdk; do \
+             haap-assembler haap-eib haap-supervisor haap-sdk \
+             haap-unseal-orch; do \
         ln -sf hawcx-manager "$n"; \
     done && \
     ls -la /staging/usr/local/bin/
@@ -115,7 +121,7 @@ RUN mkdir -p /staging/usr/local/bin && \
 # Distroless runtime.
 FROM gcr.io/distroless/cc-debian12 AS runtime
 
-# Single COPY brings the binary + 7 symlinks across as one tree.
+# Single COPY brings the binary + 8 symlinks across as one tree.
 # `COPY --from=builder DIR/ DIR/` preserves symlinks per the OCI
 # spec and Docker COPY semantics (verified in Buildx >=0.10).
 COPY --from=builder /staging/usr/local/bin/ /usr/local/bin/

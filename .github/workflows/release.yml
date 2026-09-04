@@ -15,8 +15,30 @@ on:
 # release-node.yml / release-python.yml in sync. The committed Cargo.lock
 # (see ./Cargo.lock) makes `--locked` meaningful for the transitive graph;
 # this `--version =<exact>` pin makes the top-level crate deterministic.
+#
+# 2026-09-04: 0.8.8 → 0.11.8. 0.8.8 dates to the CAS workspace bump of
+# 2026-06-11 and predates hx_agent_client_auth_service #434 (2026-08-30),
+# which is what makes the unseal-orchestrator reachable inside the
+# multi-call image at all: the `haap-unseal-orch` argv[0] route, the
+# `[orchestrator] multicall_bin` field, and the `check_exec_targets` boot
+# pre-flight all landed in that one commit, at workspace 0.10.21. At 0.8.8
+# `dispatch::role_from_argv0` has exactly seven arms and no orchestrator
+# one, so the `haap-unseal-orch` entry added to LEGACY_NAMES below would
+# resolve to `Role::Direct` and print help instead of running the role —
+# a silently wrong start rather than a spawn error. The pin and the
+# symlink are therefore one change, not two.
+#
+# THIS PIN IS NOW AHEAD OF release-node.yml / release-python.yml (both
+# still 0.8.8), against the "keep in sync" line above. Do NOT close that
+# gap by copying 0.11.8 into them: both ALSO run
+# `cargo install haap-unseal-orch --version "=${HAWCX_MANAGER_VERSION}"`,
+# and the highest published haap-unseal-orch is 0.10.49 — there is no
+# 0.11.8 of that crate, so the install would fail outright. Bumping them
+# means first decoupling that second version (or dropping the separate
+# install in favour of the argv[0] route, which is what #434 concluded).
+# Deliberate divergence, not an oversight.
 env:
-  HAWCX_MANAGER_VERSION: "0.8.8"
+  HAWCX_MANAGER_VERSION: "0.11.8"
 
 jobs:
   build:
@@ -95,7 +117,12 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/staging/bin
-          key: hawcx-manager-${{ matrix.target }}-${{ github.ref_name }}
+          # The pinned version is IN the key: a stale entry built for a
+          # previous HAWCX_MANAGER_VERSION can no longer be restored under a
+          # new pin (which would ship the old binary under the new tag).
+          # Derived rather than a hand-bumped suffix so it cannot be
+          # forgotten on the next bump. Cf. release-node.yml's `-bins2`.
+          key: hawcx-manager-${{ env.HAWCX_MANAGER_VERSION }}-${{ matrix.target }}-${{ github.ref_name }}
 
       # INF-01: pin the exact crate version (--version =X.Y.Z) so the
       # binary stamped under this SDK tag is deterministically tied to a
@@ -153,7 +180,12 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/staging/bin
-          key: hawcx-manager-${{ matrix.target }}-${{ github.ref_name }}
+          # The pinned version is IN the key: a stale entry built for a
+          # previous HAWCX_MANAGER_VERSION can no longer be restored under a
+          # new pin (which would ship the old binary under the new tag).
+          # Derived rather than a hand-bumped suffix so it cannot be
+          # forgotten on the next bump. Cf. release-node.yml's `-bins2`.
+          key: hawcx-manager-${{ env.HAWCX_MANAGER_VERSION }}-${{ matrix.target }}-${{ github.ref_name }}
 
       - name: Package distribution tarball
         shell: bash
@@ -168,10 +200,10 @@ jobs:
           # v7.2.5 §35.6 + §39.12 and the Phase 3-5 cutover memo at
           # /hx_agent_canonical_spec/DESIGN-MEMO-MULTICALL-BINARY.md.
           #
-          # 2026-05-22 (Phase 3-5): one real binary + 7 legacy aliases.
+          # 2026-05-22 (Phase 3-5): one real binary + 8 legacy aliases.
           # Unix → symlinks; Windows → .exe copies (symlinks require
           # admin/dev-mode and are not MDM-friendly).
-          LEGACY_NAMES="haap-authenticator haap-tqs-precompute haap-tqs-jit haap-assembler haap-eib haap-supervisor haap-sdk"
+          LEGACY_NAMES="haap-authenticator haap-tqs-precompute haap-tqs-jit haap-assembler haap-eib haap-supervisor haap-sdk haap-unseal-orch"
           BIN_DIR="${RUNNER_TEMP}/staging/bin"
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             cp "$BIN_DIR/hawcx-manager.exe" "$OUT/bin/"
@@ -203,7 +235,7 @@ jobs:
           # Phase 3-5 cutover (2026-05-22): only the real binary
           # (hawcx-manager) is uploaded as the docker-bins artifact.
           # actions/upload-artifact (v7) dereferences symlinks when
-          # zipping; the 7 legacy aliases are regenerated on the docker
+          # zipping; the 8 legacy aliases are regenerated on the docker
           # job runner BEFORE the build context is assembled.
           cp "${RUNNER_TEMP}/staging/bin/hawcx-manager" docker-staging/
           ls -la docker-staging/
@@ -246,14 +278,14 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x ./prebuilt-bins/hawcx-manager
-          # Phase 3-5 cutover (2026-05-22): regenerate the 7 legacy-name
+          # Phase 3-5 cutover (2026-05-22): regenerate the 8 legacy-name
           # symlinks here because actions/upload-artifact (v7) dereferences
           # symlinks when zipping (so they couldn't survive the matrix-job
           # → docker-job artifact roundtrip). Building them here means
           # the Dockerfile.fast `COPY prebuilt-bins/ /usr/local/bin/`
-          # step lands a real binary + 7 symlinks under one COPY, and
+          # step lands a real binary + 8 symlinks under one COPY, and
           # distroless never needs to run a shell.
-          (cd ./prebuilt-bins && for n in haap-authenticator haap-tqs-precompute haap-tqs-jit haap-assembler haap-eib haap-supervisor haap-sdk; do
+          (cd ./prebuilt-bins && for n in haap-authenticator haap-tqs-precompute haap-tqs-jit haap-assembler haap-eib haap-supervisor haap-sdk haap-unseal-orch; do
             ln -sf hawcx-manager "$n"
           done)
           ls -la ./prebuilt-bins/
@@ -284,6 +316,68 @@ jobs:
             ghcr.io/hawcx/hx-agent-sdk:${{ github.ref_name }}-${{ matrix.arch_suffix }}
           cache-from: type=gha,scope=${{ matrix.arch_suffix }}
           cache-to: type=gha,scope=${{ matrix.arch_suffix }},mode=max
+
+      # Actually START the image and check the orchestrator role RUNS.
+      #
+      # This runs here, in the per-arch job, because the runner's own
+      # architecture matches `matrix.platform` — so the image executes
+      # natively with no emulation.
+      #
+      # Why an execution check and not just a file check: v0.1.4 was
+      # measured (2026-09-04) to fail at the dynamic linker on EVERY
+      # entrypoint — `libdbus-1.so.3: cannot open shared object file`,
+      # exit 127, no Rust code reached. A check that only looked for a
+      # filename would have passed that image. This one cannot: a linker
+      # failure prints neither marker below.
+      #
+      # The discriminator, measured both ways on real images:
+      #   - working route (0.11.8 + the symlink): the orchestrator's OWN
+      #     code runs and refuses on its own hardening check —
+      #     "ERROR haap.audit.security: startup hardening failed:
+      #     unseal-orch: running as root (UID 0)". Non-zero exit is
+      #     CORRECT and expected here; the container has no IdP endpoint,
+      #     certs or per-agent uids. Both hardening paths (root, and
+      #     non-root without HAAP_SHARED_INFRA_UIDS) emit that target, so
+      #     the check survives adding a USER to the Dockerfile.
+      #   - no route (0.8.8 + the symlink): argv[0] falls through to
+      #     `Role::Direct` and prints the USAGE banner instead — a
+      #     silently wrong start, which is why the version pin and the
+      #     symlink are one change.
+      #
+      # `haap.audit.security` is a tracing target emitted only by the
+      # binary. That matters: the obvious needle, "unseal-orch", ALSO
+      # appears in docker's own "no such file" error, because the failing
+      # entrypoint PATH contains it — so an image with no symlink at all
+      # passed a draft of this check. Caught by running the check against
+      # a known-bad image rather than by rereading it.
+      - name: Smoke test — the image executes and the orchestrator role dispatches
+        shell: bash
+        run: |
+          set -uo pipefail
+          IMG="ghcr.io/hawcx/hx-agent-sdk:${{ github.ref_name }}-${{ matrix.arch_suffix }}"
+
+          # 1. The image can execute at all, and carries the pin we asked
+          #    for. v0.1.4 failed exactly here: every entrypoint died at
+          #    the dynamic linker on a missing libdbus-1.so.3 (exit 127).
+          ver=$(docker run --rm --entrypoint /usr/local/bin/hawcx-manager "$IMG" --version 2>&1) || true
+          echo "hawcx-manager --version: $ver"
+          if [[ "$ver" != "hawcx-manager ${HAWCX_MANAGER_VERSION}" ]]; then
+            echo "::error::expected 'hawcx-manager ${HAWCX_MANAGER_VERSION}', got '$ver'. A dynamic-linker error here means the image cannot execute at all."
+            exit 1
+          fi
+
+          # 2. argv[0] routes to the orchestrator role.
+          out=$(docker run --rm --entrypoint /usr/local/bin/haap-unseal-orch "$IMG" 2>&1) || true
+          echo "--- haap-unseal-orch output ---"; echo "$out"; echo "-------------------------------"
+          if grep -q 'USAGE' <<<"$out"; then
+            echo "::error::haap-unseal-orch printed the USAGE banner — argv[0] did not route to the unseal-orch role. The pinned hawcx-manager (${HAWCX_MANAGER_VERSION}) predates that route (>= 0.10.21, CAS #434)."
+            exit 1
+          fi
+          if ! grep -q 'haap.audit.security' <<<"$out"; then
+            echo "::error::no haap.audit.security output from haap-unseal-orch — the role never ran. If docker reported 'no such file', the symlink is missing from the image."
+            exit 1
+          fi
+          echo "OK: $IMG executes at ${HAWCX_MANAGER_VERSION} and the unseal-orch role dispatches"
 
   docker_manifest:
     name: docker multi-arch manifest
@@ -376,16 +470,56 @@ jobs:
           cosign sign --recursive \
             "ghcr.io/hawcx/hx-agent-sdk@${{ steps.digest.outputs.digest }}"
 
+  # Read the image that was just pushed and assert the supervisor can
+  # actually reach the unseal orchestrator in it. Both platforms, because
+  # the two arch images are built by separate matrix legs and a symlink
+  # loop that ran on only one of them would be invisible in the manifest.
+  #
+  # This exists because nothing else looks at this image. `bundle_smoke_test`
+  # below runs the docker/bundle compose, which has no hx-agent-sdk service
+  # at all (hx-caa x2, haap-rsv, redis), and ci.yml never touches it — so
+  # v0.1.4 shipped with the orchestrator unreachable and every check green.
+  #
+  # Registry reads, not `docker run`: no daemon needed, and it inspects the
+  # bytes that were actually pushed rather than the build context that was
+  # meant to produce them.
+  image_orch_target:
+    name: image carries an orchestrator exec target
+    runs-on: ubuntu-latest
+    needs: [docker_manifest]
+    permissions:
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Assert haap-unseal-orch is reachable in the image
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            echo "=== linux/$arch ==="
+            ./scripts/check-image-orch-target.py \
+              "ghcr.io/hawcx/hx-agent-sdk:${{ github.ref_name }}" "$arch"
+          done
+
   bundle_smoke_test:
     name: bundle smoke test
     runs-on: ubuntu-latest
     needs: [docker_manifest]
-    # The bundle pulls both the SDK image (just published above) and the
-    # CAA image (published from hx_agent_client_admin_service on its own
-    # release cadence). smoke-test.sh self-skips (exit 0 with explanation)
-    # when the matching hx-caa:${HAAP_VERSION} manifest is absent, so a
-    # red here means a real structural breakage (compose syntax,
-    # entrypoint, env handling) — NOT "we haven't tagged CAA yet."
+    # The bundle pulls the CAA image (published from
+    # hx_agent_client_admin_service on its own release cadence) plus RSV and
+    # redis. smoke-test.sh self-skips (exit 0 with explanation) when the
+    # matching hx-caa:${HAAP_VERSION} manifest is absent, so a red here
+    # means a real structural breakage (compose syntax, entrypoint, env
+    # handling) — NOT "we haven't tagged CAA yet."
+    #
+    # 2026-09-04: this comment used to claim the bundle pulls "both the SDK
+    # image (just published above) and the CAA image". It does not — there
+    # is no hx-agent-sdk service in docker/bundle/docker-compose.yml. That
+    # wrong sentence is a good part of why the SDK image went four releases
+    # with an unreachable orchestrator and nobody saw it; the
+    # `image_orch_target` job above is the coverage it implied.
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -486,7 +620,7 @@ jobs:
 
             **Multi-call binary** (Phase 3-5 cutover, 2026-05-22): the
             tarball / image now ships ONE real binary, `hawcx-manager`,
-            with 7 legacy-name symlinks (Unix) or .exe copies (Windows)
+            with 8 legacy-name symlinks (Unix) or .exe copies (Windows)
             that dispatch by argv[0] to the corresponding role:
 
             - `haap-supervisor` → `hawcx-manager supervisor` (lifecycle, zero crypto material)
@@ -496,6 +630,7 @@ jobs:
             - `haap-assembler` → `hawcx-manager assembler` (single-flight crypto-proxy per §39)
             - `haap-eib` → `hawcx-manager eib` (External Identity Broker, OAuth bearer per §45)
             - `haap-sdk` → `hawcx-manager sdk` (demo / debug CLI)
+            - `haap-unseal-orch` → `hawcx-manager unseal-orch` (§35.4 K_unseal release broker)
 
             Existing customer scripts that invoke `haap-supervisor`,
             `haap-authenticator`, etc. continue to work unchanged — the

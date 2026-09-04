@@ -83,8 +83,10 @@ carve-out):
 
 Phase 3-5 multi-call binary cutover (2026-05-22): the SDK image, npm
 platform packages, and tarballs ship **one real binary**
-(`hawcx-manager`) with 7 legacy-name symlinks (Unix) / .exe copies
-(Windows). The 6 legacy `*-bin` crates remain in
+(`hawcx-manager`) with 8 legacy-name symlinks (Unix) / .exe copies
+(Windows) — the 7 role names plus `haap-unseal-orch`, which is how the
+Supervisor reaches the §35.4 orchestrator and which releases through
+`v0.1.4` omitted. The 6 legacy `*-bin` crates remain in
 `hx_agent_client_auth_service` as deprecated shims; their `[[bin]]`
 targets still build but are NOT included in any release artifact. See
 `hx_agent_canonical_spec/DESIGN-MEMO-MULTICALL-BINARY.md`,
