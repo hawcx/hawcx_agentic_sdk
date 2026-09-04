@@ -17,7 +17,7 @@ pipeline (see the bottom of this section).
 
 Phase 3-5 cutover (2026-05-22): the SDK used to ship 7 standalone
 binaries; it now ships one **multi-call binary** (`hawcx-manager`,
-BusyBox-style argv0 dispatch) with 7 symlinks (Unix) / .exe copies
+BusyBox-style argv0 dispatch) with 8 symlinks (Unix) / .exe copies
 (Windows) under the legacy names. Existing customer scripts continue
 to work unchanged. Tarball size dropped from ~150 MB to ~40 MB on
 Unix targets.
@@ -102,10 +102,13 @@ git clone git@github.com:hawcx/hx_agent_authorizer.git          # private
 cd hx_agent_client_auth_service
 cargo build --release --bin hawcx-manager
 
-# Optional: create legacy-name symlinks for local testing.
+# Legacy-name symlinks. haap-unseal-orch is not optional: the Supervisor
+# resolves the orchestrator as [orchestrator] orch_bin -> a sibling of its
+# own binary -> $PATH, so without this symlink it cannot start.
 target_dir=target/release
 for n in haap-authenticator haap-tqs-precompute haap-tqs-jit \
-         haap-assembler haap-eib haap-supervisor haap-sdk; do
+         haap-assembler haap-eib haap-supervisor haap-sdk \
+         haap-unseal-orch; do
     ln -sf hawcx-manager "$target_dir/$n"
 done
 

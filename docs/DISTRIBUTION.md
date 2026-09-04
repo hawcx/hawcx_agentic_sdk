@@ -33,8 +33,11 @@ The HAAP SDK ships **one real binary** — `hawcx-manager` — packaged into pla
 | Assembler | `hawcx-manager assembler` | §39, §47 — single-flight crypto-proxy |
 | EIB | `hawcx-manager eib` | §45 — External Identity Broker, OAuth bearer |
 | SDK CLI | `hawcx-manager sdk` | debug / operator CLI |
+| Unseal orchestrator | `hawcx-manager unseal-orch` | §35.4 — `K_unseal` release broker |
 
-Seven legacy names (`haap-supervisor`, `haap-authenticator`, `haap-tqs-precompute`, `haap-tqs-jit`, `haap-assembler`, `haap-eib`, `haap-sdk`) are preserved as symlinks (Unix) or `.exe` copies (Windows) so that existing scripts continue to work unchanged.
+Eight legacy names (`haap-supervisor`, `haap-authenticator`, `haap-tqs-precompute`, `haap-tqs-jit`, `haap-assembler`, `haap-eib`, `haap-sdk`, `haap-unseal-orch`) are preserved as symlinks (Unix) or `.exe` copies (Windows) so that existing scripts continue to work unchanged.
+
+`haap-unseal-orch` is the one name that is load-bearing rather than a compatibility alias: the Supervisor resolves the orchestrator's exec target itself — `[orchestrator] orch_bin`, then a sibling of its own binary, then `$PATH` — so the symlink is what makes it reachable in a single-directory install. Releases up to and including `v0.1.4` omitted it, and the Supervisor in those artifacts cannot start.
 
 **Not in this package:** `haap-rsv` (MCP-server-side verifier) ships from a separate image `ghcr.io/hawcx/haap-rsv` built from `hx_agent_authorizer`.
 

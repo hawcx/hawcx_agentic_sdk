@@ -80,11 +80,18 @@ sha256sum -c SHA256SUMS
 ## Distribution contents
 
 Each tarball (`hx-agent-sdk-<tag>-<target>.tar.gz`) ships ONE real binary
-(`hawcx-manager`) plus 7 legacy-name symlinks (Unix) / `.exe` copies
+(`hawcx-manager`) plus 8 legacy-name symlinks (Unix) / `.exe` copies
 (Windows) that dispatch by `argv[0]`: `haap-authenticator`,
 `haap-tqs-precompute`, `haap-tqs-jit`, `haap-assembler`, `haap-eib`,
-`haap-supervisor`, `haap-sdk`. See
+`haap-supervisor`, `haap-sdk`, `haap-unseal-orch`. See
 `hx_agent_canonical_spec/DESIGN-MEMO-MULTICALL-BINARY.md`.
+
+`haap-unseal-orch` is required, not a compatibility alias — the
+Supervisor resolves the §35.4 orchestrator via `[orchestrator] orch_bin`,
+then a sibling of its own binary, then `$PATH`, so without it the daemon
+cannot start. Releases up to and including `v0.1.4` shipped without it;
+`scripts/check-image-orch-target.py` asserts it is present in a published
+image and the `image_orch_target` release job runs that on every tag.
 
 The `haap-rsv` MCP-server-side verifier ships from a **separate** image
 (`ghcr.io/hawcx/haap-rsv`) built out of `hx_agent_authorizer`.
