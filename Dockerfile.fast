@@ -25,6 +25,29 @@
 # See /hx_agent_canonical_spec/DESIGN-MEMO-MULTICALL-BINARY.md for the
 # argv0 dispatch design.
 
+# 2026-09-04: this base has no libdbus, and does not need one — do NOT
+# add one. The published v0.1.4 image died at the dynamic linker on
+# EVERY entrypoint (`libdbus-1.so.3: cannot open shared object file`,
+# exit 127, 8/8, no Rust code ever reached) because it pinned
+# hawcx-manager 0.8.8, which linked the `keyring` crate's
+# secret-service backend. Upstream now takes keyring with
+# `default-features = false` + `linux-native` (the kernel keyutils
+# backend, no dbus), so 0.11.8 — the version release.yml pins as of
+# #112 — links only libc/libgcc_s/libm, all three present here.
+#
+# Measured on real arm64 containers, holding this Dockerfile constant
+# and varying ONLY the binary in prebuilt-bins/:
+#   0.8.8  -> exit 127, libdbus-1.so.3 missing
+#   0.11.8 -> exit 0, `hawcx-manager 0.11.8`
+#
+# So the libdbus symptom is fixed by the version pin, not by adding
+# libraries. Copying libdbus-1.so.3 and its 7 transitive libs
+# (libsystemd, libgcrypt, libcap, liblzma, libzstd, liblz4,
+# libgpg-error) in from a debian stage would add CVE surface for a
+# dependency the shipped binary does not have. release.yml's per-arch
+# `Smoke test` step already owns the drift class: it runs the pushed
+# image and asserts the exact version string, which a linker failure
+# cannot produce.
 FROM gcr.io/distroless/cc-debian12
 
 LABEL org.opencontainers.image.source="https://github.com/hawcx/hawcx_agentic_sdk"
