@@ -44,3 +44,46 @@ COPY prebuilt-bins/ /usr/local/bin/
 # Default entrypoint = haap-supervisor (symlink to hawcx-manager);
 # argv[0] routes to supervisor mode via the multi-call dispatcher.
 ENTRYPOINT ["/usr/local/bin/haap-supervisor"]
+
+# ---------------------------------------------------------------------------
+# There is deliberately NO `USER` line. This is not an oversight, and adding
+# one breaks the image. Read this before "fixing" it.
+#
+# The ENTRYPOINT above is the supervisor, and the supervisor is the
+# PRIVILEGED PARENT by design — it is the process that allocates per-agent
+# OS principals and enters them. It is the one process in the graph that
+# never calls `harden_startup`; every child it spawns does, and none of them
+# run as root. From hx_agent_client_auth_service
+# `crates/haap-proc-hardening/src/lib.rs`: "the root process is the
+# supervisor, which never calls harden_startup. Only its children do, and
+# none of them need root."
+#
+# To spawn an agent it needs, on Linux (`crates/haap-supervisor/src/sandbox/
+# linux.rs`): CAP_SETUID (`setresuid` into the per-agent band uid),
+# CAP_SETGID (shed supplementary groups first), CAP_SYS_ADMIN (`unshare`
+# mnt/ipc) and CAP_CHOWN (hand the agent its own socket). That file states
+# the consequence directly: "Without it `unshare` / `setresuid` return EPERM
+# and the spawn fails closed."
+#
+# `USER` + `docker run --cap-add` does NOT supply those. Measured
+# 2026-09-04, same image and command with only `--user` varying:
+#
+#   root      + --cap-add CHOWN -> CapPrm 0000000000000001, CapEff ...0001
+#   uid 65532 + --cap-add CHOWN -> CapPrm 0000000000000000, CapEff ...0000
+#
+# Docker grants no AMBIENT capabilities and these binaries carry no file
+# capabilities, so a non-root container process keeps the capability only in
+# its BOUNDING set, where it can never be used. A `USER` line here would
+# therefore produce an image that fails closed at the first agent spawn.
+#
+# The non-root deployment already exists and does not need this file:
+# `deploy/agent-pod` runs `runAsNonRoot: true` with a distinct `runAsUser`
+# per container (band 100000-199999, enforced by
+# `deploy/agent-pod/ci/validate_manifest.py`). There the POD applies the
+# uids, config supplies them as `[[agents]] cred_uid`/`llm_uid`, and the
+# supervisor declares the principal instead of entering it — so it needs no
+# capabilities at all. A pod `securityContext.runAsUser` overrides an image
+# `USER` regardless, which is why adding one would buy nothing there either.
+#
+# See docs/SUPERVISOR_OPS.md ("Running the container image") for the
+# operator-facing version of this.

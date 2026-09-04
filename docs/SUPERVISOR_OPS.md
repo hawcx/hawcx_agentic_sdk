@@ -55,6 +55,43 @@ itself, and background session renewal takes over — no external
 delivery script, no manual restart. If no daemon is running, `enroll`
 falls back to printing the bundle for manual delivery.
 
+### Running the container image
+
+`ghcr.io/hawcx/hx-agent-sdk` runs as **root, on purpose**, and carries no
+`USER` line. The supervisor is the privileged parent of the agent graph: it
+allocates each agent's OS principal and enters it. On Linux that needs
+`CAP_SETUID`, `CAP_SETGID`, `CAP_SYS_ADMIN` and `CAP_CHOWN`; without them
+`setresuid`/`unshare` return `EPERM` and the agent spawn **fails closed**.
+Every process the supervisor spawns drops to a non-root principal — the
+supervisor is the only one that does not.
+
+Running the image with `--user` does not make this safer, it makes it
+non-functional: Docker grants no *ambient* capabilities, so a non-root
+container process holds `--cap-add` capabilities only in its bounding set,
+where they cannot be used. The result is an image that starts and then fails
+at the first agent spawn.
+
+**For a non-root deployment, use Kubernetes.** `deploy/agent-pod` runs
+`runAsNonRoot: true` with a distinct `runAsUser` per container (reserved band
+`100000-199999`). There the pod applies the uids and the config supplies them
+as `[[agents]] cred_uid` / `llm_uid`, so the supervisor *declares* each
+principal rather than entering it and needs no capabilities. See
+`deploy/agent-pod/README.md`.
+
+Note that `docker run --entrypoint /usr/local/bin/haap-unseal-orch <image>`
+refusing with
+
+```
+ERROR haap.audit.security: startup hardening failed: unseal-orch: running as
+root (UID 0) — refusing to start (root is not a per-agent principal)
+```
+
+is **expected and correct**. That is a diagnostic invocation which starts the
+orchestrator directly as PID 1; the release smoke test uses it precisely
+because that refusal proves the role dispatched. On the real path the
+supervisor spawns the orchestrator and drops it to a non-root shared-infra
+principal first.
+
 ## Configuration
 
 The Supervisor reads a TOML config file. Path resolution:
