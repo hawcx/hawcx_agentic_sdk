@@ -14,7 +14,7 @@ on:
 # version. Keep in lockstep with release.yml, release-node.yml, CLAUDE.md,
 # and the hawcx-manager workspace version in hx_agent_client_auth_service.
 env:
-  HAWCX_MANAGER_VERSION: "0.8.8"
+  HAWCX_MANAGER_VERSION: "0.11.8"
 
 jobs:
   # Build the platform-specific hawcx-manager binary from the private hawcx
@@ -48,6 +48,7 @@ jobs:
             cross: true
 
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch head
         with:
@@ -99,54 +100,19 @@ jobs:
             --target ${{ matrix.target }} \
             --root "${RUNNER_TEMP}/staging" \
             --locked
-          # haap-unseal-orch: the separate orchestrator binary the supervisor
-          # spawns by name from PATH (graph.rs `Command::new("haap-unseal-orch")`).
-          # Same workspace version as hawcx-manager. Without it bundled, the
-          # supervisor cannot launch and HawcxAgent.enroll() has no pipeline.
-          cargo install haap-unseal-orch \
-            --registry hawcx \
-            --version "=${HAWCX_MANAGER_VERSION}" \
-            --target ${{ matrix.target }} \
-            --root "${RUNNER_TEMP}/staging" \
-            --locked
+          # The orchestrator is a role of this exact multicall binary. A copy
+          # survives npm/ZIP extraction on every platform without symlink support.
+          EXT=""
+          [[ "${{ runner.os }}" == "Windows" ]] && EXT=".exe"
+          cp "${RUNNER_TEMP}/staging/bin/hawcx-manager${EXT}" \
+             "${RUNNER_TEMP}/staging/bin/haap-unseal-orch${EXT}"
 
-      # INF-01: assert the installed binary reports the pinned version.
-      - name: Assert installed hawcx-manager version
+      - name: Verify staged runtime bytes and native orchestrator dispatch
         shell: bash
         run: |
           set -euo pipefail
-          BIN="${RUNNER_TEMP}/staging/bin/hawcx-manager"
-          [[ "${{ runner.os }}" == "Windows" ]] && BIN="${BIN}.exe"
-          if [[ ! -s "$BIN" ]]; then
-            echo "::error::hawcx-manager binary missing or empty at $BIN"
-            exit 1
-          fi
-          # Cross-compiled targets (e.g. aarch64-pc-windows-msvc built on an
-          # x86_64 runner) cannot be executed here. The exact version is
-          # already guaranteed by `cargo install --version="=X.Y.Z" --locked`
-          # above, so assert the artifact exists and move on.
-          if [[ "${{ matrix.cross }}" == "true" ]]; then
-            echo "cross-compiled ${{ matrix.target }}: artifact present ($(wc -c < "$BIN") bytes); skipping exec-based version check"
-            exit 0
-          fi
-          got="$("$BIN" --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?' | head -n1)"
-          echo "installed hawcx-manager version: ${got} (expected ${HAWCX_MANAGER_VERSION})"
-          if [[ "${got}" != "${HAWCX_MANAGER_VERSION}" ]]; then
-            echo "::error::hawcx-manager version mismatch: got '${got}', expected '${HAWCX_MANAGER_VERSION}'"
-            exit 1
-          fi
-
-      - name: Assert haap-unseal-orch artifact present
-        shell: bash
-        run: |
-          set -euo pipefail
-          ORCH="${RUNNER_TEMP}/staging/bin/haap-unseal-orch"
-          [[ "${{ runner.os }}" == "Windows" ]] && ORCH="${ORCH}.exe"
-          if [[ ! -s "$ORCH" ]]; then
-            echo "::error::haap-unseal-orch missing or empty at $ORCH (cargo install failed?)"
-            exit 1
-          fi
-          echo "haap-unseal-orch present ($(wc -c < "$ORCH") bytes)"
+          python scripts/check-runtime-bundle.py "${RUNNER_TEMP}/staging/bin" \
+            --version "${HAWCX_MANAGER_VERSION}" ${{ matrix.cross && '--cross' || '' }}
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -157,7 +123,7 @@ jobs:
             ${{ runner.temp }}/staging/bin/hawcx-manager.exe
             ${{ runner.temp }}/staging/bin/haap-unseal-orch
             ${{ runner.temp }}/staging/bin/haap-unseal-orch.exe
-          if-no-files-found: warn
+          if-no-files-found: error
 
   # Per-platform: stage the binary into python/src/hawcx_haap/_bin/, build a
   # py3-none-any wheel, then retag it to the platform tag so PyPI serves the
@@ -239,22 +205,9 @@ jobs:
         working-directory: python
         shell: bash
         run: |
-          python - "${{ matrix.plat_tag }}" <<'PY'
-          import glob, zipfile, sys
-          plat = sys.argv[1]
-          ext = ".exe" if plat.startswith("win_") else ""
-          whl = glob.glob("dist/*.whl")[0]
-          names = zipfile.ZipFile(whl).namelist()
-          bins = [n for n in names if n.startswith("hawcx_haap/_bin/")]
-          required = {f"hawcx_haap/_bin/hawcx-manager{ext}",
-                      f"hawcx_haap/_bin/haap-unseal-orch{ext}"}
-          missing = required - set(bins)
-          if missing:
-              print("FAIL: missing from", whl, "->", sorted(missing))
-              print("present:", bins)
-              sys.exit(1)
-          print("OK bundled:", sorted(bins))
-          PY
+          set -euo pipefail
+          python ../scripts/check-runtime-archive.py dist/*.whl \
+            --directory src/hawcx_haap/_bin --prefix hawcx_haap/_bin/
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

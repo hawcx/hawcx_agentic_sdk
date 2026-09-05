@@ -14,7 +14,7 @@ on:
 # version. Keep in lockstep with release.yml, release-python.yml, CLAUDE.md,
 # and the hawcx-manager workspace version in hx_agent_client_auth_service.
 env:
-  HAWCX_MANAGER_VERSION: "0.8.8"
+  HAWCX_MANAGER_VERSION: "0.11.8"
 
 jobs:
   build-binary:
@@ -46,6 +46,7 @@ jobs:
             cross: true
 
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # ── Cache key resolution ────────────────────────────────────────────────
       # For tag pushes  : key = "node-v0.1.0-alpha.12"  (the tag name)
       # For workflow_dispatch: key = the `version` input
@@ -63,15 +64,13 @@ jobs:
       # ── Binary cache restore ────────────────────────────────────────────────
       # Exact-match only — no restore-keys fallback so a stale binary from a
       # prior version is never silently reused for a new release.
-      # The `-bins2` suffix bumps the cache layout: caches now hold BOTH
-      # hawcx-manager and haap-unseal-orch, so old manager-only entries must
-      # not be reused (they would yield an artifact missing the orchestrator).
+      # The multicall layout and runtime pin invalidate prior separate-binary caches.
       - name: Restore cached hawcx-manager binary
         id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/staging/bin
-          key: hawcx-manager-bins2-${{ matrix.target }}-${{ steps.ver.outputs.key }}
+          key: hawcx-manager-multicall-${{ env.HAWCX_MANAGER_VERSION }}-${{ matrix.target }}-${{ steps.ver.outputs.key }}
 
       # ── Build (skipped entirely on cache hit) ───────────────────────────────
       - name: Install Rust toolchain
@@ -135,64 +134,19 @@ jobs:
             --root "${RUNNER_TEMP}/staging" \
             --locked \
             --force
-          # haap-unseal-orch: the separate orchestrator binary the supervisor
-          # spawns by name from PATH (graph.rs `Command::new("haap-unseal-orch")`).
-          # Same workspace version as hawcx-manager. Without it co-located with
-          # hawcx-manager in the platform package, the supervisor cannot launch.
-          #
-          # --force for the SAME reason as above: both binaries share the one
-          # `--root`, so a partially-restored staging dir collides identically.
-          # Omitting it here would have reintroduced the exact failure the
-          # manager install was fixed for, on the second binary.
-          cargo install haap-unseal-orch \
-            --registry hawcx \
-            --version "=${HAWCX_MANAGER_VERSION}" \
-            --target ${{ matrix.target }} \
-            --root "${RUNNER_TEMP}/staging" \
-            --locked \
-            --force
+          # The orchestrator is a role of this exact multicall binary. A copy
+          # survives npm/ZIP extraction on every platform without symlink support.
+          EXT=""
+          [[ "${{ runner.os }}" == "Windows" ]] && EXT=".exe"
+          cp "${RUNNER_TEMP}/staging/bin/hawcx-manager${EXT}" \
+             "${RUNNER_TEMP}/staging/bin/haap-unseal-orch${EXT}"
 
-      # INF-01: assert the installed binary reports the pinned version.
-      - name: Assert installed hawcx-manager version
-        if: steps.cache.outputs.cache-hit != 'true'
+      - name: Verify staged runtime bytes and native orchestrator dispatch
         shell: bash
         run: |
           set -euo pipefail
-          BIN="${RUNNER_TEMP}/staging/bin/hawcx-manager"
-          [[ "${{ runner.os }}" == "Windows" ]] && BIN="${BIN}.exe"
-          if [[ ! -s "$BIN" ]]; then
-            echo "::error::hawcx-manager binary missing or empty at $BIN"
-            exit 1
-          fi
-          # Cross-compiled targets (e.g. aarch64-pc-windows-msvc built on an
-          # x86_64 runner) cannot be executed here. The exact version is already
-          # guaranteed by `cargo install --version="=X.Y.Z" --locked` above, so
-          # assert the artifact exists and skip the exec-based check.
-          if [[ "${{ matrix.cross }}" == "true" ]]; then
-            echo "cross-compiled ${{ matrix.target }}: artifact present ($(wc -c < "$BIN") bytes); skipping exec-based version check"
-            exit 0
-          fi
-          got="$("$BIN" --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?' | head -n1)"
-          echo "installed hawcx-manager version: ${got} (expected ${HAWCX_MANAGER_VERSION})"
-          if [[ "${got}" != "${HAWCX_MANAGER_VERSION}" ]]; then
-            echo "::error::hawcx-manager version mismatch: got '${got}', expected '${HAWCX_MANAGER_VERSION}'"
-            exit 1
-          fi
-
-      # Presence check only (NOT execution): cross-compiled targets such as
-      # aarch64-pc-windows-msvc cannot be exec'd on the x86_64 runner.
-      - name: Assert haap-unseal-orch artifact present
-        if: steps.cache.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          ORCH="${RUNNER_TEMP}/staging/bin/haap-unseal-orch"
-          [[ "${{ runner.os }}" == "Windows" ]] && ORCH="${ORCH}.exe"
-          if [[ ! -s "$ORCH" ]]; then
-            echo "::error::haap-unseal-orch missing or empty at $ORCH (cargo install failed?)"
-            exit 1
-          fi
-          echo "haap-unseal-orch present ($(wc -c < "$ORCH") bytes)"
+          python scripts/check-runtime-bundle.py "${RUNNER_TEMP}/staging/bin" \
+            --version "${HAWCX_MANAGER_VERSION}" ${{ matrix.cross && '--cross' || '' }}
 
       # Save only on a successful fresh build — a failed build must not
       # poison the cache for subsequent retries.
@@ -201,7 +155,7 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/staging/bin
-          key: hawcx-manager-bins2-${{ matrix.target }}-${{ steps.ver.outputs.key }}
+          key: hawcx-manager-multicall-${{ env.HAWCX_MANAGER_VERSION }}-${{ matrix.target }}-${{ steps.ver.outputs.key }}
 
       # ── Always upload artifact (whether from cache or fresh build) ──────────
       - name: Upload binary artifact
@@ -213,7 +167,7 @@ jobs:
             ${{ runner.temp }}/staging/bin/hawcx-manager.exe
             ${{ runner.temp }}/staging/bin/haap-unseal-orch
             ${{ runner.temp }}/staging/bin/haap-unseal-orch.exe
-          if-no-files-found: warn
+          if-no-files-found: error
 
   test-matrix:
     name: test node ${{ matrix.node }} on ${{ matrix.os }}
@@ -316,28 +270,15 @@ jobs:
             fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + '\n');
             console.log('Stamped', p, 'to', pkg.version, 'files:', pkg.files);
           "
-      # Verify BOTH binaries are actually in the tarball npm will publish.
-      # `npm pack --dry-run` reports exactly what would be packed, honoring the
-      # `files` allowlist — this catches a missing binary BEFORE we publish an
-      # incomplete package. Presence check only (no execution of the binaries).
+      # Read back the actual tarball and publish that exact inspected artifact.
       - name: Verify binaries are bundled in tarball
         working-directory: node/platforms/${{ matrix.platform_pkg }}
         shell: bash
         run: |
           set -euo pipefail
-          PACKED="$(npm pack --dry-run --json)"
-          echo "$PACKED" | node -e "
-            const data = JSON.parse(require('fs').readFileSync(0, 'utf8'));
-            const files = (data[0].files || []).map(f => f.path);
-            const required = ['${{ matrix.binary_name }}', '${{ matrix.orch_name }}'];
-            const missing = required.filter(r => !files.includes(r));
-            if (missing.length) {
-              console.error('::error::missing from tarball:', missing.join(', '));
-              console.error('present:', files.join(', '));
-              process.exit(1);
-            }
-            console.log('OK bundled in tarball:', required.join(', '));
-          "
+          npm pack --json > "$RUNNER_TEMP/npm-pack.json"
+          python ../../../scripts/check-runtime-archive.py ./*.tgz \
+            --directory . --prefix package/
 
       - name: Publish platform package
         working-directory: node/platforms/${{ matrix.platform_pkg }}
@@ -349,7 +290,7 @@ jobs:
           VER="${{ steps.ver.outputs.version }}"
           if [[ "$VER" == *-* ]]; then DIST_TAG=alpha; else DIST_TAG=latest; fi
           echo "publishing ${VER} under dist-tag: ${DIST_TAG}"
-          out=$(npm publish --provenance --access public --tag "$DIST_TAG" 2>&1) && echo "$out" || {
+          out=$(npm publish ./*.tgz --provenance --access public --tag "$DIST_TAG" 2>&1) && echo "$out" || {
             echo "$out"
             echo "$out" | grep -q "cannot publish over the previously published versions" \
               && echo "Already published — skipping." \

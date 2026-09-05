@@ -181,3 +181,6 @@ Hawcx Proprietary License. See [LICENSE](LICENSE).
 
 See [`docs/clean_slate_rebuild_closure_2026-06-01.md`](docs/clean_slate_rebuild_closure_2026-06-01.md)
 for the full closure breakdown.
+
+Runtime distribution pins, platform coverage and candidate gates are recorded in
+[the runtime channel matrix](docs/RUNTIME-CHANNELS.md).
