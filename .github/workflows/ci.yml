@@ -11,6 +11,16 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  runtime-packaging:
+    name: runtime channel and artifact checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: python scripts/test_runtime_bundle.py
+
   # INF-04 guard: this repo is release-only. No Rust source may ship in
   # any release artifact, so no tracked `*.rs` or `Cargo.toml`/`Cargo.lock`
   # is permitted OUTSIDE the narrow `scripts/` operator-tooling carve-out

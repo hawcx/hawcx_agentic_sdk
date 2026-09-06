@@ -11,9 +11,8 @@ on:
 # the bundled crate version are decoupled by design, so we pin the crate
 # version explicitly here rather than deriving it from the (independent)
 # git tag. Bump this in lockstep with the hawcx-manager release in
-# hx_agent_client_auth_service (workspace version), and keep CLAUDE.md and
-# release-node.yml / release-python.yml in sync. The committed Cargo.lock
-# (see ./Cargo.lock) makes `--locked` meaningful for the transitive graph;
+# hx_agent_client_auth_service, and keep the three release workflows in sync.
+# The published crate Cargo.lock supplies the locked transitive graph;
 # this `--version =<exact>` pin makes the top-level crate deterministic.
 #
 # 2026-09-04: 0.8.8 → 0.11.8. 0.8.8 dates to the CAS workspace bump of
@@ -28,15 +27,8 @@ on:
 # a silently wrong start rather than a spawn error. The pin and the
 # symlink are therefore one change, not two.
 #
-# THIS PIN IS NOW AHEAD OF release-node.yml / release-python.yml (both
-# still 0.8.8), against the "keep in sync" line above. Do NOT close that
-# gap by copying 0.11.8 into them: both ALSO run
-# `cargo install haap-unseal-orch --version "=${HAWCX_MANAGER_VERSION}"`,
-# and the highest published haap-unseal-orch is 0.10.49 — there is no
-# 0.11.8 of that crate, so the install would fail outright. Bumping them
-# means first decoupling that second version (or dropping the separate
-# install in favour of the argv[0] route, which is what #434 concluded).
-# Deliberate divergence, not an oversight.
+# All three channels use this published baseline and multicall orchestrator.
+# scripts/test_runtime_bundle.py guards pin and target drift in PR CI.
 env:
   HAWCX_MANAGER_VERSION: "0.11.8"
 
@@ -216,6 +208,8 @@ jobs:
               ln -sf hawcx-manager "$n"
             done)
           fi
+          python scripts/check-runtime-bundle.py "$OUT/bin" \
+            --version "${HAWCX_MANAGER_VERSION}" ${{ matrix.cross && '--cross' || '' }}
           cp README.md "$OUT/" 2>/dev/null || true
           cp -r docs "$OUT/" 2>/dev/null || true
           tar -czf "dist/$OUT.tar.gz" "$OUT"

@@ -6,6 +6,16 @@ versions track each language surface independently (Rust crate
 versions in `Cargo.toml`, Node version in `node/package.json`, Python
 version in `python/pyproject.toml`).
 
+## Unreleased — runtime distribution
+
+- Align npm, PyPI and image/tarball channels on the already published
+  `hawcx-manager` 0.11.8. Package its orchestrator role under a second filename;
+  no independently versioned `haap-unseal-orch` install remains.
+- Check native role dispatch before packaging, including restored cache entries.
+  Compare actual npm tarball and Python wheel runtime bytes before publication.
+- This baseline is not the pending UKG custody candidate. See
+  [runtime channel matrix](docs/RUNTIME-CHANNELS.md) for remaining acceptance.
+
 ## [0.1.6] - unreleased (Python surface only)
 
 `python/pyproject.toml` is bumped to `0.1.6`; nothing is published until a
