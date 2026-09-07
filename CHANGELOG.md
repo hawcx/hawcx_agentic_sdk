@@ -6,6 +6,15 @@ versions track each language surface independently (Rust crate
 versions in `Cargo.toml`, Node version in `node/package.json`, Python
 version in `python/pyproject.toml`).
 
+## [0.1.9] - unreleased (Python surface only)
+
+- Add a bounded source-only CAA ZIP-to-zipapp builder. It never executes uploaded
+  source/build hooks or resolves dependencies, vendors the trusted SDK runtime
+  offline, and returns deterministic executable identity plus SDK provenance.
+- Keep remote source packaging separate from the existing trusted-local bundle
+  command. Reject unsafe archives, unsupported native/bytecode dependencies and
+  output overwrite. Repository signing/finalization remains CAA's responsibility.
+
 ## Unreleased — runtime distribution
 
 - Align npm, PyPI and image/tarball channels on the already published

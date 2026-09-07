@@ -322,6 +322,58 @@ gate; the RSV still enforces the tool-call mandate (ADR-0048 D48-6).
   exercise the Unix path only. Windows is exercised via unit tests of the
   framing layer.
 
+## Source-only CAA packaging (Python 0.1.9)
+
+CAA remote build jobs use a separate API from the trusted-local `hawcx bundle`
+command:
+
+```python
+from pathlib import Path
+from hawcx_haap.source_bundle import build_source_bundle
+
+result = build_source_bundle(Path("source.zip"), Path("agent.pyz"))
+# result.workload_digest == "sha256:<hash of exact executable bytes>"
+```
+
+The equivalent machine-readable CLI is:
+
+```sh
+python3 -I -m hawcx_haap.source_bundle source.zip --output agent.pyz
+```
+
+Use a trusted installed interpreter/package, fixed argv, a cleared environment
+and CAA-owned private paths. Never use uploaded `PYTHONPATH` or invoke a shell.
+The ZIP contains runtime project files at its root. Include `__main__.py`, or
+pass `--main package.module:function` for an undecorated top-level function with
+no required arguments. The output refuses overwrite and runs without additional
+arguments on POSIX. A trusted Python interpreter is still required; it is outside
+the measured zipapp. Windows requires an independently verified launcher profile.
+
+The builder never executes uploaded code, setup hooks, pip, requirement files or
+network resolution. It parses Python 3.10 syntax and rejects statically missing
+imports. Upload pure-Python dependencies as source; arbitrary LangChain/CrewAI
+closures and compiled extensions are unsupported. Omit development test trees
+that import unvendored test tools. Dynamic imports, newer standard-library APIs
+and actual HAAP behavior still require runtime acceptance: packaging success is
+not a compatibility or tenant end-to-end verdict. Bare `.pyc` files are refused.
+
+Input is limited to 32 MiB ZIP/expanded bytes, 1,024 entries, 8 MiB per file and
+1 MiB central-directory metadata. Only regular UTF-8 source/text files with
+bounded portable relative paths are accepted. Symlinks, bytecode, native
+extensions, duplicate/case-colliding paths, encrypted archives, ZIP64 end records,
+multidisk archives and SDK/standard-library namespace replacements are rejected. CAA must run this
+bounded worker without custody/signing/OAuth credentials and apply job quotas.
+
+The fixed `hawcx_haap` runtime closure is vendored offline. The result and embedded
+`_hawcx_build.json` include its SDK version, raw 64-hex digest and declared minimum
+Python version. The closure digest hashes sorted member names/content, each as
+`u32be(name length) || UTF-8 name || u64be(content length) || content`, including
+the synthetic SDK `METADATA`. This is build provenance, not a signature or a
+replacement for the canonical repository record. Human metadata stays in the
+CAA-generated canonical record; changing a description must change that record's
+identity without rewriting executable bytes. CAA remeasures the output before
+finalizing and signing the record through the shared measurement contract.
+
 ## License
 
 Hawcx Proprietary License. See [LICENSE](../LICENSE).
