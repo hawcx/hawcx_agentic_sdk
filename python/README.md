@@ -366,7 +366,10 @@ bounded worker without custody/signing/OAuth credentials and apply job quotas.
 
 The fixed `hawcx_haap` runtime closure is vendored offline. The result and embedded
 `_hawcx_build.json` include its SDK version, raw 64-hex digest and declared minimum
-Python version. The closure digest hashes sorted member names/content, each as
+Python version. That version declares the minimum supported SDK profile; AST
+syntax checks and the builder host's stdlib names do not prove that uploaded code
+uses only APIs available in Python 3.10. The closure digest hashes sorted member
+names/content, each as
 `u32be(name length) || UTF-8 name || u64be(content length) || content`, including
 the synthetic SDK `METADATA`. This is build provenance, not a signature or a
 replacement for the canonical repository record. Human metadata stays in the

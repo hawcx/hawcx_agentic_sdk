@@ -152,10 +152,14 @@ class SourceBundleTests(unittest.TestCase):
         for name in bad_names:
             with self.subTest(name=name):
                 info = zipfile.ZipInfo(name)
+                # Windows ZipInfo normalizes backslashes before writing; the
+                # fixture must contain the original hostile bytes on every OS.
+                info.filename = name
                 # ZipInfo remembers NUL truncation only until writing; craft the raw ZIP below.
                 if "\x00" in name:
                     continue
                 source = self.source({"__main__.py": b"print('ok')", info: b"x"})
+                self.assertIn(name.encode("utf-8"), source.read_bytes())
                 with self.assertRaises(BundleError):
                     build_source_bundle(source, self.root / "out.pyz")
                 self.assertFalse((self.root / "out.pyz").exists())
