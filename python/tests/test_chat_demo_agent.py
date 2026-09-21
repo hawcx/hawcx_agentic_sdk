@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import pathlib
 import socket
 import sys
@@ -28,7 +29,7 @@ import threading
 
 import pytest
 
-from hawcx_haap.errors import RequestRejected
+from hawcx_haap.errors import IpcError, RequestRejected
 from hawcx_haap.ipc import read_frame, write_frame
 
 _EXAMPLE = (
@@ -171,3 +172,78 @@ def test_opcodes_match_the_supervisor_wire_contract():
         0x65,
     )
     assert mod.CHAT_FD == 3
+
+
+# ── main(): a failed Assembler connect must not kill the process silently ───
+#
+# The connect happens once, outside the turn loop, the same shape any
+# long-lived agent uses. Before this fix, a failed connect raised out of
+# main() before the loop started: the process died with an unhandled
+# traceback and the chat channel closed with NO error frame at all -- not
+# even a bad one. Any customer agent copying this example inherited that.
+# This drives real main() over a real fd-3 socketpair (dup2'd in, restored
+# after) with HawcxAgent.connect_by_agent_id monkeypatched to fail exactly
+# the way the 2026-09-21 UKG demo failed, and asserts the failure surfaces
+# as a reported turn error instead of a dead process.
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="os.fork() is POSIX-only")
+def test_main_reports_a_failed_connect_as_a_turn_error_not_a_dead_process() -> None:
+    """Runs the real main() in a FORKED child process, not this pytest worker.
+
+    fd 3 has to be manipulated for real (dup2, exactly what the supervisor
+    does at spawn) to prove this, but doing that in-place in the live test
+    runner is NOT safe: pytest's own capture machinery also claims low fd
+    numbers for its stdout/stderr redirection, and the first version of this
+    test -- which dup2'd fd 3 directly in the pytest process and restored it
+    afterward -- corrupted that bookkeeping and crashed pytest's OWN teardown
+    with an unrelated EBADF. Forking gives the fd-3 dance a private fd table
+    that vanishes with the child; the parent (this test) never touches fd 3
+    at all.
+    """
+    manager_end, agent_end = socket.socketpair()
+    stall_message = (
+        "handshake-read to Assembler endpoint '/fake/agent-assembler-0.sock' "
+        "failed (deadline: 30.0s): TimeoutError: timed out"
+    )
+
+    pid = os.fork()
+    if pid == 0:
+        # Child: isolated address space post-fork. Nothing here can affect
+        # the parent test runner's fds or module state. Every path out of
+        # this branch MUST end in os._exit -- falling through would resume
+        # pytest's own test loop duplicated in a second process.
+        try:
+            manager_end.close()
+            os.dup2(agent_end.fileno(), mod.CHAT_FD)
+            agent_end.close()
+            os.environ["HAAP_AGENT_INSTANCE_ID"] = "test-agent"
+
+            def fake_connect_by_agent_id(*_a, **_kw):
+                raise IpcError(stall_message)
+
+            mod.HawcxAgent.connect_by_agent_id = staticmethod(fake_connect_by_agent_id)
+            rc = mod.main()
+        except BaseException:
+            os._exit(1)
+        os._exit(rc if isinstance(rc, int) else 0)
+
+    # Parent.
+    agent_end.close()
+    write_frame(manager_end, mod.MSG_CHAT_PROMPT, json.dumps({"text": "hi"}).encode())
+    manager_end.settimeout(5)
+    try:
+        msg_type, payload = read_frame(manager_end)
+    finally:
+        manager_end.close()
+        _, status = os.waitpid(pid, 0)
+
+    assert msg_type == mod.MSG_CHAT_ERROR, (
+        f"expected a reported turn error (0x65), got 0x{msg_type:02x} -- "
+        "a connect failure must not silently close the channel"
+    )
+    message = json.loads(payload)["message"]
+    assert stall_message in message, "the connect failure's own diagnosis must reach the operator"
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, (
+        f"main() must return cleanly (0) after the channel closes, not crash: {status=}"
+    )

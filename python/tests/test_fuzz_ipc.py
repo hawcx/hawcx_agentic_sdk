@@ -15,7 +15,12 @@ the classic length-prefix DoS — is asserted here on the Python code itself via
 
 from __future__ import annotations
 
+import os
+import socket
 import struct
+import tempfile
+import threading
+import uuid
 
 import pytest
 from hypothesis import given, settings
@@ -23,7 +28,7 @@ from hypothesis import strategies as st
 from test_prop_ipc import _ByteSock
 
 from hawcx_haap.errors import IpcError
-from hawcx_haap.ipc import MAX_MESSAGE_SIZE, _decode_handshake, read_frame
+from hawcx_haap.ipc import MAX_MESSAGE_SIZE, AssemblerClient, _decode_handshake, read_frame
 
 # Ceiling on any single recv the parser is allowed to request. The 4-byte
 # length prefix plus at most MAX_MESSAGE_SIZE of body. A larger request means a
@@ -108,6 +113,86 @@ def test_fuzz_decode_handshake_defined(payload: bytes) -> None:
     assert 0 <= role <= 0xFF
     # Only the first 9 bytes are consumed; trailing bytes are ignored.
     assert (proto, major, minor, patch, role) == struct.unpack(">HHHHB", payload[:9])
+
+
+# ── AssemblerClient.connect over a real socket: the handshake-READ path ──────
+#
+# The tests above fuzz the byte-level decoders directly. This one fuzzes the
+# live path the 2026-09-21 diagnosability fix touched:
+# `AssemblerClient.connect` reading a handshake reply off a REAL AF_UNIX
+# socket from a peer that sends garbage, truncated, empty, or oversized-claim
+# bytes back. The only acceptable outcomes are (a) a well-formed connect (for
+# the astronomically rare garbage that happens to decode as a valid Assembler
+# handshake) or (b) `IpcError` -- specifically the wrapped
+# `_diagnosable_ipc_error` -- and NEVER a hang or a raw/other exception type
+# escaping to the caller.
+
+
+def _short_socket_dir() -> str:
+    """A short, 0o700 AF_UNIX-safe temp dir, independent of `conftest.py`'s
+    private helper so this file doesn't reach into it -- see that helper's
+    docstring for why a bare mkdtemp() is used over pytest's tmp_path."""
+    d = tempfile.mkdtemp(prefix="hx-fuzz-hs-")
+    os.chmod(d, 0o700)
+    return d
+
+
+def _serve_garbage_reply(server: socket.socket, garbage: bytes) -> None:
+    try:
+        conn, _ = server.accept()
+    except OSError:
+        return
+    try:
+        conn.settimeout(2)
+        # Drain the client's own handshake write (best-effort) so this is
+        # testing the REPLY, not just a refused write.
+        try:
+            length_bytes = conn.recv(4)
+            if len(length_bytes) == 4:
+                msg_len = struct.unpack(">I", length_bytes)[0]
+                if 0 < msg_len <= MAX_MESSAGE_SIZE:
+                    conn.recv(msg_len)
+        except OSError:
+            pass
+        if garbage:
+            conn.sendall(garbage)
+    except OSError:
+        pass
+    finally:
+        conn.close()
+
+
+@settings(max_examples=25, deadline=None)
+@given(garbage=st.binary(max_size=256))
+def test_fuzz_assembler_connect_handshake_reply_never_hangs(garbage: bytes) -> None:
+    """A crashed or malicious Assembler can send ANYTHING back after the
+    client's handshake write -- empty, truncated, a lying oversized length
+    prefix, pure noise. `connect()` must always terminate promptly and the
+    only exception type that escapes is `IpcError`."""
+    socket_dir = _short_socket_dir()
+    socket_path = os.path.join(socket_dir, f"{uuid.uuid4().hex[:8]}.sock")
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(socket_path)
+    server.listen(1)
+    t = threading.Thread(target=_serve_garbage_reply, args=(server, garbage), daemon=True)
+    t.start()
+    try:
+        try:
+            client = AssemblerClient.connect(socket_path, timeout_secs=2.0)
+        except IpcError:
+            pass
+        else:
+            client.close()
+    except Exception as exc:  # pragma: no cover — the assertion IS the failure
+        pytest.fail(f"connect raised {type(exc).__name__} instead of IpcError: {exc}")
+    finally:
+        t.join(timeout=3)
+        assert not t.is_alive(), "server thread never finished — client hung"
+        server.close()
+        try:
+            os.unlink(socket_path)
+        except FileNotFoundError:
+            pass
 
 
 if __name__ == "__main__":  # pragma: no cover

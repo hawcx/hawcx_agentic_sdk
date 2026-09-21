@@ -25,8 +25,10 @@ import struct
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from hawcx_haap.errors import IpcError
 from hawcx_haap.ipc import (
     MAX_MESSAGE_SIZE,
+    _diagnosable_ipc_error,
     encode_frame,
     read_frame,
 )
@@ -86,3 +88,54 @@ def test_encode_read_frame_round_trip_at_max_boundary() -> None:
     got_type, got_payload = read_frame(_ByteSock(encode_frame(0x52, payload)))
     assert got_type == 0x52
     assert got_payload == payload
+
+
+# ── Property: a diagnosable IPC error always names endpoint + op + type ──────
+#
+# The 2026-09-21 UKG demo bug (see ipc.py's _diagnosable_ipc_error docstring)
+# was a bare `str(TimeoutError())` == "timed out" propagating with no
+# endpoint, no operation, no type. This is the invariant that fix has to
+# hold for ANY endpoint string and ANY underlying exception, not just the
+# specific TimeoutError/FileNotFoundError cases test_ipc.py exercises with
+# real sockets -- a stateful/generative counterpart to those examples.
+
+# Endpoint alphabet restricted to characters `repr()` never escapes, so
+# `endpoint in str(wrapped)` is a valid substring check against the `!r`
+# formatting `_diagnosable_ipc_error` uses -- not an artifact of what
+# `repr()` does to quotes or backslashes.
+_PATH_SAFE_TEXT = st.text(
+    alphabet=st.characters(
+        whitelist_categories=("Ll", "Lu", "Nd"), whitelist_characters="/-_.~"
+    ),
+    min_size=1,
+    max_size=80,
+)
+
+
+@settings(max_examples=200)
+@given(
+    endpoint=_PATH_SAFE_TEXT,
+    op=st.sampled_from(["connect", "handshake-read"]),
+    timeout_secs=st.one_of(
+        st.none(), st.floats(min_value=0, max_value=120, allow_nan=False, allow_infinity=False)
+    ),
+    exc=st.sampled_from(
+        [
+            TimeoutError("timed out"),
+            FileNotFoundError(2, "No such file or directory"),
+            ConnectionRefusedError(61, "Connection refused"),
+            IpcError("IPC peer closed connection mid-message"),
+        ]
+    ),
+)
+def test_prop_diagnosable_ipc_error_always_names_endpoint_op_and_type(
+    endpoint: str, op: str, timeout_secs: float | None, exc: Exception
+) -> None:
+    wrapped = _diagnosable_ipc_error(endpoint, op, timeout_secs, exc)
+    assert isinstance(wrapped, IpcError)
+    msg = str(wrapped)
+    assert endpoint in msg, "endpoint must survive into the message"
+    assert op in msg, "operation must survive into the message"
+    assert type(exc).__name__ in msg, "underlying exception TYPE must survive into the message"
+    # And never just the underlying str() alone -- the exact shape of the bug.
+    assert msg != str(exc)

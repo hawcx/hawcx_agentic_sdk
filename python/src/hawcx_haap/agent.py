@@ -22,6 +22,14 @@ from typing import Any
 
 from hawcx_haap.errors import HawcxError
 from hawcx_haap.ipc import (
+    # `connect`/`connect_by_agent_id` used to hardcode their own `5.0`
+    # default here, independent of ipc.py's `_DEFAULT_IPC_TIMEOUT` (30s,
+    # chosen specifically to cover the supervisor's agent-before-Assembler
+    # spawn race). That second default shadowed the first for every caller
+    # that takes the default -- including `mcp_caller.get_agent`, the glue
+    # layer the supervisor's spawned agent actually goes through -- so the
+    # 30s decision never took effect where it mattered. One constant now.
+    _DEFAULT_IPC_TIMEOUT,
     AssemblerClient,
     TokenTransport,
     ToolCallRequest,
@@ -117,7 +125,7 @@ class HawcxAgent:
         endpoint: str,
         *,
         principal_allowlist: list[str],
-        timeout_secs: float | None = 5.0,
+        timeout_secs: float | None = _DEFAULT_IPC_TIMEOUT,
     ) -> HawcxAgent:
         """Open the agent IPC socket at ``endpoint`` and complete the handshake.
 
@@ -136,7 +144,7 @@ class HawcxAgent:
         principal_allowlist: list[str],
         index: int = 0,
         ipc_dir: Path | None = None,
-        timeout_secs: float | None = 5.0,
+        timeout_secs: float | None = _DEFAULT_IPC_TIMEOUT,
     ) -> HawcxAgent:
         """Resolve the conventional agent-Assembler endpoint, then ``connect``."""
         return cls.connect(
@@ -156,7 +164,7 @@ class HawcxAgent:
         authenticator_socket: str | None = None,
         ipc_dir: Path | None = None,
         index: int = 0,
-        connect_timeout_secs: float | None = 5.0,
+        connect_timeout_secs: float | None = _DEFAULT_IPC_TIMEOUT,
         enroll_timeout_secs: float | None = 30.0,
     ) -> HawcxAgent:
         """Acquire an agent identity at runtime and connect to its Assembler.

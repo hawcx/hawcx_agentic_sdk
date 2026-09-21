@@ -328,3 +328,38 @@ def test_tool_call_request_to_wire_includes_acting_for_user_when_set() -> None:
     )
     wire = req.to_wire()
     assert wire["acting_for_user"] == "carol"
+
+
+# ── Diagnosability: one default timeout, not two ─────────────────────────────
+#
+# `HawcxAgent.connect` / `connect_by_agent_id` / `enroll` used to hardcode
+# their own `5.0` default, independent of `ipc._DEFAULT_IPC_TIMEOUT` (30s,
+# chosen to cover the supervisor's agent-before-Assembler spawn race). That
+# shadowed the 30s decision for every caller that takes the default --
+# including `mcp_caller.get_agent`, the glue layer the supervisor's spawned
+# agent actually goes through. These pin that there is now exactly ONE
+# default, sourced from ipc.py, not two independently-hardcoded numbers that
+# happen (or fail) to agree.
+
+
+def test_connect_default_timeout_matches_ipc_shared_constant() -> None:
+    from hawcx_haap import ipc
+
+    assert HawcxAgent.connect.__kwdefaults__["timeout_secs"] is ipc._DEFAULT_IPC_TIMEOUT
+
+
+def test_connect_by_agent_id_default_timeout_matches_ipc_shared_constant() -> None:
+    from hawcx_haap import ipc
+
+    assert (
+        HawcxAgent.connect_by_agent_id.__kwdefaults__["timeout_secs"]
+        is ipc._DEFAULT_IPC_TIMEOUT
+    )
+
+
+def test_enroll_connect_timeout_matches_ipc_shared_constant() -> None:
+    from hawcx_haap import ipc
+
+    assert (
+        HawcxAgent.enroll.__kwdefaults__["connect_timeout_secs"] is ipc._DEFAULT_IPC_TIMEOUT
+    )
