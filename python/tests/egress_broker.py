@@ -19,6 +19,24 @@ from pathlib import Path
 from typing import Any
 
 
+def selected_httpx_errors() -> tuple[type, ...]:
+    """Transport exception types for whichever httpx lineage ``egress.client()``
+    actually selects.
+
+    ``httpx`` and ``httpx2`` ship *disjoint* exception hierarchies
+    (``httpx2.ConnectError`` is not an ``httpx.HTTPError``), and the shim picks
+    httpx2 first when both are installed. A test that hardcodes one lineage's
+    ``HTTPError`` therefore stops discriminating the moment the other one is the
+    default — it reports an ordinary transport failure as an escaped undefined
+    exception. Ask the shim which lineage it chose instead of assuming.
+    """
+    import importlib
+
+    from hawcx_haap import egress
+
+    return (importlib.import_module(egress.flavor()).HTTPError,)
+
+
 def recv_exact(conn: socket.socket, n: int) -> bytes:
     buf = bytearray()
     while len(buf) < n:

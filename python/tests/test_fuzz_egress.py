@@ -23,7 +23,11 @@ from hypothesis import strategies as st
 
 pytest.importorskip("httpx")
 import httpx  # noqa: E402
-from egress_broker import FakeBroker, scripted_handler  # noqa: E402
+from egress_broker import (  # noqa: E402
+    FakeBroker,
+    scripted_handler,
+    selected_httpx_errors,
+)
 
 from hawcx_haap import egress  # noqa: E402
 from hawcx_haap.errors import HawcxError  # noqa: E402
@@ -33,7 +37,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 # The only exception families permitted to cross the shim boundary.
-_DEFINED = (HawcxError, httpx.HTTPError)
+# Flavor-aware: see selected_httpx_errors(). Hardcoding httpx.HTTPError here
+# silently stops discriminating when httpx2 is the selected lineage.
+_DEFINED = (HawcxError, httpx.HTTPError, *selected_httpx_errors())
 
 _GOOD_METHOD = b"\x05\x00"
 
