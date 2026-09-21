@@ -281,19 +281,52 @@ hands the connected stream to `httpx` for **end-to-end** TLS + HTTP. The
 broker never terminates TLS and neither does the shim — your certificate
 verification is unchanged, and the broker holds no plaintext.
 
-`httpx` is an **optional** extra (the SDK core stays zero-dependency):
+The HTTP client is an **optional** extra (the SDK core stays zero-dependency).
+Two API-identical `httpx` lineages exist — install the one your client needs:
 
 ```bash
-pip install 'hawcx-haap[httpx]'
+pip install 'hawcx-haap[httpx2]'    # Anthropic SDK 1.x and other httpx2 clients
+pip install 'hawcx-haap[httpx]'     # the original httpx lineage
+pip install 'hawcx-haap[requests]'  # requests_session(), for google-auth et al
 ```
 
-Opt in with one line — `client()` returns a ready-to-use `httpx.Client`:
+Opt in with one line — `client()` returns a ready-to-use client:
 
 ```python
 import hawcx_haap.egress as egress
 
 with egress.client() as http:                 # async_client() for asyncio
     r = http.get("https://api.example.com/v1/models")
+```
+
+**Which lineage you get.** The Anthropic SDK 1.x requires `httpx2` and rejects
+an old-`httpx` client at construction, so `client()` prefers `httpx2` when both
+are installed and the object it returns is what `anthropic` expects:
+
+```python
+import anthropic, hawcx_haap.egress as egress
+
+client = anthropic.Anthropic(http_client=egress.client())
+```
+
+`egress.flavor()` reports which lineage was selected, and `client(flavor="httpx")`
+pins the other one for calls that need it — this package deliberately installs no
+process-wide alias. Note the two lineages ship *disjoint* exception hierarchies:
+an `httpx2` client raises `httpx2.HTTPError`, not `httpx.HTTPError`. The shim's
+own `Egress*` errors are unaffected either way.
+
+### `requests`-based clients (Google libraries)
+
+The Google client libraries build on `requests` (google-auth's
+`AuthorizedSession`), which the httpx transport cannot carry.
+`requests_session()` brokers those under the identical no-fallback contract:
+
+```python
+from google.auth.transport.requests import AuthorizedSession
+import hawcx_haap.egress as egress
+
+session = AuthorizedSession(creds)
+session.mount("https://", egress.requests_session().get_adapter("https://"))
 ```
 
 The broker socket is discovered from `$HAAP_EGRESS_BROKER_SOCKET`, or from

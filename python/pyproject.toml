@@ -43,7 +43,10 @@ dev = [
     "ruff>=0.4",
     "build>=1.2",
     "wheel>=0.43",
-    "httpx>=0.27.0",       # egress transport tests
+    "httpx>=0.27.0",       # egress transport tests: the original lineage
+    "httpx2>=2.0.0",       # egress transport tests: the Anthropic-SDK-1.x lineage
+    "requests>=2.31",      # egress requests_session tests (google-auth shape)
+    "anthropic>=1.7",      # asserts client() returns a type the real SDK accepts
     "cryptography>=41",    # in-memory self-signed cert for the TLS-through-tunnel test
     "hypothesis>=6",       # Layer-3 property + Layer-4 generative fuzz (test_prop_*/test_fuzz_*)
 ]
@@ -52,8 +55,26 @@ crewai = [
 ]
 # Optional egress transport (ADR-0048): route agent HTTP through the per-agent
 # SOCKS5-over-UDS broker. Off by default — the SDK core stays zero-dependency.
+#
+# Two API-identical httpx lineages exist and the shim supports both. Install the
+# one your HTTP client needs; httpx2 wins when both are present (see
+# hawcx_haap.egress.flavor).
 httpx = [
     "httpx>=0.27.0",
+]
+# The Anthropic SDK 1.x requires httpx2 and rejects an old-httpx client at
+# construction, so `anthropic.Anthropic(http_client=egress.client())` needs this.
+httpx2 = [
+    "httpx2>=2.0.0",
+]
+# requests_session(), for the requests-based Google client libraries
+# (google-auth's AuthorizedSession), which the httpx transport cannot carry.
+requests = [
+    "requests>=2.31",
+    # requests itself still allows urllib3 1.x, but the brokered pool classes
+    # import urllib3.util.timeout._DEFAULT_TIMEOUT, which only exists on 2.x.
+    # Pin it here so pip resolves it rather than failing at first connect.
+    "urllib3>=2",
 ]
 
 [project.urls]

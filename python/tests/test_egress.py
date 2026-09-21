@@ -19,6 +19,16 @@ import pytest
 
 pytest.importorskip("httpx")
 import httpx  # noqa: E402
+from egress_broker import (  # noqa: E402
+    FakeBroker,
+    TLSServer,
+    close_no_reply_handler,
+    make_localhost_cert,
+    relay_handler,
+    reset_no_reply_handler,
+    scripted_handler,
+    selected_httpx_errors,
+)
 
 from hawcx_haap import egress  # noqa: E402
 from hawcx_haap.egress import _connect_request  # noqa: E402
@@ -29,15 +39,6 @@ from hawcx_haap.errors import (  # noqa: E402
     EgressPolicyDenied,
     EgressProtocolError,
     HawcxError,
-)
-from egress_broker import (  # noqa: E402
-    FakeBroker,
-    TLSServer,
-    close_no_reply_handler,
-    make_localhost_cert,
-    relay_handler,
-    reset_no_reply_handler,
-    scripted_handler,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -244,7 +245,9 @@ def _captured_hosts(broker: FakeBroker) -> set[str]:
 
 # ── Layer 4: Boundary-fuzz (mandatory) ─────────────────────────────────────────
 
-_DEFINED = (HawcxError, httpx.HTTPError)
+# Flavor-aware: see selected_httpx_errors(). Hardcoding httpx.HTTPError here
+# silently stops discriminating when httpx2 is the selected lineage.
+_DEFINED = (HawcxError, httpx.HTTPError, *selected_httpx_errors())
 
 
 def _fuzz_case_ok(

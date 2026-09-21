@@ -18,9 +18,19 @@ Opt in with one line::
     with egress.client() as http:          # a configured httpx.Client
         r = http.get("https://api.example.com/v1/models")
 
-httpx is an **optional** extra (the SDK core is zero-dependency)::
+The HTTP client is an **optional** extra (the SDK core is zero-dependency).
+Two API-identical httpx lineages exist; install whichever your client needs::
 
-    pip install 'hawcx-haap[httpx]'
+    pip install 'hawcx-haap[httpx2]'    # Anthropic SDK 1.x and other httpx2 clients
+    pip install 'hawcx-haap[httpx]'     # the original httpx lineage
+    pip install 'hawcx-haap[requests]'  # requests_session(), for google-auth et al
+
+When **both** httpx lineages are installed, ``httpx2`` wins; see
+:func:`flavor` for why, how to tell which you got, and how to override it.
+
+The Google client libraries are ``requests``-based and the httpx transport
+cannot carry them, so :func:`requests_session` brokers those under the same
+no-fallback contract.
 
 Per ADR-0048 the shim always sends ``ATYP=0x03`` (DOMAINNAME) and never
 resolves DNS locally: the broker resolves the name the agent actually asked
@@ -31,10 +41,12 @@ not the shim, decides on them.
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
 import os
 import socket
 import stat
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from hawcx_haap.errors import (
     EgressConfigError,
@@ -44,15 +56,14 @@ from hawcx_haap.errors import (
     EgressProtocolError,
 )
 
-if TYPE_CHECKING:  # pragma: no cover - typing only, never imported at runtime
-    import httpx
-
 # EgressHTTPTransport / EgressAsyncHTTPTransport are provided lazily via
 # module __getattr__ (they need the optional httpx extra), so they are not
 # listed here — `egress.EgressHTTPTransport` still resolves.
 __all__ = [
     "client",
     "async_client",
+    "flavor",
+    "requests_session",
     "resolve_socket_path",
 ]
 
@@ -325,51 +336,101 @@ async def _socks5_connect_async(
     return stream
 
 
-# ── httpx transport wiring (lazy: needs the optional httpx extra) ────────────
+# ── httpx / httpx2 transport wiring (lazy: needs an optional extra) ─────────
 
-_BUILT: tuple[type, type] | None = None
+# Two httpx lineages ship the same public API and a process may hold both:
+#
+#   httpx2 + httpcore2 — what the Anthropic SDK 1.x requires. It rejects an
+#                        old-httpx client at construction with a TypeError.
+#   httpx  + httpcore  — the original lineage, still what most apps carry.
+#
+# Measured on 2026-09-21 against httpx2 2.13.0 / httpcore2 2.13.0: the transport
+# seam (`Transport._pool._network_backend`), the `HTTPTransport.__init__`
+# signature and the `_backends.{sync,anyio}.{SyncStream,AnyIOStream}` module
+# paths are identical in both lineages. So the only real difference is which
+# name gets imported, and one parameterised build covers both.
+_FLAVOR_HTTPCORE = {"httpx2": "httpcore2", "httpx": "httpcore"}
+
+# PRECEDENCE when BOTH are installed: httpx2 wins. httpx2 is present only
+# because something in the process explicitly asked for it (the Anthropic SDK
+# is the whole reason this shim needs it), whereas plain httpx is near
+# ubiquitous and its presence says nothing about what the caller wants. Pass
+# `flavor="httpx"` to override per call — this package deliberately installs no
+# process-wide alias, because that is an application-level switch.
+_FLAVOR_ORDER = ("httpx2", "httpx")
+
+_BUILT: dict[str, tuple[type, type]] = {}
 
 
-def _require_httpx() -> Any:
-    try:
-        import httpx
-    except ModuleNotFoundError as exc:
+def _select_flavor(name: str | None = None) -> str:
+    """Resolve a flavor name, or raise. See :func:`flavor` for the contract."""
+    if name is not None and name not in _FLAVOR_HTTPCORE:
         raise EgressConfigError(
-            "the egress transport requires httpx: pip install 'hawcx-haap[httpx]'"
-        ) from exc
-    return httpx
+            f"unknown egress httpx flavor {name!r}; expected one of {sorted(_FLAVOR_HTTPCORE)}"
+        )
+    for candidate in ((name,) if name else _FLAVOR_ORDER):
+        # find_spec, not import: it answers "is this installed" without
+        # executing the package, so a *broken* httpx2 install fails loudly in
+        # _build_transports rather than silently demoting us to plain httpx.
+        if importlib.util.find_spec(candidate) is not None:
+            return candidate
+    raise EgressConfigError(
+        f"the egress transport requires {name or 'httpx2 or httpx'}: "
+        "pip install 'hawcx-haap[httpx2]' (for the Anthropic SDK 1.x and other "
+        "httpx2-based clients) or 'hawcx-haap[httpx]'"
+    )
 
 
-def _build_transports() -> tuple[type, type]:
-    """Define the httpx transport subclasses lazily, so importing this module
-    does not require httpx. Cached after first call."""
-    global _BUILT
-    if _BUILT is not None:
-        return _BUILT
+def flavor(name: str | None = None) -> str:
+    """Return the httpx flavor this shim will use: ``"httpx2"`` or ``"httpx"``.
 
-    httpx = _require_httpx()
+    The object returned by :func:`client` is an instance of *that* module's
+    ``Client``, so this is how a caller tells which lineage they got without
+    importing both — and why ``anthropic.Anthropic(http_client=...)`` now works:
+    it accepts only an ``httpx2.Client``.
+
+    With ``name`` given, checks that one specific flavor is installed. With no
+    argument, resolves by precedence (``httpx2`` before ``httpx``). Raises
+    :class:`EgressConfigError` — never ``ImportError`` — when nothing usable is
+    installed, so the failure reads the same as every other egress
+    misconfiguration.
+    """
+    return _select_flavor(name)
+
+
+def _build_transports(flavor_name: str) -> tuple[type, type]:
+    """Define the transport subclasses for one flavor lazily, so importing this
+    module does not require either lineage. Cached per flavor."""
+    cached = _BUILT.get(flavor_name)
+    if cached is not None:
+        return cached
+
+    core_name = _FLAVOR_HTTPCORE[flavor_name]
     try:
-        import httpcore
-        from httpcore._backends.anyio import AnyIOStream
-        from httpcore._backends.sync import SyncStream
-    except (ModuleNotFoundError, ImportError) as exc:  # fail loud, never silently direct
+        httpx = importlib.import_module(flavor_name)
+        httpcore = importlib.import_module(core_name)
+        sync_stream = importlib.import_module(f"{core_name}._backends.sync").SyncStream
+        anyio_stream = importlib.import_module(f"{core_name}._backends.anyio").AnyIOStream
+    # AttributeError is in here on purpose: a renamed stream class must fail
+    # loud exactly like a missing module, never silently direct.
+    except (ModuleNotFoundError, ImportError, AttributeError) as exc:
         raise EgressConfigError(
-            f"egress transport could not load the httpcore network-backend seam: {exc}. "
-            "Requires httpcore>=1.0 (installed with httpx)."
+            f"egress transport could not load the {core_name} network-backend seam: {exc}. "
+            f"Requires {core_name} (installed with {flavor_name})."
         ) from exc
 
-    class _SyncBackend(httpcore.NetworkBackend):
+    class _SyncBackend(httpcore.NetworkBackend):  # type: ignore[misc,name-defined]
         def __init__(self, socket_path: str) -> None:
             self._socket_path = socket_path
 
         def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
             sock = _socks5_connect_sync(self._socket_path, host, port, timeout)
-            return SyncStream(sock)
+            return sync_stream(sock)
 
         def connect_unix_socket(self, path, timeout=None, socket_options=None):  # pragma: no cover
             raise EgressProtocolError("egress transport connects only via the broker CONNECT path")
 
-    class _AsyncBackend(httpcore.AsyncNetworkBackend):
+    class _AsyncBackend(httpcore.AsyncNetworkBackend):  # type: ignore[misc,name-defined]
         def __init__(self, socket_path: str) -> None:
             self._socket_path = socket_path
 
@@ -377,7 +438,7 @@ def _build_transports() -> tuple[type, type]:
             self, host, port, timeout=None, local_address=None, socket_options=None
         ):
             stream = await _socks5_connect_async(self._socket_path, host, port, timeout)
-            return AnyIOStream(stream)
+            return anyio_stream(stream)
 
         async def connect_unix_socket(
             self, path, timeout=None, socket_options=None
@@ -407,16 +468,16 @@ def _build_transports() -> tuple[type, type]:
             )
             self._pool._network_backend = _AsyncBackend(socket_path)
 
-    _BUILT = (EgressHTTPTransport, EgressAsyncHTTPTransport)
-    return _BUILT
+    _BUILT[flavor_name] = (EgressHTTPTransport, EgressAsyncHTTPTransport)
+    return _BUILT[flavor_name]
 
 
 def __getattr__(name: str) -> Any:
     # Expose the transport classes as module attributes without importing httpx
     # at module load. `from hawcx_haap.egress import EgressHTTPTransport` works
-    # iff the httpx extra is installed.
+    # iff one of the httpx extras is installed, and follows the same precedence.
     if name in ("EgressHTTPTransport", "EgressAsyncHTTPTransport"):
-        sync_cls, async_cls = _build_transports()
+        sync_cls, async_cls = _build_transports(_select_flavor())
         return sync_cls if name == "EgressHTTPTransport" else async_cls
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
@@ -426,14 +487,23 @@ def client(
     socket_path: str | None = None,
     verify: Any = True,
     http2: bool = False,
+    flavor: str | None = None,
     **client_kwargs: Any,
-) -> httpx.Client:
-    """Return an ``httpx.Client`` whose outbound traffic tunnels through the
-    per-agent egress broker. ``verify`` is forwarded to the transport unchanged
-    (TLS is not terminated by the broker or the shim). Extra kwargs go to the
-    ``httpx.Client`` (timeout, headers, ...)."""
-    httpx = _require_httpx()
-    sync_cls, _ = _build_transports()
+) -> Any:
+    """Return an ``httpx2.Client`` (or ``httpx.Client``) whose outbound traffic
+    tunnels through the per-agent egress broker.
+
+    ``verify`` is forwarded to the transport unchanged (TLS is not terminated by
+    the broker or the shim). ``flavor`` pins the lineage — see
+    :func:`flavor` for the default precedence and how to tell which you got.
+    Extra kwargs go to the client (timeout, headers, ...).
+
+    The returned object is what ``anthropic.Anthropic(http_client=...)`` expects
+    whenever ``httpx2`` is the resolved flavor.
+    """
+    flavor_name = _select_flavor(flavor)
+    httpx = importlib.import_module(flavor_name)
+    sync_cls, _ = _build_transports(flavor_name)
     path = resolve_socket_path(socket_path)
     transport = sync_cls(path, verify=verify, http2=http2)
     client_kwargs.setdefault("timeout", _DEFAULT_TIMEOUT)
@@ -445,12 +515,128 @@ def async_client(
     socket_path: str | None = None,
     verify: Any = True,
     http2: bool = False,
+    flavor: str | None = None,
     **client_kwargs: Any,
-) -> httpx.AsyncClient:
+) -> Any:
     """Async counterpart of :func:`client`."""
-    httpx = _require_httpx()
-    _, async_cls = _build_transports()
+    flavor_name = _select_flavor(flavor)
+    httpx = importlib.import_module(flavor_name)
+    _, async_cls = _build_transports(flavor_name)
     path = resolve_socket_path(socket_path)
     transport = async_cls(path, verify=verify, http2=http2)
     client_kwargs.setdefault("timeout", _DEFAULT_TIMEOUT)
     return httpx.AsyncClient(transport=transport, **client_kwargs)
+
+
+# ── requests transport wiring (lazy: needs the optional requests extra) ──────
+#
+# The Google client libraries are requests-based (google-auth's
+# AuthorizedSession), so the httpx transport above cannot carry them. They
+# default to gRPC, which cannot traverse a SOCKS5 proxy reachable only over a
+# Unix socket, but every such client also ships a REST transport, and REST means
+# requests, which means urllib3 — which has the same seam httpx does: the one
+# place a TCP socket is created. So the shape below mirrors the httpx transport
+# exactly. Swap the socket creation, change nothing else. TLS is still
+# negotiated by urllib3 against the real hostname after the broker connects, so
+# certificate verification is untouched and the broker never sees plaintext.
+
+
+def _brokered_pool_classes(socket_path: str) -> tuple[type, type]:
+    """Build urllib3 pool classes whose TCP connect goes via the broker.
+
+    Built per socket path rather than reading the environment at connect time:
+    a connection pool can outlive the call that created it, and re-reading the
+    environment later would let a changed variable silently repoint live
+    connections.
+    """
+    try:
+        import urllib3.connection
+        import urllib3.connectionpool
+        from urllib3.util.timeout import _DEFAULT_TIMEOUT as _URLLIB3_DEFAULT_TIMEOUT
+    except (ModuleNotFoundError, ImportError) as exc:  # fail loud, never silently direct
+        raise EgressConfigError(
+            f"egress transport could not load the urllib3 connection seam: {exc}. "
+            "Requires urllib3>=2 (installed with requests)."
+        ) from exc
+
+    def _new_conn(self):  # noqa: ANN001, ANN202 - urllib3 protocol
+        # urllib3 represents "no timeout set" with a sentinel object, and
+        # socket.settimeout raises TypeError on it rather than treating it as
+        # None. Measured 2026-09-21 on urllib3 2.0.7 / 2.2.3 / 2.8.0:
+        # HTTPConnection.__init__ already calls Timeout.resolve_default_timeout,
+        # so self.timeout is resolved before we ever see it and this branch does
+        # not currently fire. Kept because it costs one comparison, it is what
+        # the proven downstream implementation does, and the failure it guards
+        # against is a TypeError at connect time on every request.
+        # ponytail: defensive, measured-unreachable on urllib3 2.x.
+        timeout = None if self.timeout is _URLLIB3_DEFAULT_TIMEOUT else self.timeout
+        # self.host, never self._dns_host: the broker must receive the name the
+        # caller asked for. The allowlist is by hostname, so resolving locally
+        # and dialling the result would be a security regression, not a style
+        # one (ADR-0048, socks5h semantics).
+        return _socks5_connect_sync(socket_path, self.host, self.port, timeout)
+
+    https_conn = type(
+        "BrokeredHTTPSConnection", (urllib3.connection.HTTPSConnection,), {"_new_conn": _new_conn}
+    )
+    http_conn = type(
+        "BrokeredHTTPConnection", (urllib3.connection.HTTPConnection,), {"_new_conn": _new_conn}
+    )
+    https_pool = type(
+        "BrokeredHTTPSConnectionPool",
+        (urllib3.connectionpool.HTTPSConnectionPool,),
+        {"ConnectionCls": https_conn},
+    )
+    http_pool = type(
+        "BrokeredHTTPConnectionPool",
+        (urllib3.connectionpool.HTTPConnectionPool,),
+        {"ConnectionCls": http_conn},
+    )
+    return https_pool, http_pool
+
+
+def requests_session(*, socket_path: str | None = None, **adapter_kwargs: Any) -> Any:
+    """Return a ``requests.Session`` whose outbound traffic tunnels through the
+    per-agent egress broker.
+
+    Same contract as :func:`client`: the socket is resolved and stat'd up front,
+    and a broker that is unconfigured, absent or not a socket raises rather than
+    handing back a session that would dial the network directly.
+
+    Exists for the Google client libraries, whose REST transports build a
+    ``google.auth.transport.requests.AuthorizedSession`` on top of ``requests``.
+    Extra kwargs go to the ``HTTPAdapter`` (``pool_connections``,
+    ``pool_maxsize``, ``max_retries``).
+
+    ``requests`` is an optional extra::
+
+        pip install 'hawcx-haap[requests]'
+    """
+    try:
+        import requests
+    except ModuleNotFoundError as exc:
+        raise EgressConfigError(
+            "the egress requests session requires requests: "
+            "pip install 'hawcx-haap[requests]'"
+        ) from exc
+
+    # Resolves and stats the socket, raising if it is absent or not a socket.
+    path = resolve_socket_path(socket_path)
+    https_pool, http_pool = _brokered_pool_classes(path)
+
+    class _BrokeredAdapter(requests.adapters.HTTPAdapter):
+        def init_poolmanager(self, *args: Any, **kw: Any) -> None:
+            super().init_poolmanager(*args, **kw)
+            # Swap the pool classes in place rather than re-threading the
+            # PoolManager's kwargs. Fails loud if urllib3 renames the mapping,
+            # which is the right outcome: never degrade to a direct dial.
+            assert hasattr(self.poolmanager, "pool_classes_by_scheme"), (
+                "urllib3 PoolManager layout changed"
+            )
+            self.poolmanager.pool_classes_by_scheme = {"http": http_pool, "https": https_pool}
+
+    session = requests.Session()
+    adapter = _BrokeredAdapter(**adapter_kwargs)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
