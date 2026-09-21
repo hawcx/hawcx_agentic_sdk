@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import socket
 import struct
+import sys
 import tempfile
 import threading
 import uuid
@@ -162,6 +163,12 @@ def _serve_garbage_reply(server: socket.socket, garbage: bytes) -> None:
         conn.close()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Python on the Windows GHA runner image does not expose socket.AF_UNIX "
+    "(same reason conftest's short_sock_path fixture skips; this file rolls its own "
+    "temp dir and so does not inherit that guard)",
+)
 @settings(max_examples=25, deadline=None)
 @given(garbage=st.binary(max_size=256))
 def test_fuzz_assembler_connect_handshake_reply_never_hangs(garbage: bytes) -> None:
