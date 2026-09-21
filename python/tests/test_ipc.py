@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import socket
 import struct
+import threading
 
 import pytest
 
@@ -178,3 +180,126 @@ def test_handshake_version_mismatch(short_sock_path: str) -> None:
             AssemblerClient.connect(socket_path)
     finally:
         server.close()
+
+
+# ── Diagnosability: connect/handshake failures must name themselves ─────────
+#
+# 2026-09-21 UKG demo (see ipc.py's _diagnosable_ipc_error docstring): the
+# supervisor spawns the agent workload before the Assembler exists, so on
+# Unix the agent's connect() to the not-yet-accepting listener succeeds (it
+# queues in the backlog) and the SAME settimeout() deadline that covers
+# connect() then governs the handshake recv(). That recv() blocks until the
+# deadline and raises a bare TimeoutError, whose str() is exactly "timed
+# out" -- no endpoint, no operation, no type. These tests prove the fix with
+# real AF_UNIX sockets (the bug is socket semantics, not something a mock
+# can stand in for), in BOTH directions, and prove the two directions are
+# actually distinguishable from each other -- not just "an exception was
+# raised", which is the shape of assertion that let the bare message ship.
+
+
+def _accept_and_never_reply(
+    server: socket.socket, ready: threading.Event, stop: threading.Event
+) -> None:
+    """Mock 'Assembler' that accepts the connection (so connect() succeeds,
+    exactly like the real race) and then holds it open, reading and sending
+    nothing, until told to stop. This must NOT read the client's handshake
+    write and NOT close the connection on its own -- either would let the
+    client's read return (EOF) instead of actually blocking until its
+    deadline, which would silently turn this into a "peer closed early" test
+    instead of the stall this is meant to reproduce."""
+    conn, _ = server.accept()
+    ready.set()
+    stop.wait(5)
+    conn.close()
+
+
+def test_connect_absent_socket_names_endpoint_and_is_distinguishable_as_absent(
+    short_sock_path: str,
+) -> None:
+    """short_sock_path reserves a path inside a real 0o700 dir but does not
+    create a socket there. The absent-socket half of the discrimination
+    table: FileNotFoundError, named explicitly, not "timed out"."""
+    with pytest.raises(IpcError) as ei:
+        AssemblerClient.connect(short_sock_path, timeout_secs=0.3)
+    msg = str(ei.value)
+    assert short_sock_path in msg, "message must name the endpoint"
+    assert "FileNotFoundError" in msg, "must be distinguishable as ABSENT, not a bare message"
+    assert "TimeoutError" not in msg
+
+
+def test_connect_stall_names_endpoint_operation_and_is_distinguishable_as_stalled(
+    short_sock_path: str,
+) -> None:
+    """A listener that accepts and never replies -- the actual race. The
+    message must name the endpoint, the operation (it fails during the
+    handshake read, not the connect), and TimeoutError specifically."""
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(short_sock_path)
+    server.listen(1)
+    accepted = threading.Event()
+    stop = threading.Event()
+    t = threading.Thread(
+        target=_accept_and_never_reply, args=(server, accepted, stop), daemon=True
+    )
+    t.start()
+    try:
+        with pytest.raises(IpcError) as ei:
+            AssemblerClient.connect(short_sock_path, timeout_secs=0.3)
+        assert accepted.wait(2), "server never accepted -- test setup is broken, not the SDK"
+        msg = str(ei.value)
+        assert short_sock_path in msg, "message must name the endpoint"
+        assert "handshake-read" in msg, "must name the OPERATION that failed"
+        assert "TimeoutError" in msg, "must be distinguishable as STALLED, not a bare message"
+        assert "FileNotFoundError" not in msg
+    finally:
+        stop.set()
+        server.close()
+        t.join(timeout=2)
+
+
+def test_stall_and_absent_are_distinguishable_from_each_other(short_sock_path: str) -> None:
+    """The control this bug needed and never had: the two failure modes must
+    not collapse to the same string. Asserting only "an IpcError was raised"
+    is worthless here -- that was already true before the fix, and the whole
+    defect was that the message said nothing useful once raised."""
+    with pytest.raises(IpcError) as absent_ei:
+        AssemblerClient.connect(short_sock_path, timeout_secs=0.3)
+
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(short_sock_path)
+    server.listen(1)
+    accepted = threading.Event()
+    stop = threading.Event()
+    t = threading.Thread(
+        target=_accept_and_never_reply, args=(server, accepted, stop), daemon=True
+    )
+    t.start()
+    try:
+        with pytest.raises(IpcError) as stall_ei:
+            AssemblerClient.connect(short_sock_path, timeout_secs=0.3)
+        assert accepted.wait(2)
+    finally:
+        stop.set()
+        server.close()
+        t.join(timeout=2)
+
+    absent_msg, stall_msg = str(absent_ei.value), str(stall_ei.value)
+    assert absent_msg != stall_msg
+    assert "FileNotFoundError" in absent_msg and "TimeoutError" not in absent_msg
+    assert "TimeoutError" in stall_msg and "FileNotFoundError" not in stall_msg
+
+
+def test_connect_refused_names_endpoint_and_operation(short_sock_path: str) -> None:
+    """A socket file exists but nothing is listen()ing on it -- ECONNREFUSED
+    fires inside sock.connect() itself, the OTHER failure site
+    _diagnosable_ipc_error wraps (as opposed to the handshake-read site the
+    stall tests above exercise)."""
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(short_sock_path)
+    server.close()  # bound, never listened -- connect() must be refused
+    with pytest.raises(IpcError) as ei:
+        AssemblerClient.connect(short_sock_path, timeout_secs=0.3)
+    msg = str(ei.value)
+    assert short_sock_path in msg, "message must name the endpoint"
+    assert "connect" in msg, "must name the OPERATION that failed"
+    assert "ConnectionRefusedError" in msg

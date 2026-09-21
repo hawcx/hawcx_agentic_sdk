@@ -306,6 +306,32 @@ def perform_handshake(sock: socket.socket, local_role: int = ROLE_AGENT) -> int:
 # ── Platform-aware socket connect ────────────────────────────────────
 
 
+def _diagnosable_ipc_error(
+    endpoint: str, op: str, timeout_secs: float | None, exc: BaseException
+) -> IpcError:
+    """Wrap a bare stdlib exception from ``op`` into an ``IpcError`` that
+    names the endpoint, the operation, and the underlying exception TYPE.
+
+    2026-09-21 UKG demo: ``str(TimeoutError())`` is exactly ``"timed out"`` --
+    no endpoint, no operation, no type -- because ``sock.settimeout()``
+    governs both ``connect()`` and the handshake ``recv()`` that follows it,
+    and that bare exception propagated verbatim to the operator. A reader
+    could not tell a stalled Assembler (accepts, never replies -- the
+    supervisor spawns the agent before the Assembler, so the listener's
+    backlog silently accepts a connect nobody is behind yet) from an absent
+    one (no socket file at all) from the message alone. Including
+    ``type(exc).__name__`` is what makes those cases distinguishable without
+    a debugger: ``TimeoutError`` is a stall, ``FileNotFoundError`` /
+    ``ConnectionRefusedError`` is absent, an ``IpcError`` (e.g. "peer closed
+    connection mid-message") is a handshake that started and was abandoned.
+    """
+    deadline = f"{timeout_secs}s" if timeout_secs is not None else "no deadline"
+    return IpcError(
+        f"{op} to Assembler endpoint {endpoint!r} failed (deadline: {deadline}): "
+        f"{type(exc).__name__}: {exc}"
+    )
+
+
 def _validate_ipc_socket_path(socket_path: str) -> os.stat_result | None:
     """H-4 (2026-05-20) — validate UID + parent-dir mode before connect.
 
@@ -336,7 +362,11 @@ def _validate_ipc_socket_path(socket_path: str) -> os.stat_result | None:
     try:
         sock_stat = sock_path.stat()
     except OSError as e:
-        raise IpcError(f"stat {socket_path} failed: {e}") from e
+        # The "socket absent" half of the stall-vs-absent distinction: a
+        # missing socket file raises here as FileNotFoundError, named
+        # explicitly so it reads as "absent", not "timed out" (see
+        # _diagnosable_ipc_error).
+        raise IpcError(f"stat {socket_path} failed: {type(e).__name__}: {e}") from e
     if not stat.S_ISSOCK(sock_stat.st_mode):
         raise IpcError(f"{socket_path} is not a Unix domain socket")
 
@@ -499,7 +529,11 @@ def _connect_unix(path: str, timeout_secs: float | None) -> socket.socket:
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     if timeout_secs is not None:
         sock.settimeout(timeout_secs)
-    sock.connect(path)
+    try:
+        sock.connect(path)
+    except OSError as e:
+        sock.close()
+        raise _diagnosable_ipc_error(path, "connect", timeout_secs, e) from e
     # INF-08: pre_stat is None only on Windows, which never reaches this
     # AF_UNIX path; guard anyway for type-narrowing.
     if pre_stat is not None:
@@ -569,12 +603,28 @@ class AssemblerClient:
         sock = connect_assembler(endpoint, timeout_secs=timeout_secs)
         try:
             peer_role = perform_handshake(sock, local_role=ROLE_AGENT)
-        except Exception:
+        except HandshakeError:
+            # Already a well-labeled protocol error (local/remote major
+            # version, public attributes callers may inspect) -- pass
+            # through unchanged rather than flattening it into a generic
+            # wrap.
             try:
                 sock.close()
             except Exception:
                 pass
             raise
+        except Exception as e:
+            # Everything else here is a bare stdlib exception (TimeoutError
+            # on a stalled Assembler, ConnectionResetError, ...) or an
+            # under-labeled IpcError from read_frame (e.g. "peer closed
+            # connection mid-message", which names the operation but not
+            # the endpoint). Name endpoint + operation + exception type so
+            # "stalled" and "absent" read apart from the message alone.
+            try:
+                sock.close()
+            except Exception:
+                pass
+            raise _diagnosable_ipc_error(endpoint, "handshake-read", timeout_secs, e) from e
         if peer_role != ROLE_ASSEMBLER:
             try:
                 sock.close()

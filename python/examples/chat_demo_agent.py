@@ -254,8 +254,28 @@ def main() -> int:
 
     log(f"chat channel up on fd {CHAT_FD}; connecting to the Assembler for {agent_id}")
 
-    with HawcxAgent.connect_by_agent_id(agent_id, principal_allowlist=[]) as agent:
+    # The connect happens ONCE, here, outside the turn loop below -- same
+    # shape as any long-lived agent process. That used to mean a failed
+    # connect (e.g. the Assembler not accepting yet) raised out of `main()`
+    # before the loop ever started: the process died with an unhandled
+    # traceback and the chat channel closed with NO error frame at all, not
+    # even a bad one. A customer agent copying this file inherits that.
+    #
+    # So the connect is captured here instead of propagating: on failure,
+    # `agent` stays None and every turn that arrives reports it as a turn
+    # error over the channel that is already open, the way a production
+    # agent should -- rather than killing the process before the first
+    # prompt is even read.
+    try:
+        agent: HawcxAgent | None = HawcxAgent.connect_by_agent_id(agent_id, principal_allowlist=[])
+        connect_error: str | None = None
         log("Assembler connected; waiting for prompts")
+    except HawcxError as e:
+        agent = None
+        connect_error = f"could not connect to the Assembler: {e}"
+        log(f"{connect_error}; waiting for prompts to report this as a turn error")
+
+    try:
         # One turn at a time, for the connection's life. ADR-0052 D-52-2
         # allows exactly one turn in flight and there is no turn id on the
         # wire, so a serial loop IS the protocol, not a simplification.
@@ -265,6 +285,11 @@ def main() -> int:
             except Exception as e:  # noqa: BLE001 -- EOF included
                 log(f"chat channel closed ({e}); exiting")
                 return 0
+
+            if agent is None:
+                if not try_send_error(chat, connect_error or "Assembler not connected"):
+                    return 0
+                continue
 
             try:
                 run_gated_tool_calls(chat, agent, prompt)
@@ -278,6 +303,9 @@ def main() -> int:
                 log(f"unexpected error: {e}\n{traceback.format_exc()}")
                 if not try_send_error(chat, f"agent error: {e}"):
                     return 0
+    finally:
+        if agent is not None:
+            agent.close()
 
 
 if __name__ == "__main__":
