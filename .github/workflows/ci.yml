@@ -95,6 +95,63 @@ jobs:
         shell: bash
         run: bash deploy/agent-pod/ci/render_and_validate.sh
 
+  # WHY A JOB AND NOT A TEST
+  # -----------------------
+  # #118 passed all 73 egress tests and broke every frozen agent bundle in the
+  # field. It replaced a literal `import httpx` with
+  # `importlib.import_module(<runtime value>)`; PyInstaller's module graph
+  # follows the first and cannot see the second, so the transport stopped being
+  # packaged and `client()` raised at the agent's first request. Measured after
+  # the fact, same PyInstaller config, only the SDK differing:
+  #
+  #     pre-#118   httpx modules collected: 23   frozen result: works
+  #     0.1.11     httpx modules collected:  0   frozen result: EgressConfigError
+  #
+  # No test could see it: every test imports the shim from a normal interpreter,
+  # where `find_spec` finds whatever pip installed. The only thing that catches
+  # it is freezing a program and running it, which needs PyInstaller and ~40s —
+  # too slow and too heavy for the 12-cell `python` matrix above.
+  #
+  # ARMED, not decorative: run against 0.1.11 this job fails with the customer's
+  # exact error. It is behavioural on purpose — it does not assert which modules
+  # were collected, because the right answer changed (0.1.12 resolves to the
+  # stdlib flavor in a frozen bundle, and that is correct). What must hold is
+  # that a frozen program can get a working client from the broker.
+  #
+  # ubuntu only: `--onefile` collection is static analysis of the same module
+  # graph everywhere, and the AF_UNIX broker this needs has no Windows analogue.
+  frozen-bundle:
+    name: frozen bundle can still reach the broker (${{ matrix.extras || 'no httpx lineage' }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both halves matter. Without a lineage installed, the stdlib fallback
+        # is the only thing that can work. With httpx2 installed but not
+        # collected -- the exact #118 shape -- a build that silently loses the
+        # transport must still fail here.
+        extras: ["", "httpx2"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Freeze the shim and make it talk to a broker
+        working-directory: python
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          # cryptography mints the in-test localhost cert; pyinstaller is pinned
+          # so a collection-behaviour change upstream is a deliberate bump here
+          # rather than a mystery failure on an unrelated PR.
+          python -m pip install 'pyinstaller==6.22.0' cryptography
+          if [ -n "${{ matrix.extras }}" ]; then
+            python -m pip install '${{ matrix.extras }}>=2.0.0'
+          fi
+          python tests/frozen/check_frozen_bundle.py
+
   python:
     name: python ${{ matrix.python }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
