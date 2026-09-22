@@ -6,7 +6,7 @@ versions track each language surface independently (Rust crate
 versions in `Cargo.toml`, Node version in `node/package.json`, Python
 version in `python/pyproject.toml`).
 
-## [0.1.12] - unreleased (Python surface only)
+## [0.1.12] - 2026-09-22 (Python surface only)
 
 - **FIX: the egress transport works in the bundles the SDK itself builds.**
   `hawcx_haap.source_bundle` vendors the nine SDK runtime files and nothing
