@@ -265,12 +265,37 @@ def test_the_whole_haap_rejection_range_denies(code: int) -> None:
 
 
 @pytest.mark.parametrize("code", [-32601, -32602, -32700, -31999, -32006])
-def test_a_downstream_jsonrpc_fault_is_not_reported_as_a_policy_denial(code: int) -> None:
-    # Outside -32005..-32000. Calling a "method not found" a policy denial
-    # would manufacture evidence of a decision that was never made.
-    body = json.dumps({"jsonrpc": "2.0", "id": 1, "error": {"code": code}}).encode()
+def test_a_downstream_jsonrpc_fault_fails_closed_but_is_not_a_policy_denial(code: int) -> None:
+    # Outside -32005..-32000: a downstream/application fault, neither a policy
+    # decision nor a success. It must FAIL CLOSED — the call returned no data, so
+    # an agent must not proceed as if it had — but reason_code stays None so it is
+    # never manufactured into evidence of a policy denial that was never made.
+    #
+    # This previously returned allowed=True (the #119 fail-open): the error body
+    # was handed to the model as the resource's answer. Calling it a policy denial
+    # would be the opposite over-correction; the split is allowed=False +
+    # reason_code=None.
+    body = json.dumps(
+        {"jsonrpc": "2.0", "id": 1, "error": {"code": code, "message": "boom"}}
+    ).encode()
     caller, _ = _caller(lambda kw: _response(body))
-    assert caller.call(MAIL_READ, "alice@example.invalid").allowed is True
+    decision = caller.call(MAIL_READ, "alice@example.invalid")
+    assert decision.allowed is False
+    assert decision.reason_code is None
+    assert str(code) in decision.reason
+
+
+def test_the_rsv_proxy_failure_envelope_fails_closed() -> None:
+    # haap-rsv-bin answers an egress failure with (BAD_GATEWAY, {"error": "..."}).
+    # Valid JSON, so it parses — but it is an infrastructure failure that returned
+    # no tool data, and it must not read as ALLOW (the prior #119 behaviour). Not
+    # a policy denial either: reason_code stays None.
+    body = b'{"error": "downstream request failed: connection refused"}'
+    caller, _ = _caller(lambda kw: _response(body, status=502))
+    decision = caller.call(MAIL_READ, "alice@example.invalid")
+    assert decision.allowed is False
+    assert decision.reason_code is None
+    assert "downstream request failed" in decision.reason
 
 
 @pytest.mark.parametrize("status", [401, 403])

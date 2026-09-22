@@ -288,13 +288,38 @@ class Caller:
 # ── Classification ───────────────────────────────────────────────────
 
 
+def _downstream_error_reason(err: Any) -> str:
+    """A human reason for a non-policy error envelope (#119).
+
+    Covers a JSON-RPC error object (``{"code", "message"}`` outside the reserved
+    HAAP range) and the RSV ``/proxy`` failure envelope (``{"error": "<string>"}``).
+    """
+    if isinstance(err, dict):
+        code = err.get("code")
+        message = err.get("message")
+        if code is not None and message:
+            return f"downstream error {code}: {message}"
+        if message:
+            return str(message)
+        if code is not None:
+            return f"downstream error {code}"
+        return "downstream returned an error"
+    return str(err)
+
+
 def _classify(tool_id: str, principal: str, resp: Any) -> Decision:
     """Allow or deny, from an Assembler response that did not raise.
 
-    Ordered by how specific the evidence is: a JSON-RPC HAAP rejection names
-    its own reason code, an HTTP 401/403 names only a status, and a body that
-    yields no JSON-RPC document at all names nothing — which is why that last
-    case denies instead of allowing.
+    Ordered by how specific the evidence is: a JSON-RPC HAAP rejection names its
+    own reason code; any other error envelope (a downstream JSON-RPC fault, or
+    the RSV ``/proxy`` ``{"error": ...}`` envelope) is a fault that returned no
+    data and denies with ``reason_code=None``; an HTTP 401/403 names only a
+    status; and a body that yields no JSON-RPC document at all names nothing —
+    which is why that last case denies instead of allowing.
+
+    Only a well-formed success (a parsed document with no ``error``) returns
+    ``allowed=True``. A fault is never an allow: handing an error body to the
+    model as the resource's answer is the failure mode this guards (#119).
     """
     body_text = _text(getattr(resp, "body", b""))
     status = getattr(resp, "http_status", None)
@@ -303,6 +328,8 @@ def _classify(tool_id: str, principal: str, resp: Any) -> Decision:
 
     for doc in documents:
         err = doc.get("error")
+        if not err:
+            continue
         if isinstance(err, dict) and err.get("code") in HAWCX_REJECT_CODES:
             data = err.get("data")
             return Decision(
@@ -319,6 +346,26 @@ def _classify(tool_id: str, principal: str, resp: Any) -> Decision:
                 body=body_text,
                 request_id=request_id,
             )
+        # Any OTHER error envelope is a downstream/transport fault, not a policy
+        # decision and not a success: a JSON-RPC application error
+        # (-32602/-32601/-32603/…) outside the reserved range, or the RSV /proxy
+        # failure envelope (``{"error": "<string>"}``). Fail CLOSED — the call
+        # returned no data, so an agent must not proceed as if it had — but leave
+        # `reason_code` None so a consumer bucketing by HAAP policy code never
+        # mistakes this for a decision that was actually made. Reporting it as a
+        # policy denial would manufacture evidence of a decision nobody made;
+        # reporting it as ALLOW (the prior behaviour) hands an error body to the
+        # model as the resource's answer. #119.
+        return Decision(
+            tool=tool_id,
+            principal=principal,
+            allowed=False,
+            reason=_downstream_error_reason(err),
+            reason_code=None,
+            http_status=status,
+            body=body_text,
+            request_id=request_id,
+        )
 
     # An HTTP-level 401/403 is a refusal too, not a transport fault.
     if isinstance(status, int) and status in (401, 403):

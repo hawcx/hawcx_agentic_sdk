@@ -8,6 +8,18 @@ version in `python/pyproject.toml`).
 
 ## [0.1.9] - unreleased (Python surface only)
 
+- **SECURITY (#119): a downstream fault no longer classifies as an allow.**
+  `_classify` returned `Decision(allowed=True)` for any response whose body
+  parsed but was not a HAAP reject code or a 401/403 — so a downstream JSON-RPC
+  error (`-32602`, `-32601`, `-32603`, …) or the RSV `/proxy` `{"error": ...}`
+  failure envelope was reported as a successful tool call, and its error body was
+  handed to the model as the resource's answer. Such a fault now **fails closed**
+  (`allowed=False`) with `reason_code=None` — denied, but distinct from a HAAP
+  policy denial, which keeps its reason code. A well-formed success (no `error`)
+  is still the only allow; the HAAP-reject-range and unparseable-body verdicts
+  are unchanged. Ordering: this must land before hx_agent_authorizer#271, which
+  repairs the gateway passthrough that currently masks this by mangling the
+  downstream error into an unparseable body.
 - Add a bounded source-only CAA ZIP-to-zipapp builder. It never executes uploaded
   source/build hooks or resolves dependencies, vendors the trusted SDK runtime
   offline, and returns deterministic executable identity plus SDK provenance.
