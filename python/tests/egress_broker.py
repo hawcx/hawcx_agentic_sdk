@@ -297,6 +297,25 @@ class TLSServer:
                 if not chunk:
                     break
                 data += chunk
+            # Drain a Content-Length body before answering. A real server reads
+            # the request it was sent; this double used to reply and close on
+            # the header terminator alone, which raced a client still writing
+            # its body and surfaced as EPIPE on the CLIENT -- a test-double
+            # artifact that looks exactly like a transport bug.
+            head, _, rest = data.partition(b"\r\n\r\n")
+            length = 0
+            for line in head.split(b"\r\n"):
+                field, _, value = line.partition(b":")
+                if field.strip().lower() == b"content-length":
+                    try:
+                        length = int(value.strip())
+                    except ValueError:
+                        length = 0
+            while len(rest) < length:
+                more = tls.recv(min(4096, length - len(rest)))
+                if not more:
+                    break
+                rest += more
             resp = b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s" % (
                 len(self._body),
                 self._body,

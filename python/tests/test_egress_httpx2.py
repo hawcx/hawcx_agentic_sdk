@@ -136,10 +136,12 @@ def test_unknown_flavor_is_rejected() -> None:
     assert "httpx3" in str(ei.value)
 
 
-def test_neither_lineage_installed_raises_config_error_not_import_error(monkeypatch) -> None:
-    # The error a caller with no extra installed sees must stay the existing
-    # clear EgressConfigError. Kills MUT-4 (find_spec miss surfacing as
-    # ModuleNotFoundError).
+def test_neither_lineage_installed_falls_back_to_stdlib(monkeypatch) -> None:
+    # CONTRACT CHANGE, deliberate: this used to assert EgressConfigError. An
+    # agent packaged by `hawcx_haap.source_bundle` has neither lineage and
+    # cannot install one ("offline builds never run pip"), so raising here made
+    # the shim unusable in exactly the deployment the SDK ships for. The
+    # default path now resolves to the stdlib client; see test_egress_stdlib.py.
     import importlib.util
 
     real_find_spec = importlib.util.find_spec
@@ -150,10 +152,31 @@ def test_neither_lineage_installed_raises_config_error_not_import_error(monkeypa
         if name in ("httpx", "httpx2")
         else real_find_spec(name, *a, **k),
     )
-    with pytest.raises(EgressConfigError) as ei:
-        egress.flavor()
-    assert not isinstance(ei.value, ImportError)
-    assert "httpx2" in str(ei.value) and "httpx" in str(ei.value)
+    assert egress.flavor() == "stdlib"
+
+
+def test_explicit_missing_lineage_raises_config_error_not_import_error(monkeypatch) -> None:
+    # MUT-4 lives here now: asking for a lineage BY NAME that is not installed
+    # must still be a clear EgressConfigError, never a ModuleNotFoundError
+    # leaking out of find_spec. The stdlib fallback must not swallow this --
+    # a caller who named httpx2 wants httpx2 (the Anthropic SDK rejects
+    # anything else), and silently handing back another client would be worse
+    # than failing.
+    import importlib.util
+
+    real_find_spec = importlib.util.find_spec
+    monkeypatch.setattr(
+        importlib.util,
+        "find_spec",
+        lambda name, *a, **k: None
+        if name in ("httpx", "httpx2")
+        else real_find_spec(name, *a, **k),
+    )
+    for named in ("httpx2", "httpx"):
+        with pytest.raises(EgressConfigError) as ei:
+            egress.flavor(named)
+        assert not isinstance(ei.value, ImportError)
+        assert named in str(ei.value)
 
 
 @pytest.mark.parametrize("which", ["httpx2", "httpx"])
