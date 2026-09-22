@@ -127,6 +127,68 @@ def test_egress_errors_are_not_swallowed_into_requests_exceptions() -> None:
     assert not isinstance(ei.value, _requests.exceptions.RequestException)
 
 
+# ── Layer 2: Adversarial — a proxy must not quietly replace the broker ───────
+
+
+def test_proxy_env_var_is_refused_rather_than_silently_leaving_the_broker(
+    monkeypatch,
+) -> None:
+    """`requests` reads $HTTPS_PROXY by default and would build stock pools that
+    dial it directly, so the broker sees nothing at all. That is the one failure
+    this module must never have: it is indistinguishable from a working session
+    right up until someone audits where the bytes went."""
+    with FakeBroker(scripted_handler()) as broker:
+        session = egress.requests_session(socket_path=broker.path)
+        monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+        with pytest.raises(EgressConfigError) as ei:
+            session.get("https://example.com/", timeout=5)
+        assert "proxy" in str(ei.value).lower()
+        # The point of the assertion: nothing was dialled, by us or by requests.
+        assert len(broker.requests) == 0
+
+
+def test_explicit_proxies_argument_is_refused_too(monkeypatch) -> None:
+    """Not just the environment: a caller passing proxies= explicitly gets the
+    same refusal, because the bypass is identical either way."""
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("https_proxy", raising=False)
+    with FakeBroker(scripted_handler()) as broker:
+        session = egress.requests_session(socket_path=broker.path)
+        with pytest.raises(EgressConfigError):
+            session.get(
+                "https://example.com/", proxies={"https": "http://127.0.0.1:9"}, timeout=5
+            )
+
+
+def test_trust_env_false_is_a_working_escape_hatch(monkeypatch) -> None:
+    """The refusal tells the caller to set trust_env = False. Pin that the
+    advice actually works, so the error message cannot rot into a dead end."""
+    with FakeBroker(scripted_handler()) as broker:
+        session = egress.requests_session(socket_path=broker.path)
+        session.trust_env = False
+        monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+        with pytest.raises(EgressPolicyDenied):
+            session.get("https://example.com/", timeout=5)
+        # Reached the broker despite the proxy variable.
+        assert len(broker.requests) == 1
+
+
+def test_foreign_session_mount_is_protected_too(monkeypatch) -> None:
+    """The google-auth path from README.md mounts our adapter onto someone
+    else's Session, which has its own trust_env. The refusal travels with the
+    adapter, not with our session object."""
+    import requests
+
+    with FakeBroker(scripted_handler()) as broker:
+        adapter = egress.requests_session(socket_path=broker.path).get_adapter("https://")
+        foreign = requests.Session()
+        foreign.mount("https://", adapter)
+        monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:9")
+        with pytest.raises(EgressConfigError):
+            foreign.get("https://example.com/", timeout=5)
+        assert len(broker.requests) == 0
+
+
 # ── The contract test: no broker must never yield a direct session ───────────
 
 
