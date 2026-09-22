@@ -50,6 +50,7 @@ from typing import Any
 
 from hawcx_haap.errors import (
     EgressConfigError,
+    EgressError,
     EgressHostUnreachable,
     EgressPeerCredError,
     EgressPolicyDenied,
@@ -634,6 +635,22 @@ def requests_session(*, socket_path: str | None = None, **adapter_kwargs: Any) -
                 "urllib3 PoolManager layout changed"
             )
             self.poolmanager.pool_classes_by_scheme = {"http": http_pool, "https": https_pool}
+
+        def proxy_manager_for(self, proxy: str, **proxy_kwargs: Any) -> Any:
+            # `requests` reads $HTTPS_PROXY/$HTTP_PROXY from the environment by
+            # default (Session.trust_env), and a proxy manager builds STOCK
+            # pools -- the brokered classes above are never consulted. Measured
+            # 2026-09-22 against 0.1.11: with $HTTPS_PROXY set, the broker
+            # observes ZERO CONNECTs and the request dials the proxy directly.
+            # Inside the sandbox that is the hang this shim exists to replace;
+            # outside it, it is a silent bypass of the egress control. Same
+            # contract as resolve_socket_path: raise, never degrade.
+            raise EgressConfigError(
+                f"egress session refuses to route through an HTTP proxy ({proxy!r}): "
+                "requests took it from $HTTPS_PROXY/$HTTP_PROXY or an explicit "
+                "proxies= argument, and a proxied request would leave the broker. "
+                "Unset those variables, or set session.trust_env = False."
+            )
 
     session = requests.Session()
     adapter = _BrokeredAdapter(**adapter_kwargs)
