@@ -84,6 +84,19 @@ class EgressHostUnreachable(EgressError):
         self.port = port
 
 
+class EgressHTTPStatusError(EgressError):
+    """A non-2xx response from `raise_for_status()` on the stdlib egress
+    client. Its own type so a caller can tell an HTTP-level rejection from a
+    broker-level one: the request reached the destination and was answered."""
+
+    def __init__(self, status_code: int, url: str, body: str = "") -> None:
+        self.status_code = status_code
+        self.url = url
+        self.body = body
+        detail = f": {body}" if body else ""
+        super().__init__(f"egress request to {url} returned HTTP {status_code}{detail}")
+
+
 class EgressPeerCredError(EgressError):
     """The broker closed the connection without sending any reply — the
     peer-credential (SO_PEERCRED) check failed. Surfaced distinctly from a

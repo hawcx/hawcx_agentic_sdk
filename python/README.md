@@ -315,6 +315,27 @@ process-wide alias. Note the two lineages ship *disjoint* exception hierarchies:
 an `httpx2` client raises `httpx2.HTTPError`, not `httpx.HTTPError`. The shim's
 own `Egress*` errors are unaffected either way.
 
+**Frozen/offline bundles: no extra needed.** An agent packaged by
+`hawcx_haap.source_bundle` (what the CAA builds from the Agents Repository)
+vendors the SDK's own files and nothing else — offline builds never run pip —
+so neither httpx lineage can be present. `client()` then resolves to a
+**stdlib** flavor built from `http.client` + `ssl`, with the same broker, the
+same `DOMAINNAME` CONNECT, the same end-to-end TLS and the same `Egress*`
+errors. `egress.flavor()` returns `"stdlib"` so you can tell.
+
+It is the last resort, never a preference: a real lineage always wins, so
+nothing changes wherever `httpx2`/`httpx` is installed. Its limits are real and
+worth knowing — HTTP/1.1 only, one connection per request, no redirect
+following, no transparent decompression — and the response object carries
+`.status_code`, `.headers`, `.content`, `.text`, `.json()`, `.is_success` and
+`.raise_for_status()` rather than the full httpx surface. There is no async
+counterpart; `async_client()` says so rather than failing obscurely.
+
+`anthropic.Anthropic(http_client=...)` still requires a real `httpx2.Client`,
+so a bundle that wants the Anthropic **SDK** must vendor `httpx2` (and
+`anthropic`) as pure-Python sources in its upload. A bundle that calls the
+Anthropic HTTP API directly needs nothing extra.
+
 ### `requests`-based clients (Google libraries)
 
 The Google client libraries build on `requests` (google-auth's

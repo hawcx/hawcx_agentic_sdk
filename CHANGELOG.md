@@ -6,6 +6,25 @@ versions track each language surface independently (Rust crate
 versions in `Cargo.toml`, Node version in `node/package.json`, Python
 version in `python/pyproject.toml`).
 
+## [0.1.12] - unreleased (Python surface only)
+
+- **FIX: the egress transport works in the bundles the SDK itself builds.**
+  `hawcx_haap.source_bundle` vendors the nine SDK runtime files and nothing
+  else ("offline builds never run pip"), `egress.py` among them — so every
+  agent packaged that way shipped an egress transport whose only two backends,
+  `httpx2` and `httpx`, could never be present. `client()` raised
+  `EgressConfigError` at the agent's first brokered request, which is how this
+  surfaced in Hawcx Manager 0.6.2 live mode: *"the egress transport requires
+  httpx2 or httpx"*, in a frozen bundle with no way to pip-install into it.
+  `client()` now falls back to a **stdlib** flavor (`http.client` + `ssl`) with
+  the same broker, CONNECT, end-to-end TLS and `Egress*` error set.
+  Strictly additive: precedence is `httpx2` > `httpx` > `stdlib`, so any
+  deployment that works today is unchanged. `egress.flavor()` reports
+  `"stdlib"`; `async_client()` has no stdlib counterpart and says so.
+  Asking for a lineage **by name** that is absent still raises, because a
+  caller who named `httpx2` needs `httpx2` (the Anthropic SDK accepts nothing
+  else) and quietly substituting would be worse than failing.
+
 ## [0.1.9] - unreleased (Python surface only)
 
 - **SECURITY (#119): a downstream fault no longer classifies as an allow.**

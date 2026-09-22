@@ -52,6 +52,7 @@ from hawcx_haap.errors import (
     EgressConfigError,
     EgressError,
     EgressHostUnreachable,
+    EgressHTTPStatusError,
     EgressPeerCredError,
     EgressPolicyDenied,
     EgressProtocolError,
@@ -358,18 +359,33 @@ _FLAVOR_HTTPCORE = {"httpx2": "httpcore2", "httpx": "httpcore"}
 # ubiquitous and its presence says nothing about what the caller wants. Pass
 # `flavor="httpx"` to override per call — this package deliberately installs no
 # process-wide alias, because that is an application-level switch.
-_FLAVOR_ORDER = ("httpx2", "httpx")
+_FLAVOR_ORDER = ("httpx2", "httpx", "stdlib")
+
+# The last resort, and the only one that always exists. An agent packaged by
+# `hawcx_haap.source_bundle` runs from an offline closure that vendors the nine
+# SDK files and NOTHING else -- "offline builds never run pip" -- so neither
+# httpx lineage can be present, while `egress.py` itself is in that closure.
+# Before this flavor, every frozen-bundle agent that called `client()` raised
+# EgressConfigError at its first request: the SDK shipped a transport its own
+# offline packaging path could not satisfy. `http.client` + `ssl` cover the
+# whole job, because `_socks5_connect_sync` already hands back a connected
+# socket and TLS is negotiated on top of it exactly as with the other flavors.
+_STDLIB_FLAVOR = "stdlib"
 
 _BUILT: dict[str, tuple[type, type]] = {}
 
 
 def _select_flavor(name: str | None = None) -> str:
     """Resolve a flavor name, or raise. See :func:`flavor` for the contract."""
-    if name is not None and name not in _FLAVOR_HTTPCORE:
+    if name is not None and name not in _FLAVOR_ORDER:
         raise EgressConfigError(
-            f"unknown egress httpx flavor {name!r}; expected one of {sorted(_FLAVOR_HTTPCORE)}"
+            f"unknown egress flavor {name!r}; expected one of {sorted(_FLAVOR_ORDER)}"
         )
     for candidate in ((name,) if name else _FLAVOR_ORDER):
+        # Always available: it is stdlib. Last in _FLAVOR_ORDER, so a real
+        # httpx lineage still wins and no working deployment changes.
+        if candidate == _STDLIB_FLAVOR:
+            return candidate
         # find_spec, not import: it answers "is this installed" without
         # executing the package, so a *broken* httpx2 install fails loudly in
         # _build_transports rather than silently demoting us to plain httpx.
@@ -406,6 +422,8 @@ def _build_transports(flavor_name: str) -> tuple[type, type]:
     if cached is not None:
         return cached
 
+    if flavor_name == _STDLIB_FLAVOR:  # pragma: no cover - guarded at both call sites
+        raise EgressConfigError("the stdlib egress flavor has no httpx transport to build")
     core_name = _FLAVOR_HTTPCORE[flavor_name]
     try:
         httpx = importlib.import_module(flavor_name)
@@ -483,6 +501,181 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+# ── stdlib transport (no third-party package, ever) ─────────────────────────
+
+
+class _StdlibResponse:
+    """The subset of the httpx response surface an agent actually uses.
+
+    Deliberately not a full httpx clone: a partial imitation that answers to
+    the same attribute names but diverges under load is worse than a small
+    object whose limits are visible. `flavor()` returns ``"stdlib"`` so a
+    caller can tell which one it holds.
+    """
+
+    __slots__ = ("status_code", "headers", "content", "url")
+
+    def __init__(self, status_code: int, headers: dict[str, str], content: bytes, url: str):
+        self.status_code = status_code
+        self.headers = headers
+        self.content = content
+        self.url = url
+
+    @property
+    def is_success(self) -> bool:
+        return 200 <= self.status_code < 300
+
+    @property
+    def text(self) -> str:
+        # Charset from Content-Type when present; utf-8 is the right default
+        # for every JSON API this transport exists to reach.
+        ctype = self.headers.get("content-type", "")
+        charset = "utf-8"
+        for part in ctype.split(";")[1:]:
+            key, _, value = part.strip().partition("=")
+            if key.lower() == "charset" and value:
+                charset = value.strip('"')
+        return self.content.decode(charset, errors="replace")
+
+    def json(self) -> Any:
+        import json as _json
+
+        return _json.loads(self.text)
+
+    def raise_for_status(self) -> _StdlibResponse:
+        if not self.is_success:
+            raise EgressHTTPStatusError(self.status_code, self.url, self.text[:500])
+        return self
+
+    def __repr__(self) -> str:
+        return f"<EgressResponse [{self.status_code}] {self.url}>"
+
+
+class _StdlibClient:
+    """An HTTP/1.1 client over the broker, built from `http.client` + `ssl`.
+
+    Same guarantees as the httpx flavors: the CONNECT names the host, the
+    broker resolves it, and TLS is negotiated end to end on the socket the
+    broker relays -- this code never sees plaintext it did not produce.
+
+    Known ceilings, stated rather than hidden: no connection pooling (one
+    socket per request), no HTTP/2, no automatic redirect following, no
+    transparent decompression. For an agent making JSON API calls through a
+    per-host allowlist, none of those are load-bearing.
+    ponytail: one socket per request; add pooling if call volume ever shows it.
+    """
+
+    def __init__(
+        self,
+        socket_path: str,
+        *,
+        verify: Any = True,
+        timeout: float | None = _DEFAULT_TIMEOUT,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self._socket_path = socket_path
+        self._verify = verify
+        self._timeout = timeout
+        self._headers = dict(headers or {})
+
+    # Context-manager parity with httpx.Client, so `with egress.client() as c:`
+    # reads identically whichever flavor resolved.
+    def __enter__(self) -> _StdlibClient:
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """No pool to drain; defined so callers can close unconditionally."""
+
+    def _tls_context(self) -> Any:
+        import ssl
+
+        if self._verify is False:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            return ctx
+        if isinstance(self._verify, str):
+            return ssl.create_default_context(cafile=self._verify)
+        if self._verify is True:
+            return ssl.create_default_context()
+        return self._verify  # already an SSLContext
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        content: bytes | str | None = None,
+        json: Any = None,
+        timeout: float | None = None,
+    ) -> _StdlibResponse:
+        import http.client
+        import json as _json
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(url)
+        if parts.scheme not in ("http", "https"):
+            raise EgressProtocolError(f"unsupported URL scheme {parts.scheme!r} for egress")
+        host = parts.hostname
+        if not host:
+            raise EgressProtocolError(f"no host in egress URL {url!r}")
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        target = parts.path or "/"
+        if parts.query:
+            target = f"{target}?{parts.query}"
+
+        body: bytes | None = None
+        send_headers = dict(self._headers)
+        if json is not None:
+            if content is not None:
+                raise EgressProtocolError("pass either content= or json=, not both")
+            body = _json.dumps(json).encode("utf-8")
+            send_headers.setdefault("Content-Type", "application/json")
+        elif isinstance(content, str):
+            body = content.encode("utf-8")
+        elif content is not None:
+            body = content
+        send_headers.update(headers or {})
+
+        effective_timeout = self._timeout if timeout is None else timeout
+        sock = _socks5_connect_sync(self._socket_path, host, port, effective_timeout)
+        try:
+            if parts.scheme == "https":
+                sock = self._tls_context().wrap_socket(sock, server_hostname=host)
+            # A pre-connected socket: http.client only dials when `sock` is
+            # None, so handing it one is how the broker stays the only path.
+            conn = http.client.HTTPConnection(host, port, timeout=effective_timeout)
+            conn.sock = sock
+            conn.request(method.upper(), target, body=body, headers=send_headers)
+            raw = conn.getresponse()
+            payload = raw.read()
+            return _StdlibResponse(
+                raw.status,
+                {k.lower(): v for k, v in raw.getheaders()},
+                payload,
+                url,
+            )
+        except (OSError, http.client.HTTPException) as exc:
+            # Never let a bare socket/protocol error escape as something the
+            # caller cannot tell from a policy denial.
+            raise EgressProtocolError(f"egress request to {url!r} failed: {exc}") from exc
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def get(self, url: str, **kw: Any) -> _StdlibResponse:
+        return self.request("GET", url, **kw)
+
+    def post(self, url: str, **kw: Any) -> _StdlibResponse:
+        return self.request("POST", url, **kw)
+
+
 def client(
     *,
     socket_path: str | None = None,
@@ -503,9 +696,19 @@ def client(
     whenever ``httpx2`` is the resolved flavor.
     """
     flavor_name = _select_flavor(flavor)
+    path = resolve_socket_path(socket_path)
+    if flavor_name == _STDLIB_FLAVOR:
+        # No httpx lineage in this closure (the offline-bundle case). Same
+        # broker, same TLS, a smaller response object -- see _StdlibClient.
+        if http2:
+            raise EgressConfigError(
+                "http2=True needs the httpx2 or httpx flavor; the stdlib egress "
+                "client speaks HTTP/1.1 only"
+            )
+        client_kwargs.setdefault("timeout", _DEFAULT_TIMEOUT)
+        return _StdlibClient(path, verify=verify, **client_kwargs)
     httpx = importlib.import_module(flavor_name)
     sync_cls, _ = _build_transports(flavor_name)
-    path = resolve_socket_path(socket_path)
     transport = sync_cls(path, verify=verify, http2=http2)
     client_kwargs.setdefault("timeout", _DEFAULT_TIMEOUT)
     return httpx.Client(transport=transport, **client_kwargs)
@@ -521,6 +724,15 @@ def async_client(
 ) -> Any:
     """Async counterpart of :func:`client`."""
     flavor_name = _select_flavor(flavor)
+    if flavor_name == _STDLIB_FLAVOR:
+        # No stdlib async counterpart: asyncio has no HTTP client, and writing
+        # one is a bigger thing than this module should contain. An offline
+        # bundle uses the sync client; anything else installs a real lineage.
+        raise EgressConfigError(
+            "no async egress client without httpx2 or httpx: "
+            "pip install 'hawcx-haap[httpx2]', or use the sync client(), which "
+            "falls back to a stdlib HTTP/1.1 implementation"
+        )
     httpx = importlib.import_module(flavor_name)
     _, async_cls = _build_transports(flavor_name)
     path = resolve_socket_path(socket_path)
