@@ -42,10 +42,19 @@ else:  # pragma: no cover — stubs for non-Windows import
     wt = _WtStub()  # type: ignore[assignment]
     _kernel32 = _Stub()
 
-GENERIC_READ = 0x80000000
-GENERIC_WRITE = 0x40000000
+# FILE_GENERIC_READ | FILE_WRITE_DATA: read, write and SYNCHRONIZE, and NOT
+# GENERIC_WRITE. On a pipe GENERIC_WRITE maps to FILE_GENERIC_WRITE, whose
+# FILE_APPEND_DATA (= FILE_CREATE_PIPE_INSTANCE) is the right to add a server
+# instance of the name. The supervisor grants dial-only principals exactly this
+# mask (hx_agent_client_auth_service `peer_identity::PIPE_DIAL_ACCESS`); asking
+# for GENERIC_WRITE against such a grant is refused at open (measured, Windows 11
+# 10.0.26200). A pipe granting GENERIC_READ | GENERIC_WRITE or more admits it too.
+PIPE_DIAL_ACCESS = 0x0012008B
 OPEN_EXISTING = 3
-INVALID_HANDLE_VALUE = -1
+# As `CreateFileW` returns it through `restype = HANDLE` (`c_void_p`): the
+# unsigned all-ones value. A bare `-1` never compares equal, so a failed open
+# was returned as a socket and surfaced later as `WriteFile` error 6.
+INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 ERROR_PIPE_BUSY = 231
 ERROR_BROKEN_PIPE = 109
 ERROR_NO_DATA = 232
@@ -138,7 +147,7 @@ def connect(path: str, *, timeout_secs: float | None = 5.0) -> WindowsPipeSocket
     while True:
         handle = _kernel32.CreateFileW(
             path,
-            GENERIC_READ | GENERIC_WRITE,
+            PIPE_DIAL_ACCESS,
             0,
             None,
             OPEN_EXISTING,
