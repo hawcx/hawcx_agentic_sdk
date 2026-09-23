@@ -143,5 +143,7 @@ def test_a_failed_open_raises_at_connect_not_at_first_write() -> None:
     from hawcx_haap import pipe_win
     from hawcx_haap.errors import IpcError
 
-    with pytest.raises(IpcError, match=r"CreateFileW failed .* \(error [23]\)"):
-        pipe_win.connect(rf"\.\pipe\hawcx-sdk-no-such-pipe-{os.getpid()}", timeout_secs=1.0)
+    # ERROR_FILE_NOT_FOUND (2): an absent PIPE. A malformed name reads as a
+    # relative file path and fails with ERROR_PATH_NOT_FOUND (3) instead.
+    with pytest.raises(IpcError, match=r"CreateFileW failed .* \(error 2\)"):
+        pipe_win.connect(rf"\\.\pipe\hawcx-sdk-no-such-pipe-{os.getpid()}", timeout_secs=1.0)

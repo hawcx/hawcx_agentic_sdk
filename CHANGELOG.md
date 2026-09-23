@@ -6,7 +6,7 @@ versions track each language surface independently (Rust crate
 versions in `Cargo.toml`, Node version in `node/package.json`, Python
 version in `python/pyproject.toml`).
 
-## [0.1.13] - unreleased (Python surface only)
+## [0.1.13] - 2026-09-23 (Python surface only)
 
 - **FIX (Windows): the named-pipe dial requests only what a dialer is granted.**
   `pipe_win.connect` opened with `GENERIC_READ | GENERIC_WRITE`. On a pipe
