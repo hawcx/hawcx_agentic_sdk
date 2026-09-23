@@ -6,6 +6,27 @@ versions track each language surface independently (Rust crate
 versions in `Cargo.toml`, Node version in `node/package.json`, Python
 version in `python/pyproject.toml`).
 
+## [0.1.13] - unreleased (Python surface only)
+
+- **FIX (Windows): the named-pipe dial requests only what a dialer is granted.**
+  `pipe_win.connect` opened with `GENERIC_READ | GENERIC_WRITE`. On a pipe
+  `GENERIC_WRITE` carries `FILE_CREATE_PIPE_INSTANCE`, the right to add a server
+  instance of the name, which the supervisor withholds from principals that only
+  dial, so that open is refused against a dial-only grant. It now requests
+  `PIPE_DIAL_ACCESS` (`FILE_GENERIC_READ | FILE_WRITE_DATA`), the mask
+  `hx_agent_client_auth_service` grants and requests (`peer_identity::PIPE_DIAL_ACCESS`).
+  A pipe granting `GENERIC_READ | GENERIC_WRITE` or more admits it too, so every
+  deployment that works today is unchanged. This is what lets the supervisor stop
+  granting the agent's LLM container create-instance on its Assembler pipe; the
+  Node SDK (`net.createConnection`, libuv) cannot request a narrower mask, so that
+  narrowing waits on it.
+- **FIX (Windows): a failed pipe open raises at `connect`, not at the first write.**
+  `INVALID_HANDLE_VALUE` was `-1`, but `CreateFileW` returns it through
+  `restype = HANDLE` as the unsigned all-ones value, so the comparison never
+  matched. A missing or refused pipe came back as a socket and failed later as
+  `WriteFile failed (error 6)`, naming the wrong operation and cause, and the
+  `ERROR_PIPE_BUSY` wait never ran.
+
 ## [0.1.12] - 2026-09-22 (Python surface only)
 
 - **FIX: the egress transport works in the bundles the SDK itself builds.**
