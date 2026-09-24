@@ -42,7 +42,10 @@ Windows.
 ```python
 from hawcx_haap import HawcxAgent
 
-with HawcxAgent.connect("/var/run/haap/research-u1/agent-assembler-0.sock") as agent:
+with HawcxAgent.connect(
+    "/var/run/haap/research-u1/agent-assembler-0.sock",
+    principal_allowlist=[],  # no runtime principal switching; see "Threat model"
+) as agent:
     response = agent.invoke(
         target_rs_url="https://api.example.com/search",
         http_method="POST",
@@ -57,7 +60,7 @@ with HawcxAgent.connect("/var/run/haap/research-u1/agent-assembler-0.sock") as a
 If you want the SDK to derive the socket path from an agent id:
 
 ```python
-with HawcxAgent.connect_by_agent_id("research-u1") as agent:
+with HawcxAgent.connect_by_agent_id("research-u1", principal_allowlist=[]) as agent:
     ...
 ```
 
