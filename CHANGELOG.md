@@ -6,6 +6,31 @@ versions track each language surface independently (Rust crate
 versions in `Cargo.toml`, Node version in `node/package.json`, Python
 version in `python/pyproject.toml`).
 
+## [0.1.14] - unreleased (Python surface only)
+
+- **FIX (#129): a tool call held for step-up (CIBA) approval is no longer cut
+  off at 30 s.** One deadline, `HAAP_SDK_IPC_TIMEOUT_SECS` (30 s), governed both
+  the Assembler connect/handshake and the wait for a tool call's reply. During a
+  hold the Assembler sends nothing for up to 120 s, so on macOS and Linux every
+  held call raised `TimeoutError('timed out')` at 30 s while the approval was
+  still open. The reply now has its own deadline,
+  `HAAP_SDK_TOOL_CALL_TIMEOUT_SECS` (default 180 s: the 120 s hold plus the
+  Assembler's 30 s RS request), also settable as
+  `AssemblerClient.connect(tool_call_timeout_secs=...)`. The 30 s connect and
+  handshake deadline is unchanged.
+- **FIX (Windows): the named pipe enforces its timeout.**
+  `WindowsPipeSocket.settimeout` stored the value and ignored it, so a Windows
+  agent waited forever on a stalled handshake or a held call. Reads and writes
+  are now overlapped and cancelled at the deadline, raising `TimeoutError` as a
+  socket does. `pipe_win.connect` applies its `timeout_secs` to the handshake,
+  as the Unix socket does. The Authenticator control pipe (`HawcxAgent.enroll`)
+  gets its 30 s deadline on Windows too, the same as on Unix.
+- **FIX: a timed-out tool call cannot answer the next one.** The socket stayed
+  open after a timeout, so if the Assembler answered late, the next `invoke()` on
+  the same client read that reply as its own answer, and its own request never
+  reached the Assembler. Reproduced on 418c74e. A timeout now closes the socket,
+  and the next `invoke()` re-dials.
+
 ## [0.1.13] - 2026-09-23 (Python surface only)
 
 - **FIX (Windows): the named-pipe dial requests only what a dialer is granted.**
