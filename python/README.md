@@ -67,11 +67,18 @@ and `\\.\pipe\haap-{agent_id}-agent-assembler-0` on Windows.
 
 ## API
 
-### `HawcxAgent.connect(endpoint, *, timeout_secs=5.0) -> HawcxAgent`
+### `HawcxAgent.connect(endpoint, *, principal_allowlist, timeout_secs=30.0) -> HawcxAgent`
 
 Open the agent IPC socket at `endpoint` and complete the version handshake.
 
-### `HawcxAgent.connect_by_agent_id(agent_id, *, index=0, ipc_dir=None, timeout_secs=5.0)`
+`timeout_secs` bounds the connect and handshake only; its default comes from
+`HAAP_SDK_IPC_TIMEOUT_SECS` (30 s). Each tool call's reply has its own, longer
+deadline, `HAAP_SDK_TOOL_CALL_TIMEOUT_SECS` (180 s, or per client via
+`AssemblerClient.connect(tool_call_timeout_secs=...)`), because a CIBA step-up
+hold can keep a call waiting up to 120 s before the Assembler even makes the RS
+request.
+
+### `HawcxAgent.connect_by_agent_id(agent_id, *, principal_allowlist, index=0, ipc_dir=None, timeout_secs=30.0)`
 
 Resolve the conventional path, then `connect`.
 
