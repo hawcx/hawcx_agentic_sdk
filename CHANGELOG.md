@@ -6,7 +6,10 @@ versions track each language surface independently (Rust crate
 versions in `Cargo.toml`, Node version in `node/package.json`, Python
 version in `python/pyproject.toml`).
 
-## [0.1.14] - unreleased (Python surface only)
+## [0.1.14] - 2026-09-23 (Python surface only)
+
+Also carries the two 0.1.13 fixes below: 0.1.13 was never tagged, so never
+published, and PyPI went from 0.1.12 straight to 0.1.14.
 
 - **FIX (#129): a tool call held for step-up (CIBA) approval is no longer cut
   off at 30 s.** One deadline, `HAAP_SDK_IPC_TIMEOUT_SECS` (30 s), governed both
@@ -31,7 +34,7 @@ version in `python/pyproject.toml`).
   reached the Assembler. Reproduced on 418c74e. A timeout now closes the socket,
   and the next `invoke()` re-dials.
 
-## [0.1.13] - 2026-09-23 (Python surface only)
+## [0.1.13] - never published; shipped in 0.1.14 (Python surface only)
 
 - **FIX (Windows): the named-pipe dial requests only what a dialer is granted.**
   `pipe_win.connect` opened with `GENERIC_READ | GENERIC_WRITE`. On a pipe
