@@ -42,7 +42,10 @@ Windows.
 ```python
 from hawcx_haap import HawcxAgent
 
-with HawcxAgent.connect("/var/run/haap/research-u1/agent-assembler-0.sock") as agent:
+with HawcxAgent.connect(
+    "/var/run/haap/research-u1/agent-assembler-0.sock",
+    principal_allowlist=[],  # no runtime principal switching; see "Threat model"
+) as agent:
     response = agent.invoke(
         target_rs_url="https://api.example.com/search",
         http_method="POST",
@@ -57,7 +60,7 @@ with HawcxAgent.connect("/var/run/haap/research-u1/agent-assembler-0.sock") as a
 If you want the SDK to derive the socket path from an agent id:
 
 ```python
-with HawcxAgent.connect_by_agent_id("research-u1") as agent:
+with HawcxAgent.connect_by_agent_id("research-u1", principal_allowlist=[]) as agent:
     ...
 ```
 
@@ -67,11 +70,18 @@ and `\\.\pipe\haap-{agent_id}-agent-assembler-0` on Windows.
 
 ## API
 
-### `HawcxAgent.connect(endpoint, *, timeout_secs=5.0) -> HawcxAgent`
+### `HawcxAgent.connect(endpoint, *, principal_allowlist, timeout_secs=30.0) -> HawcxAgent`
 
 Open the agent IPC socket at `endpoint` and complete the version handshake.
 
-### `HawcxAgent.connect_by_agent_id(agent_id, *, index=0, ipc_dir=None, timeout_secs=5.0)`
+`timeout_secs` bounds the connect and handshake only; its default comes from
+`HAAP_SDK_IPC_TIMEOUT_SECS` (30 s). Each tool call's reply has its own, longer
+deadline, `HAAP_SDK_TOOL_CALL_TIMEOUT_SECS` (180 s, or per client via
+`AssemblerClient.connect(tool_call_timeout_secs=...)`), because a CIBA step-up
+hold can keep a call waiting up to 120 s before the Assembler even makes the RS
+request.
+
+### `HawcxAgent.connect_by_agent_id(agent_id, *, principal_allowlist, index=0, ipc_dir=None, timeout_secs=30.0)`
 
 Resolve the conventional path, then `connect`.
 
