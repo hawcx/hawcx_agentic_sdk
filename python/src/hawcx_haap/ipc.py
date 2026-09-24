@@ -53,6 +53,17 @@ from hawcx_haap.errors import HandshakeError, IpcError, RequestRejected
 # a laptop cold-start and a warm pod are minutes apart in what they need.
 _DEFAULT_IPC_TIMEOUT = float(os.environ.get("HAAP_SDK_IPC_TIMEOUT_SECS", "30"))
 
+# Default deadline for a tool call's reply, once connected (#129).
+#
+# NOT the connect deadline above. A call held for human step-up (CIBA) gets no
+# bytes until the hold resolves: the Assembler polls the JIT for up to 120s
+# (`PENDING_ENTRY_DEFAULT_TTL_SECS`, hx_agent_client_auth_service
+# haap-tqs-common/src/partial_token.rs) and then still makes the RS request
+# (30s, `HAAP_ASSEMBLER_HTTP_TIMEOUT_MS`). When the connect deadline also
+# governed this wait, macOS/Linux gave up on every held call at 30s while the
+# human's approval was still open. 180s covers 120 + 30 with slack.
+_DEFAULT_TOOL_CALL_TIMEOUT = float(os.environ.get("HAAP_SDK_TOOL_CALL_TIMEOUT_SECS", "180"))
+
 
 # ── Protocol constants (mirror crates/haap-ipc/src/handshake.rs) ─────
 
@@ -577,6 +588,8 @@ class AssemblerClient:
         experimental_capabilities: tuple[str, ...] = (),
     ) -> None:
         self._sock = sock
+        # Set when a timed-out call closed `_sock`; the next `invoke` re-dials.
+        self._needs_redial = False
         # Experimental MCP capabilities the SDK advertises on this
         # connection. The Assembler echoes these into the
         # ``experimental`` field of its outbound MCP ``initialize``
@@ -591,8 +604,13 @@ class AssemblerClient:
         *,
         timeout_secs: float | None = _DEFAULT_IPC_TIMEOUT,
         experimental_capabilities: tuple[str, ...] = (),
+        tool_call_timeout_secs: float | None = _DEFAULT_TOOL_CALL_TIMEOUT,
     ) -> AssemblerClient:
         """Connect, handshake, and return a client.
+
+        ``timeout_secs`` bounds the connect and handshake;
+        ``tool_call_timeout_secs`` bounds each tool call after that (``None``:
+        wait for the reply however long it takes).
 
         ``experimental_capabilities`` is a tuple of capability tags the
         SDK advertises via the Assembler to upstream MCP servers (HAAP
@@ -633,6 +651,7 @@ class AssemblerClient:
             raise IpcError(
                 f"expected peer role Assembler (0x05), got 0x{peer_role:02x}"
             )
+        sock.settimeout(tool_call_timeout_secs)
         client = cls(sock, experimental_capabilities=experimental_capabilities)
         # Remember how we got here so `invoke` can re-dial. The Assembler
         # serves ONE request per accepted connection (its accept loop calls
@@ -641,6 +660,7 @@ class AssemblerClient:
         # life of the object. Without the endpoint we cannot recover.
         client._endpoint = endpoint
         client._timeout_secs = timeout_secs
+        client._tool_call_timeout_secs = tool_call_timeout_secs
         return client
 
     def _reconnect(self) -> None:
@@ -665,8 +685,12 @@ class AssemblerClient:
             self._endpoint,
             timeout_secs=getattr(self, "_timeout_secs", _DEFAULT_IPC_TIMEOUT),
             experimental_capabilities=self._experimental_capabilities,
+            tool_call_timeout_secs=getattr(
+                self, "_tool_call_timeout_secs", _DEFAULT_TOOL_CALL_TIMEOUT
+            ),
         )
         self._sock = fresh._sock
+        self._needs_redial = False
 
     def invoke(self, req: ToolCallRequest) -> ToolCallResponse:
         """Send a ToolCallRequest; await ToolCallResponse or RequestRejected.
@@ -679,7 +703,12 @@ class AssemblerClient:
         would otherwise fail with a broken pipe rather than a verdict. A
         RequestRejected is a VERDICT and is raised, never retried — retrying a
         refusal would turn one denial into two attempts at the same action.
+
+        Raises :class:`TimeoutError` if no reply arrives within
+        ``tool_call_timeout_secs``; that call is abandoned, not retried.
         """
+        if self._needs_redial:
+            self._reconnect()
         try:
             return self._invoke_once(req)
         except (BrokenPipeError, ConnectionResetError, EOFError):
@@ -709,9 +738,17 @@ class AssemblerClient:
                 self._experimental_capabilities
             )
         payload = json.dumps(wire, separators=(",", ":")).encode("utf-8")
-        write_frame(self._sock, MSG_TOOL_CALL_REQUEST, payload)
-
-        msg_type, body = read_frame(self._sock)
+        try:
+            write_frame(self._sock, MSG_TOOL_CALL_REQUEST, payload)
+            msg_type, body = read_frame(self._sock)
+        except TimeoutError:
+            # The Assembler may still answer this call on this socket. Read by
+            # the next invoke(), that late reply would be returned as the answer
+            # to a different request, so the socket goes and the next call
+            # re-dials.
+            self.close()
+            self._needs_redial = True
+            raise
         if msg_type == MSG_TOOL_CALL_RESPONSE:
             obj = json.loads(body.decode("utf-8"))
             return ToolCallResponse.from_wire(obj)

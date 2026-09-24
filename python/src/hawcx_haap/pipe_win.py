@@ -1,9 +1,9 @@
 """Windows Named Pipe client for the Assembler IPC.
 
-Implemented via ``ctypes`` against ``kernel32`` so the package has no required
-native build. The returned object exposes the subset of :class:`socket.socket`
-that :mod:`hawcx_haap.ipc` uses: ``recv``, ``sendall``, ``settimeout``,
-``close``.
+Implemented via ``ctypes`` against ``kernel32``, plus CPython's own ``_winapi``
+for the overlapped reads and writes, so the package has no required native
+build. The returned object exposes the subset of :class:`socket.socket` that
+:mod:`hawcx_haap.ipc` uses: ``recv``, ``sendall``, ``settimeout``, ``close``.
 
 Reference: ``crates/haap-ipc/src/win_dacl.rs``. On the server side the pipe is
 created with a DACL allowing only the current user (or LocalService); the
@@ -25,6 +25,7 @@ from hawcx_haap.errors import IpcError
 # wintypes is only meaningful on Windows; fall back to plain ctypes types so
 # this module is importable for pytest collection / mypy on Unix.
 if sys.platform == "win32":
+    import _winapi
     import ctypes.wintypes as wt  # type: ignore[attr-defined]
 
     _kernel32: Any = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
@@ -41,6 +42,7 @@ else:  # pragma: no cover — stubs for non-Windows import
 
     wt = _WtStub()  # type: ignore[assignment]
     _kernel32 = _Stub()
+    _winapi = _Stub()
 
 # FILE_GENERIC_READ | FILE_WRITE_DATA: read, write and SYNCHRONIZE, and NOT
 # GENERIC_WRITE. On a pipe GENERIC_WRITE maps to FILE_GENERIC_WRITE, whose
@@ -55,9 +57,14 @@ OPEN_EXISTING = 3
 # unsigned all-ones value. A bare `-1` never compares equal, so a failed open
 # was returned as a socket and surfaced later as `WriteFile` error 6.
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+FILE_FLAG_OVERLAPPED = 0x40000000
 ERROR_PIPE_BUSY = 231
 ERROR_BROKEN_PIPE = 109
 ERROR_NO_DATA = 232
+ERROR_OPERATION_ABORTED = 995
+ERROR_IO_PENDING = 997
+WAIT_OBJECT_0 = 0
+INFINITE = 0xFFFFFFFF
 
 if sys.platform == "win32":  # pragma: no cover — Windows-only signatures
     _kernel32.CreateFileW.argtypes = [
@@ -74,24 +81,6 @@ if sys.platform == "win32":  # pragma: no cover — Windows-only signatures
     _kernel32.WaitNamedPipeW.argtypes = [wt.LPCWSTR, wt.DWORD]
     _kernel32.WaitNamedPipeW.restype = wt.BOOL
 
-    _kernel32.ReadFile.argtypes = [
-        wt.HANDLE,
-        ctypes.c_void_p,
-        wt.DWORD,
-        ctypes.POINTER(wt.DWORD),
-        ctypes.c_void_p,
-    ]
-    _kernel32.ReadFile.restype = wt.BOOL
-
-    _kernel32.WriteFile.argtypes = [
-        wt.HANDLE,
-        ctypes.c_void_p,
-        wt.DWORD,
-        ctypes.POINTER(wt.DWORD),
-        ctypes.c_void_p,
-    ]
-    _kernel32.WriteFile.restype = wt.BOOL
-
     _kernel32.CloseHandle.argtypes = [wt.HANDLE]
     _kernel32.CloseHandle.restype = wt.BOOL
 
@@ -104,34 +93,52 @@ class WindowsPipeSocket:
         self._timeout: float | None = None
 
     def settimeout(self, timeout: float | None) -> None:
-        # Named Pipe timeouts via overlapped I/O are non-trivial; we fall back
-        # to per-call best-effort. For v0.1.0a1 the timeout is advisory and the
-        # client is expected to close on shutdown.
+        # Enforced per read and write, like a socket's (#129). It used to be
+        # stored and ignored, so a Windows read never timed out at all.
         self._timeout = timeout
 
+    def _finish(self, ov: Any, err: int) -> int:
+        """Wait out an overlapped read or write, cancelling it at the deadline.
+
+        Returns the bytes moved; raises :class:`TimeoutError`, as a socket
+        does, when the deadline passed first. ``_winapi`` owns the buffer and
+        OVERLAPPED, and ``GetOverlappedResult(True)`` waits out the cancel,
+        so nothing is written into freed memory after we give up.
+        """
+        if err == ERROR_IO_PENDING:
+            ms = INFINITE if self._timeout is None else min(int(self._timeout * 1000), INFINITE - 1)
+            if _winapi.WaitForSingleObject(ov.event, ms) != WAIT_OBJECT_0:
+                ov.cancel()
+        # A cancel that lost the race to completion still returns the data.
+        n, err = ov.GetOverlappedResult(True)
+        if err == ERROR_OPERATION_ABORTED:
+            raise TimeoutError("timed out")
+        return int(n)
+
     def sendall(self, data: bytes) -> None:
-        written = wt.DWORD(0)
-        buf = (ctypes.c_char * len(data)).from_buffer_copy(data)
-        ok = _kernel32.WriteFile(self._handle, buf, len(data), ctypes.byref(written), None)
-        if not ok or written.value != len(data):
-            err = ctypes.get_last_error()  # type: ignore[attr-defined]
-            raise IpcError(
-                f"WriteFile failed (error {err}, wrote {written.value}/{len(data)})"
-            )
+        try:
+            ov, err = _winapi.WriteFile(self._handle, data, overlapped=True)
+            written = self._finish(ov, err)
+        except TimeoutError:
+            raise
+        except OSError as e:
+            raise IpcError(f"WriteFile failed (error {e.winerror})") from e
+        if written != len(data):
+            raise IpcError(f"WriteFile failed (wrote {written}/{len(data)})")
 
     def recv(self, nbytes: int) -> bytes:
         if nbytes <= 0:
             return b""
-        buf = (ctypes.c_char * nbytes)()
-        read = wt.DWORD(0)
-        ok = _kernel32.ReadFile(self._handle, buf, nbytes, ctypes.byref(read), None)
-        if not ok:
-            err = ctypes.get_last_error()  # type: ignore[attr-defined]
-            if err in (ERROR_BROKEN_PIPE, ERROR_NO_DATA):
+        try:
+            ov, err = _winapi.ReadFile(self._handle, nbytes, overlapped=True)
+            self._finish(ov, err)
+        except TimeoutError:
+            raise
+        except OSError as e:
+            if e.winerror in (ERROR_BROKEN_PIPE, ERROR_NO_DATA):
                 return b""
-            raise IpcError(f"ReadFile failed (error {err})")
-        # ctypes c_char array indexing returns bytes per element; flatten.
-        return b"".join(buf[i] for i in range(read.value))
+            raise IpcError(f"ReadFile failed (error {e.winerror})") from e
+        return bytes(ov.getbuffer())
 
     def close(self) -> None:
         if self._handle and self._handle != INVALID_HANDLE_VALUE:
@@ -151,11 +158,14 @@ def connect(path: str, *, timeout_secs: float | None = 5.0) -> WindowsPipeSocket
             0,
             None,
             OPEN_EXISTING,
-            0,
+            FILE_FLAG_OVERLAPPED,
             None,
         )
         if handle != INVALID_HANDLE_VALUE:
-            return WindowsPipeSocket(handle)
+            sock = WindowsPipeSocket(handle)
+            # As a Unix socket carries its connect timeout into the handshake.
+            sock.settimeout(timeout_secs)
+            return sock
 
         err = ctypes.get_last_error()
         if err != ERROR_PIPE_BUSY:
