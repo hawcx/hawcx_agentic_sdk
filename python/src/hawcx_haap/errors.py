@@ -101,3 +101,16 @@ class EgressPeerCredError(EgressError):
     """The broker closed the connection without sending any reply — the
     peer-credential (SO_PEERCRED) check failed. Surfaced distinctly from a
     generic connection reset so a UID/sandbox misconfig is debuggable."""
+
+
+class EgressBrokerBusy(EgressError):
+    """Windows placed-channel broker status ``BUSY`` (``0x02``): the per-agent
+    or process-wide relay cap is full. Not a policy decision and not a
+    transport fault -- the broker answered, completely, and said "not now"."""
+
+    def __init__(self, host: str, port: int) -> None:
+        super().__init__(
+            f"egress broker is at its connection cap; {host}:{port} was not dialed (retry later)"
+        )
+        self.host = host
+        self.port = port
