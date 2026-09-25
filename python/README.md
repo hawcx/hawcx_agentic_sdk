@@ -366,6 +366,15 @@ paths the supervisor sets), or pass `socket_path=`. If none resolves to an
 existing socket, `client()` **raises** rather than falling back to the direct
 network — a silent fallback would defeat the control.
 
+**On Windows** there is no broker socket. The supervisor places one pipe
+handle in the agent and names it in `$HAAP_EGRESS_BROKER_HANDLE`; for each
+connection `client()` / `async_client()` ask over it for `host:port` and get
+back a fresh pipe the supervisor has already screened and connected, and TLS
+runs end to end over that pipe. Nothing changes in your code. If the variable
+is unset or malformed, `client()` raises; `socket_path=` is refused there, and
+`requests_session()` raises `EgressConfigError` on Windows (urllib3 needs a
+real socket). A connection-cap refusal raises `EgressBrokerBusy`.
+
 Per ADR-0048 the shim always sends the hostname as `ATYP=0x03` (DOMAINNAME)
 and never resolves DNS itself, so the broker enforces its allowlist against
 the name the agent actually asked for. Failures map to distinguishable

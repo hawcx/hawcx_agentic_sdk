@@ -37,18 +37,32 @@ resolves DNS locally: the broker resolves the name the agent actually asked
 for, which is what makes its hostname allowlist meaningful (``socks5h``
 semantics). IP-literal hosts are passed through *as a name* — the broker,
 not the shim, decides on them.
+
+**Windows.** A confined Windows agent has no AF_UNIX broker socket. The
+supervisor instead places one pipe handle in the agent and names it in
+``$HAAP_EGRESS_BROKER_HANDLE``; per connection the shim asks over it for
+``host:port`` and receives a fresh pipe already connected to that endpoint
+(see "Windows: the placed control channel" below). :func:`client` and
+:func:`async_client` use it transparently, with the same end-to-end TLS and
+``Egress*`` errors. :func:`requests_session` is not available there and says
+so. Unset or malformed, the variable raises; there is no direct-network path.
 """
 
 from __future__ import annotations
 
 import importlib
 import importlib.util
+import io
 import os
 import socket
+import ssl
 import stat
+import sys
+import threading
 from typing import Any
 
 from hawcx_haap.errors import (
+    EgressBrokerBusy,
     EgressConfigError,
     EgressError,
     EgressHostUnreachable,
@@ -56,6 +70,7 @@ from hawcx_haap.errors import (
     EgressPeerCredError,
     EgressPolicyDenied,
     EgressProtocolError,
+    IpcError,
 )
 
 # EgressHTTPTransport / EgressAsyncHTTPTransport are provided lazily via
@@ -66,6 +81,7 @@ __all__ = [
     "async_client",
     "flavor",
     "requests_session",
+    "resolve_broker_handle",
     "resolve_socket_path",
 ]
 
@@ -338,6 +354,491 @@ async def _socks5_connect_async(
     return stream
 
 
+# ── Windows: the placed control channel (#508 gap 1) ────────────────────────
+#
+# A confined Windows agent has no AF_UNIX rendezvous: the supervisor measured
+# pathname AF_UNIX sockets and by-name pipes as unreachable from inside an
+# AppContainer. What it does instead (hx_agent_client_auth_service,
+# crates/haap-supervisor/src/egress_broker.rs `serve_placed_channel`):
+#
+#   * It PLACES one pipe handle in the agent at spawn
+#     (PROC_THREAD_ATTRIBUTE_HANDLE_LIST) and names it by numeric value in
+#     $HAAP_EGRESS_BROKER_HANDLE (graph.rs `ENV_EGRESS_BROKER_HANDLE`, set as a
+#     decimal `usize`). Present means a broker is on the other end.
+#   * That handle is a CONTROL channel for the life of the agent, one request at
+#     a time. Per connection the agent writes
+#         [0x01 REQ_CONNECT][port hi][port lo][host len][host bytes...]
+#     and reads exactly six bytes back
+#         [status][socks5 rep][handle b0][b1][b2][b3]      (big-endian)
+#     (egress_broker.rs `pub mod mux`, `read_mux_request`, `write_mux_reply`).
+#   * On status OK the supervisor has already screened and dialed host:port and
+#     `DuplicateHandle`d a fresh pipe end into THIS process; the handle field is
+#     its value here. That pipe carries raw bytes to the destination -- no
+#     SOCKS5 handshake is owed. On any other status the handle field is 0 and
+#     nothing was vended.
+#
+# Both the control handle and every vended one are pipe ends opened
+# FILE_FLAG_OVERLAPPED (graph.rs `create_supervisor_channel_pair`,
+# sandbox/windows.rs `connected_pipe_pair`), which is exactly what
+# `pipe_win.WindowsPipeSocket` already drives (overlapped ReadFile/WriteFile via
+# `_winapi`, with a real deadline). A pipe is not a socket, so `ssl` cannot wrap
+# it; TLS runs over it through `ssl.MemoryBIO` instead, still end to end, still
+# with the caller's own SSLContext (see _TlsOverStream).
+#
+# Fail closed, on every path: an absent, empty or malformed handle variable
+# raises; a short, oversized or malformed reply raises and retires the control
+# channel for the rest of the process (the next reply could belong to the
+# request that just failed); nothing here ever opens a network socket.
+
+_ENV_BROKER_HANDLE = "HAAP_EGRESS_BROKER_HANDLE"
+
+_MUX_REQ_CONNECT = 0x01
+_MUX_OK = 0x00
+_MUX_DENIED = 0x01
+_MUX_BUSY = 0x02
+_MUX_VEND_FAILED = 0x03
+_MUX_REPLY_LEN = 6
+
+_FILE_TYPE_PIPE = 0x0003
+# Largest value a handle can carry: the supervisor formats a `usize`.
+_MAX_HANDLE_VALUE = 2**64 - 1
+_TLS_READ_CHUNK = 65536
+
+
+def _placed_channel_platform() -> bool:
+    """True where the broker is a placed handle rather than an AF_UNIX socket.
+
+    A function (not a constant) so tests can drive the Windows code path on a
+    Unix CI host with only the OS handle layer faked."""
+    return sys.platform == "win32"
+
+
+def _parse_broker_handle(raw: str | None) -> int:
+    """Parse ``$HAAP_EGRESS_BROKER_HANDLE``, or raise. Never falls back.
+
+    Same acceptance as the supervisor's own reader
+    (`haap_proc_hardening::parse_inherited_handle`): surrounding whitespace is
+    trimmed, then ASCII decimal digits only, and 0 is refused. Unlike that
+    reader, absent or empty is an ERROR here rather than "dial by name": there
+    is no name to dial from inside a container, and the only other way out is
+    the direct network this module exists to refuse.
+    """
+    if raw is None or raw.strip() == "":
+        raise EgressConfigError(
+            f"no egress broker channel configured — {_ENV_BROKER_HANDLE} is not set. "
+            "On Windows the supervisor places the broker channel in the agent and names "
+            "it there. Refusing to fall back to direct network access."
+        )
+    s = raw.strip()
+    # str.isdigit() accepts non-ASCII digits; the contract is ASCII decimal.
+    if not s.isascii() or not s.isdigit():
+        raise EgressConfigError(
+            f"{_ENV_BROKER_HANDLE}={s!r} is not a decimal handle value — "
+            "refusing to fall back to direct network access."
+        )
+    value = int(s)
+    if value == 0:
+        raise EgressConfigError(f"{_ENV_BROKER_HANDLE}=0 is never a valid handle")
+    if value > _MAX_HANDLE_VALUE:
+        raise EgressConfigError(f"{_ENV_BROKER_HANDLE}={s!r} does not fit a handle")
+    return value
+
+
+def _mux_request(host: str, port: int) -> bytes:
+    """Build one control request. Host rules are the SOCKS5 DOMAINNAME rules
+    (1..255 bytes, no NUL, IDNA for non-ASCII, never resolved locally) because
+    the wire carries the same one-byte length and the broker screens the same
+    name either way."""
+    if not isinstance(port, int) or isinstance(port, bool) or not 0 <= port <= 0xFFFF:
+        raise EgressProtocolError(f"egress port {port!r} out of range 0..65535")
+    raw = _encode_host(host)
+    return bytes([_MUX_REQ_CONNECT]) + port.to_bytes(2, "big") + bytes([len(raw)]) + raw
+
+
+def _parse_mux_reply(reply: bytes, host: str, port: int) -> int:
+    """Validate one control reply and return the vended handle value, or raise.
+
+    Fixed width is the protocol's own integrity rule: a complete reply with a
+    non-zero status is a refusal; anything else is the transport failing."""
+    if len(reply) != _MUX_REPLY_LEN:
+        raise EgressProtocolError(
+            f"egress control reply is {len(reply)} bytes, expected {_MUX_REPLY_LEN}"
+        )
+    status, rep = reply[0], reply[1]
+    handle = int.from_bytes(reply[2:6], "big")
+    if status == _MUX_OK:
+        if rep != 0x00:
+            raise EgressProtocolError(f"egress control reply OK carries socks5 rep {rep:#04x}")
+        if handle == 0:
+            raise EgressProtocolError("egress broker replied OK with a null handle")
+        return handle
+    if handle != 0:
+        raise EgressProtocolError(
+            f"egress control refusal (status {status:#04x}) carries a non-zero handle"
+        )
+    if status == _MUX_DENIED:
+        if rep == 0x00:
+            raise EgressProtocolError("egress control refusal carries socks5 rep 0x00 (success)")
+        raise _reply_exception(rep, host, port)
+    if status == _MUX_BUSY:
+        raise EgressBrokerBusy(host, port)
+    if status == _MUX_VEND_FAILED:
+        raise EgressProtocolError(
+            "egress broker allowed the endpoint but could not place a channel in this "
+            "process (vend_failed) — not a policy decision"
+        )
+    raise EgressProtocolError(f"unknown egress control status {status:#04x}")
+
+
+# ---- OS handle layer (Windows only; the only part tests replace) -----------
+
+
+def _k32() -> Any:
+    """kernel32 with the two extra signatures this module calls declared."""
+    import ctypes
+    import ctypes.wintypes as wt  # type: ignore[attr-defined,unused-ignore]
+
+    from hawcx_haap import pipe_win
+
+    k32 = pipe_win._kernel32
+    k32.GetFileType.argtypes = [wt.HANDLE]
+    k32.GetFileType.restype = wt.DWORD
+    k32.PeekNamedPipe.argtypes = [
+        wt.HANDLE,
+        ctypes.c_void_p,
+        wt.DWORD,
+        ctypes.POINTER(wt.DWORD),
+        ctypes.POINTER(wt.DWORD),
+        ctypes.POINTER(wt.DWORD),
+    ]
+    k32.PeekNamedPipe.restype = wt.BOOL
+    return k32
+
+
+def _win_adopt(handle: int) -> Any:
+    """Wrap a handle this process holds as a socket-like pipe, after checking
+    it really is a pipe. Never closes a handle it did not confirm: a value that
+    names something else in this process is not ours to close."""
+    from hawcx_haap import pipe_win
+
+    if sys.platform != "win32":  # pragma: no cover - guarded by _placed_channel_platform
+        raise EgressConfigError("placed egress channels exist only on Windows")
+    ftype = _k32().GetFileType(handle)
+    if ftype != _FILE_TYPE_PIPE:
+        raise EgressConfigError(
+            f"egress broker handle {handle} is not a pipe (GetFileType={ftype}) — "
+            "refusing to use it"
+        )
+    return pipe_win.WindowsPipeSocket(handle)
+
+
+def _win_is_readable(raw: Any) -> bool:
+    """httpcore's "is_readable": data waiting, or the far end gone. An idle
+    keep-alive the provider closed reads as broken here, so httpcore drops it
+    instead of sending the next model call into a dead relay."""
+    import ctypes
+    import ctypes.wintypes as wt  # type: ignore[attr-defined,unused-ignore]
+
+    avail = wt.DWORD(0)
+    ok = _k32().PeekNamedPipe(raw._handle, None, 0, None, ctypes.byref(avail), None)
+    return (not ok) or avail.value > 0
+
+
+class _PipeStream:
+    """A socket-like byte stream over one vended channel.
+
+    The surface ``http.client`` and the TLS layer use: ``recv``, ``sendall``,
+    ``settimeout``, ``makefile``, ``close``. Transport failures surface as
+    ``OSError`` subclasses (timeouts as ``TimeoutError``), as a socket's do, so
+    every caller's existing error mapping applies unchanged."""
+
+    def __init__(self, raw: Any) -> None:
+        self._raw = raw
+        self._closed = False
+
+    def settimeout(self, timeout: float | None) -> None:
+        self._raw.settimeout(timeout)
+
+    def recv(self, n: int) -> bytes:
+        try:
+            return bytes(self._raw.recv(n))
+        except TimeoutError:
+            raise
+        except IpcError as exc:
+            raise ConnectionError(str(exc)) from exc
+
+    def sendall(self, data: bytes) -> None:
+        try:
+            self._raw.sendall(bytes(data))
+        except TimeoutError:
+            raise
+        except IpcError as exc:
+            raise ConnectionError(str(exc)) from exc
+
+    def is_readable(self) -> bool:
+        if self._closed:
+            return True
+        try:
+            return _win_is_readable(self._raw)
+        except OSError:
+            return True
+
+    def makefile(self, mode: str = "rb", *args: Any, **kwargs: Any) -> Any:
+        return _makefile(self, mode)
+
+    def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+            self._raw.close()
+
+
+class _RawReader(io.RawIOBase):
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, b: Any) -> int:
+        data = self._stream.recv(len(b))
+        n = len(data)
+        b[:n] = data
+        return n
+
+
+def _makefile(stream: Any, mode: str) -> Any:
+    """``socket.makefile("rb")`` for a non-socket stream (what ``http.client``
+    calls to read a response). Read-only on purpose: nothing here writes
+    through a file object."""
+    if "w" in mode or "b" not in mode:
+        raise ValueError(f"egress channel makefile supports only binary read, not {mode!r}")
+    return io.BufferedReader(_RawReader(stream))
+
+
+class _TlsOverStream:
+    """End-to-end TLS over a byte stream that is not a socket.
+
+    ``SSLContext.wrap_bio`` with the CALLER's context, so certificate and
+    hostname verification are exactly what they would be via ``wrap_socket``;
+    the broker, the relay and this class only ever move ciphertext. Same
+    technique as httpcore's own TLS-in-TLS stream."""
+
+    def __init__(
+        self, raw: Any, ctx: ssl.SSLContext, server_hostname: str | None, timeout: float | None
+    ) -> None:
+        self._raw = raw
+        self._in = ssl.MemoryBIO()
+        self._out = ssl.MemoryBIO()
+        self._obj = ctx.wrap_bio(
+            self._in, self._out, server_side=False, server_hostname=server_hostname
+        )
+        self._raw.settimeout(timeout)
+        self._io(self._obj.do_handshake)
+
+    @property
+    def ssl_object(self) -> ssl.SSLObject:
+        return self._obj
+
+    def _flush(self) -> None:
+        pending = self._out.read()
+        if pending:
+            self._raw.sendall(pending)
+
+    def _io(self, fn: Any, *args: Any) -> Any:
+        while True:
+            try:
+                result = fn(*args)
+            except ssl.SSLWantReadError:
+                self._flush()
+                data = self._raw.recv(_TLS_READ_CHUNK)
+                if data:
+                    self._in.write(data)
+                else:
+                    self._in.write_eof()
+                continue
+            except ssl.SSLWantWriteError:  # pragma: no cover - MemoryBIO never blocks writes
+                self._flush()
+                continue
+            self._flush()
+            return result
+
+    def settimeout(self, timeout: float | None) -> None:
+        self._raw.settimeout(timeout)
+
+    def recv(self, n: int) -> bytes:
+        if n <= 0:
+            return b""
+        try:
+            return bytes(self._io(self._obj.read, n))
+        except ssl.SSLZeroReturnError:
+            return b""
+
+    def sendall(self, data: bytes) -> None:
+        view = memoryview(bytes(data))
+        while view:
+            written = self._io(self._obj.write, view)
+            view = view[written:]
+
+    def is_readable(self) -> bool:
+        return bool(self._obj.pending()) or bool(self._in.pending) or self._raw.is_readable()
+
+    def makefile(self, mode: str = "rb", *args: Any, **kwargs: Any) -> Any:
+        return _makefile(self, mode)
+
+    def close(self) -> None:
+        self._raw.close()
+
+
+def _wrap_tls(sock: Any, ctx: ssl.SSLContext, host: str, timeout: float | None) -> Any:
+    """TLS on whatever the broker handed back: a real socket (Unix, unchanged)
+    or a placed pipe (Windows)."""
+    if isinstance(sock, socket.socket):
+        return ctx.wrap_socket(sock, server_hostname=host)
+    return _TlsOverStream(sock, ctx, host, timeout)
+
+
+def _is_refusal(reply: bytes) -> bool:
+    """A complete reply with a known non-OK status and no handle."""
+    return (
+        len(reply) == _MUX_REPLY_LEN
+        and reply[0] in (_MUX_DENIED, _MUX_BUSY, _MUX_VEND_FAILED)
+        and reply[2:6] == b"\x00\x00\x00\x00"
+        and not (reply[0] == _MUX_DENIED and reply[1] == 0x00)
+    )
+
+
+class _ControlChannel:
+    """This process's one placed control channel. Requests are serialised: the
+    protocol has no request ids, so the reply read is the reply to the request
+    just written only if nothing else is in flight."""
+
+    def __init__(self, handle: int) -> None:
+        self.handle = handle
+        self._lock = threading.Lock()
+        self._raw: Any = None
+        self._broken: str | None = None
+
+    def _retire(self, why: str) -> None:
+        # Never closed: the handle is the supervisor's placement, and there is
+        # no second one. Retiring it means every later request fails closed
+        # instead of reading a reply that may belong to an abandoned request.
+        self._broken = why
+
+    def adopt(self) -> None:
+        """Adopt the placed handle once (checking it is a pipe), so a bad
+        handle fails at ``client()`` rather than at the first request."""
+        with self._lock:
+            if self._raw is None:
+                self._raw = _PipeStream(_win_adopt(self.handle))
+
+    def request(self, host: str, port: int, timeout: float | None) -> int:
+        """Ask the broker for a channel to host:port; return the vended handle."""
+        req = _mux_request(host, port)  # validate before touching the channel
+        with self._lock:
+            if self._broken is not None:
+                raise EgressProtocolError(
+                    f"egress control channel retired after an earlier failure ({self._broken}); "
+                    "refusing to guess which reply is whose — restart the agent"
+                )
+            if self._raw is None:
+                self._raw = _PipeStream(_win_adopt(self.handle))
+            try:
+                self._raw.settimeout(timeout)
+                self._raw.sendall(req)
+                reply = bytearray()
+                while len(reply) < _MUX_REPLY_LEN:
+                    chunk = self._raw.recv(_MUX_REPLY_LEN - len(reply))
+                    if not chunk:
+                        break
+                    reply.extend(chunk)
+            except TimeoutError as exc:
+                self._retire("timed out awaiting a reply")
+                raise EgressProtocolError("timed out awaiting the egress control reply") from exc
+            except OSError as exc:
+                self._retire(f"transport error: {exc}")
+                raise EgressProtocolError(f"egress control channel failed: {exc}") from exc
+            if len(reply) != _MUX_REPLY_LEN:
+                self._retire("broker closed the channel")
+                raise EgressProtocolError(
+                    "egress broker closed the control channel "
+                    f"({len(reply)}/{_MUX_REPLY_LEN} reply bytes) — the broker is gone"
+                )
+            try:
+                return _parse_mux_reply(bytes(reply), host, port)
+            except EgressError as exc:
+                # A complete, well-formed refusal leaves the channel in step;
+                # anything else means the peer is not speaking this protocol.
+                if not _is_refusal(bytes(reply)):
+                    self._retire(f"malformed reply: {exc}")
+                raise
+
+
+_CONTROL_LOCK = threading.Lock()
+_CONTROLS: dict[int, _ControlChannel] = {}
+
+
+class _PlacedBroker:
+    """The Windows broker endpoint: what ``client()`` holds instead of a path."""
+
+    def __init__(self, handle: int) -> None:
+        with _CONTROL_LOCK:
+            control = _CONTROLS.get(handle)
+            if control is None:
+                control = _CONTROLS[handle] = _ControlChannel(handle)
+        control.adopt()
+        self._control = control
+
+    def __repr__(self) -> str:
+        return f"<placed egress broker handle={self._control.handle}>"
+
+    def connect(self, host: str, port: int, timeout: float | None) -> _PipeStream:
+        vended = self._control.request(host, port, timeout)
+        try:
+            raw = _win_adopt(vended)
+        except EgressConfigError as exc:
+            self._control._retire("vended handle is not a pipe")
+            raise EgressProtocolError(str(exc)) from exc
+        stream = _PipeStream(raw)
+        stream.settimeout(timeout)
+        return stream
+
+
+def resolve_broker_handle(handle: int | str | None = None) -> int:
+    """Resolve the Windows broker control handle, or raise. Never falls back.
+
+    Order: explicit arg → ``$HAAP_EGRESS_BROKER_HANDLE``. Accepts exactly what
+    the supervisor writes there: a decimal handle value (see
+    :func:`_parse_broker_handle`)."""
+    if handle is None:
+        return _parse_broker_handle(os.environ.get(_ENV_BROKER_HANDLE))
+    if isinstance(handle, bool) or not isinstance(handle, (int, str)):
+        raise EgressConfigError(f"egress broker handle must be an int or str, not {handle!r}")
+    return _parse_broker_handle(str(handle))
+
+
+def _resolve_broker(socket_path: str | None) -> str | _PlacedBroker:
+    """The broker this platform uses: an AF_UNIX path (Unix, unchanged) or the
+    placed control channel (Windows). Raises rather than return nothing."""
+    if not _placed_channel_platform():
+        return resolve_socket_path(socket_path)
+    if socket_path is not None:
+        raise EgressConfigError(
+            "socket_path= names an AF_UNIX egress broker, which is not a transport on "
+            f"Windows; the broker is the placed channel in ${_ENV_BROKER_HANDLE}. "
+            "Refusing to fall back to direct network access."
+        )
+    return _PlacedBroker(resolve_broker_handle())
+
+
+def _broker_connect_sync(
+    broker: str | _PlacedBroker, host: str, port: int, timeout: float | None
+) -> Any:
+    """One brokered connection to host:port — the ONLY way this module dials."""
+    if isinstance(broker, _PlacedBroker):
+        return broker.connect(host, port, timeout)
+    return _socks5_connect_sync(broker, host, port, timeout)
+
+
 # ── httpx / httpx2 transport wiring (lazy: needs an optional extra) ─────────
 
 # Two httpx lineages ship the same public API and a process may hold both:
@@ -438,11 +939,95 @@ def _build_transports(flavor_name: str) -> tuple[type, type]:
             f"Requires {core_name} (installed with {flavor_name})."
         ) from exc
 
+    class _PlacedStream(httpcore.NetworkStream):  # type: ignore[misc,name-defined]
+        """httpcore's stream interface over a placed Windows channel (plain or
+        TLS). Errors map to the same httpcore exceptions its socket stream
+        raises, so httpx reports them identically on every platform."""
+
+        def __init__(self, stream: Any) -> None:
+            self._stream = stream
+
+        def read(self, max_bytes, timeout=None):
+            try:
+                self._stream.settimeout(timeout)
+                return self._stream.recv(max_bytes)
+            except TimeoutError as exc:
+                raise httpcore.ReadTimeout(exc) from exc
+            except OSError as exc:
+                raise httpcore.ReadError(exc) from exc
+
+        def write(self, buffer, timeout=None):
+            if not buffer:
+                return
+            try:
+                self._stream.settimeout(timeout)
+                self._stream.sendall(buffer)
+            except TimeoutError as exc:
+                raise httpcore.WriteTimeout(exc) from exc
+            except OSError as exc:
+                raise httpcore.WriteError(exc) from exc
+
+        def close(self):
+            self._stream.close()
+
+        def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+            try:
+                tls = _TlsOverStream(self._stream, ssl_context, server_hostname, timeout)
+            except TimeoutError as exc:
+                self._stream.close()
+                raise httpcore.ConnectTimeout(exc) from exc
+            except OSError as exc:  # ssl.SSLError included: verification failures
+                self._stream.close()
+                raise httpcore.ConnectError(exc) from exc
+            return _PlacedStream(tls)
+
+        def get_extra_info(self, info):
+            if info == "ssl_object":
+                return getattr(self._stream, "ssl_object", None)
+            if info == "is_readable":
+                return self._stream.is_readable()
+            return None
+
+    class _AsyncPlacedStream(httpcore.AsyncNetworkStream):  # type: ignore[misc,name-defined]
+        """Async face of :class:`_PlacedStream`: the overlapped pipe I/O runs in
+        a worker thread, where its own deadline still applies."""
+
+        def __init__(self, stream: Any) -> None:
+            self._sync = stream if isinstance(stream, _PlacedStream) else _PlacedStream(stream)
+
+        async def read(self, max_bytes, timeout=None):
+            import anyio
+
+            return await anyio.to_thread.run_sync(self._sync.read, max_bytes, timeout)
+
+        async def write(self, buffer, timeout=None):
+            import anyio
+
+            await anyio.to_thread.run_sync(self._sync.write, buffer, timeout)
+
+        async def aclose(self):
+            import anyio
+
+            await anyio.to_thread.run_sync(self._sync.close)
+
+        async def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+            import anyio
+
+            tls = await anyio.to_thread.run_sync(
+                self._sync.start_tls, ssl_context, server_hostname, timeout
+            )
+            return _AsyncPlacedStream(tls)
+
+        def get_extra_info(self, info):
+            return self._sync.get_extra_info(info)
+
     class _SyncBackend(httpcore.NetworkBackend):  # type: ignore[misc,name-defined]
-        def __init__(self, socket_path: str) -> None:
+        def __init__(self, socket_path: str | _PlacedBroker) -> None:
             self._socket_path = socket_path
 
         def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+            if isinstance(self._socket_path, _PlacedBroker):
+                return _PlacedStream(self._socket_path.connect(host, port, timeout))
             sock = _socks5_connect_sync(self._socket_path, host, port, timeout)
             return sync_stream(sock)
 
@@ -450,12 +1035,19 @@ def _build_transports(flavor_name: str) -> tuple[type, type]:
             raise EgressProtocolError("egress transport connects only via the broker CONNECT path")
 
     class _AsyncBackend(httpcore.AsyncNetworkBackend):  # type: ignore[misc,name-defined]
-        def __init__(self, socket_path: str) -> None:
+        def __init__(self, socket_path: str | _PlacedBroker) -> None:
             self._socket_path = socket_path
 
         async def connect_tcp(
             self, host, port, timeout=None, local_address=None, socket_options=None
         ):
+            if isinstance(self._socket_path, _PlacedBroker):
+                import anyio
+
+                placed = await anyio.to_thread.run_sync(
+                    self._socket_path.connect, host, port, timeout
+                )
+                return _AsyncPlacedStream(placed)
             stream = await _socks5_connect_async(self._socket_path, host, port, timeout)
             return anyio_stream(stream)
 
@@ -469,7 +1061,7 @@ def _build_transports(flavor_name: str) -> tuple[type, type]:
         broker's SOCKS5 CONNECT. All other httpx knobs (verify, cert, http2,
         limits, timeouts) behave exactly as the stock transport."""
 
-        def __init__(self, socket_path: str, **httpx_kwargs: Any) -> None:
+        def __init__(self, socket_path: str | _PlacedBroker, **httpx_kwargs: Any) -> None:
             super().__init__(**httpx_kwargs)
             # ponytail: swap the pool's network backend in place instead of
             # re-threading ~10 httpcore kwargs. Fails loud (AttributeError) if
@@ -480,7 +1072,7 @@ def _build_transports(flavor_name: str) -> tuple[type, type]:
     class EgressAsyncHTTPTransport(httpx.AsyncHTTPTransport):  # type: ignore[name-defined]  # base resolved at runtime
         """Async counterpart of :class:`EgressHTTPTransport`."""
 
-        def __init__(self, socket_path: str, **httpx_kwargs: Any) -> None:
+        def __init__(self, socket_path: str | _PlacedBroker, **httpx_kwargs: Any) -> None:
             super().__init__(**httpx_kwargs)
             assert hasattr(self._pool, "_network_backend"), (
                 "httpcore AsyncConnectionPool layout changed"
@@ -567,7 +1159,7 @@ class _StdlibClient:
 
     def __init__(
         self,
-        socket_path: str,
+        socket_path: str | _PlacedBroker,
         *,
         verify: Any = True,
         timeout: float | None = _DEFAULT_TIMEOUT,
@@ -642,10 +1234,10 @@ class _StdlibClient:
         send_headers.update(headers or {})
 
         effective_timeout = self._timeout if timeout is None else timeout
-        sock = _socks5_connect_sync(self._socket_path, host, port, effective_timeout)
+        sock = _broker_connect_sync(self._socket_path, host, port, effective_timeout)
         try:
             if parts.scheme == "https":
-                sock = self._tls_context().wrap_socket(sock, server_hostname=host)
+                sock = _wrap_tls(sock, self._tls_context(), host, effective_timeout)
             # A pre-connected socket: http.client only dials when `sock` is
             # None, so handing it one is how the broker stays the only path.
             conn = http.client.HTTPConnection(host, port, timeout=effective_timeout)
@@ -696,7 +1288,7 @@ def client(
     whenever ``httpx2`` is the resolved flavor.
     """
     flavor_name = _select_flavor(flavor)
-    path = resolve_socket_path(socket_path)
+    path = _resolve_broker(socket_path)
     if flavor_name == _STDLIB_FLAVOR:
         # No httpx lineage in this closure (the offline-bundle case). Same
         # broker, same TLS, a smaller response object -- see _StdlibClient.
@@ -735,7 +1327,7 @@ def async_client(
         )
     httpx = importlib.import_module(flavor_name)
     _, async_cls = _build_transports(flavor_name)
-    path = resolve_socket_path(socket_path)
+    path = _resolve_broker(socket_path)
     transport = async_cls(path, verify=verify, http2=http2)
     client_kwargs.setdefault("timeout", _DEFAULT_TIMEOUT)
     return httpx.AsyncClient(transport=transport, **client_kwargs)
@@ -833,6 +1425,16 @@ def requests_session(*, socket_path: str | None = None, **adapter_kwargs: Any) -
             "pip install 'hawcx-haap[requests]'"
         ) from exc
 
+    if _placed_channel_platform():
+        # urllib3 TLS-wraps whatever `_new_conn` returns with
+        # `SSLContext.wrap_socket`, which needs a real socket; a placed pipe is
+        # not one. Refuse rather than hand back a session that cannot use the
+        # broker -- the httpx and stdlib clients carry the Windows channel.
+        raise EgressConfigError(
+            "requests_session() is not available on Windows: urllib3 needs a real socket "
+            "and the Windows egress broker hands out pipe handles. Use egress.client() "
+            "(httpx2, httpx or stdlib). Refusing to fall back to direct network access."
+        )
     # Resolves and stats the socket, raising if it is absent or not a socket.
     path = resolve_socket_path(socket_path)
     https_pool, http_pool = _brokered_pool_classes(path)

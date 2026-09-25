@@ -28,7 +28,7 @@ from .bundle import _MAIN_TEMPLATE, NATIVE_SUFFIXES, BundleError
 MAX_SOURCE_BYTES = 32 * 1024 * 1024
 MAX_MEMBER_BYTES = 8 * 1024 * 1024
 MAX_ENTRIES = 1024
-SDK_VERSION = "0.1.14"  # checked against pyproject.toml in test_source_bundle
+SDK_VERSION = "0.1.15"  # checked against pyproject.toml in test_source_bundle
 PYTHON_VERSION = "3.10"  # minimum syntax/runtime version, not builder-host version
 SDK_FILES = (
     "__init__.py",

@@ -6,6 +6,27 @@ versions track each language surface independently (Rust crate
 versions in `Cargo.toml`, Node version in `node/package.json`, Python
 version in `python/pyproject.toml`).
 
+## [0.1.15] - unreleased (Python surface only)
+
+- **FEATURE (Windows): the egress transport reaches the supervisor's placed
+  broker channel.** On Windows `egress.client()` raised `EgressConfigError`
+  ("egress broker requires AF_UNIX sockets (Unix only)"), so a confined agent
+  had no way to make an outbound HTTPS call (its model call included), although
+  the supervisor's Windows broker ships (hx_agent_client_auth_service #508
+  gap 1, `egress_broker::serve_placed_channel`). The shim now adopts the control
+  handle named by `$HAAP_EGRESS_BROKER_HANDLE`, asks it for each `host:port`
+  (`[0x01][port BE][len][host]`), reads the fixed six-byte reply
+  (`[status][socks5 rep][handle BE]`) and speaks raw bytes over the pipe the
+  supervisor vends into the process, with TLS end to end through
+  `ssl.MemoryBIO` and the caller's own `SSLContext`. `client()` (httpx2, httpx,
+  stdlib) and `async_client()` work unchanged.
+  Fails closed: an unset or malformed variable, a handle that is not a pipe,
+  and a short, oversized or malformed reply all raise, and a failed exchange
+  retires the control channel for the rest of the process rather than risk
+  reading one request's reply as another's. `requests_session()` raises on
+  Windows (urllib3 needs a real socket). A connection-cap refusal raises the
+  new `EgressBrokerBusy`. The Unix path is unchanged.
+
 ## [0.1.14] - 2026-09-23 (Python surface only)
 
 Also carries the two 0.1.13 fixes below: 0.1.13 was never tagged, so never
