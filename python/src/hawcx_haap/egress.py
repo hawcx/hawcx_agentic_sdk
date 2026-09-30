@@ -63,6 +63,7 @@ from typing import Any
 
 from hawcx_haap.errors import (
     EgressBrokerBusy,
+    EgressBrokerRequesterRefused,
     EgressConfigError,
     EgressError,
     EgressHostUnreachable,
@@ -367,7 +368,7 @@ async def _socks5_connect_async(
 #     decimal `usize`). Present means a broker is on the other end.
 #   * That handle is a CONTROL channel for the life of the agent, one request at
 #     a time. Per connection the agent writes
-#         [0x01 REQ_CONNECT][port hi][port lo][host len][host bytes...]
+#         [0x02 REQ_CONNECT_FOR][pid b0][b1][b2][b3][port hi][port lo][host len][host bytes...]
 #     and reads exactly six bytes back
 #         [status][socks5 rep][handle b0][b1][b2][b3]      (big-endian)
 #     (egress_broker.rs `pub mod mux`, `read_mux_request`, `write_mux_reply`).
@@ -376,6 +377,21 @@ async def _socks5_connect_async(
 #     its value here. That pipe carries raw bytes to the destination -- no
 #     SOCKS5 handshake is owed. On any other status the handle field is 0 and
 #     nothing was vended.
+#   * `REQ_CONNECT_FOR` (`0x02`) names the requester's own PID (`os.getpid()`,
+#     4 bytes big-endian, immediately after the opcode). This matters because
+#     a PyInstaller onefile agent is a bootloader PARENT plus the Python CHILD
+#     that actually runs this SDK — the process that adopted the placed
+#     control handle is not necessarily the process the supervisor spawned,
+#     and a vended handle value is only meaningful in the process it was
+#     duplicated into. The broker vends into the claimed PID only if it is
+#     the spawned process, or a process carrying exactly the spawned
+#     process's AppContainer Package SID; otherwise it answers
+#     `REQUESTER_REFUSED` (`0x04`) and vends nothing
+#     (hx_agent_client_auth_service#821, `egress_broker::resolve_vend_target`).
+#     The older `REQ_CONNECT` (`0x01`, no PID) still exists on the broker and
+#     vends into the spawned process, but under a onefile build that process
+#     is the bootloader, not this Python process, so this shim always sends
+#     `0x02` and never falls back to `0x01` -- see `_mux_request`.
 #
 # Both the control handle and every vended one are pipe ends opened
 # FILE_FLAG_OVERLAPPED (graph.rs `create_supervisor_channel_pair`,
@@ -392,11 +408,13 @@ async def _socks5_connect_async(
 
 _ENV_BROKER_HANDLE = "HAAP_EGRESS_BROKER_HANDLE"
 
-_MUX_REQ_CONNECT = 0x01
+_MUX_REQ_CONNECT = 0x01  # vends into the spawned process; unused by this shim, see _mux_request.
+_MUX_REQ_CONNECT_FOR = 0x02  # + 4-byte BE pid; vends into the verified requester.
 _MUX_OK = 0x00
 _MUX_DENIED = 0x01
 _MUX_BUSY = 0x02
 _MUX_VEND_FAILED = 0x03
+_MUX_REQUESTER_REFUSED = 0x04
 _MUX_REPLY_LEN = 6
 
 _FILE_TYPE_PIPE = 0x0003
@@ -448,11 +466,20 @@ def _mux_request(host: str, port: int) -> bytes:
     """Build one control request. Host rules are the SOCKS5 DOMAINNAME rules
     (1..255 bytes, no NUL, IDNA for non-ASCII, never resolved locally) because
     the wire carries the same one-byte length and the broker screens the same
-    name either way."""
+    name either way.
+
+    Always ``REQ_CONNECT_FOR`` (``0x02``), naming this process's own PID
+    (``os.getpid()``, 4 bytes big-endian, right after the opcode) -- never
+    the plain ``REQ_CONNECT`` (``0x01``). ``0x01`` vends into the process the
+    supervisor spawned, which under a PyInstaller onefile build is the
+    bootloader parent, not this (the real) Python process; the vended handle
+    would be meaningless here. There is deliberately no fallback to ``0x01``:
+    see the module docstring and ``_parse_mux_reply``."""
     if not isinstance(port, int) or isinstance(port, bool) or not 0 <= port <= 0xFFFF:
         raise EgressProtocolError(f"egress port {port!r} out of range 0..65535")
     raw = _encode_host(host)
-    return bytes([_MUX_REQ_CONNECT]) + port.to_bytes(2, "big") + bytes([len(raw)]) + raw
+    pid = os.getpid().to_bytes(4, "big")
+    return bytes([_MUX_REQ_CONNECT_FOR]) + pid + port.to_bytes(2, "big") + bytes([len(raw)]) + raw
 
 
 def _parse_mux_reply(reply: bytes, host: str, port: int) -> int:
@@ -487,6 +514,8 @@ def _parse_mux_reply(reply: bytes, host: str, port: int) -> int:
             "egress broker allowed the endpoint but could not place a channel in this "
             "process (vend_failed) — not a policy decision"
         )
+    if status == _MUX_REQUESTER_REFUSED:
+        raise EgressBrokerRequesterRefused(host, port)
     raise EgressProtocolError(f"unknown egress control status {status:#04x}")
 
 
@@ -701,7 +730,7 @@ def _is_refusal(reply: bytes) -> bool:
     """A complete reply with a known non-OK status and no handle."""
     return (
         len(reply) == _MUX_REPLY_LEN
-        and reply[0] in (_MUX_DENIED, _MUX_BUSY, _MUX_VEND_FAILED)
+        and reply[0] in (_MUX_DENIED, _MUX_BUSY, _MUX_VEND_FAILED, _MUX_REQUESTER_REFUSED)
         and reply[2:6] == b"\x00\x00\x00\x00"
         and not (reply[0] == _MUX_DENIED and reply[1] == 0x00)
     )

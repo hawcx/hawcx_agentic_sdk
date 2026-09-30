@@ -114,3 +114,24 @@ class EgressBrokerBusy(EgressError):
         )
         self.host = host
         self.port = port
+
+
+class EgressBrokerRequesterRefused(EgressError):
+    """Windows placed-channel broker status ``REQUESTER_REFUSED`` (``0x04``):
+    the broker could not verify this process as the spawned agent (PID match)
+    or as a process carrying exactly the spawned agent's AppContainer Package
+    SID, so nothing was dialed or vended
+    (hx_agent_client_auth_service#821, ``egress_broker::resolve_vend_target``).
+    Not a policy decision about the destination -- the *requesting process*
+    was refused, not the host:port. There is no safe fallback: an older
+    broker that does not understand ``REQ_CONNECT_FOR`` (``0x02``) closes the
+    channel instead of answering this status, so seeing this exception means
+    a current broker deliberately said no."""
+
+    def __init__(self, host: str, port: int) -> None:
+        super().__init__(
+            "egress broker refused this process: it is not the enrolled agent's sandbox "
+            f"({host}:{port} was not dialed)"
+        )
+        self.host = host
+        self.port = port

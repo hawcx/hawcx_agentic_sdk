@@ -1,16 +1,31 @@
-"""The Windows egress arm: the supervisor's placed control channel (#508 gap 1).
+"""The Windows egress arm: the supervisor's placed control channel (#508 gap 1,
+hx_agent_client_auth_service#821).
 
 Spec, quoted from hx_agent_client_auth_service
 ``crates/haap-supervisor/src/egress_broker.rs`` (``pub mod mux``)::
 
-    request  [REQ_CONNECT][port hi][port lo][host len][host bytes…]
+    request  [REQ_CONNECT_FOR][pid b0][b1][b2][b3][port hi][port lo][host len][host bytes…]
     reply    [status][socks5 rep][handle b0][b1][b2][b3]          (REPLY_LEN)
 
-``REQ_CONNECT=0x01``; status ``OK=0x00`` / ``DENIED=0x01`` / ``BUSY=0x02`` /
-``VEND_FAILED=0x03``; ``REPLY_LEN=6``; big-endian. The control handle arrives
-as a decimal value in ``$HAAP_EGRESS_BROKER_HANDLE`` (graph.rs
+``REQ_CONNECT_FOR=0x02`` names the requester's own PID (``os.getpid()``, 4
+bytes big-endian, right after the opcode); status ``OK=0x00`` /
+``DENIED=0x01`` / ``BUSY=0x02`` / ``VEND_FAILED=0x03`` /
+``REQUESTER_REFUSED=0x04``; ``REPLY_LEN=6``; big-endian. The control handle
+arrives as a decimal value in ``$HAAP_EGRESS_BROKER_HANDLE`` (graph.rs
 ``ENV_EGRESS_BROKER_HANDLE``); on OK the handle field names a fresh pipe
 already connected to the endpoint, carrying raw bytes (no SOCKS5).
+
+The older ``REQ_CONNECT=0x01`` (no PID) still exists on the broker and vends
+into the spawned process, but under a PyInstaller onefile build that process
+is the bootloader parent, not the real Python child running this SDK -- so
+this shim always sends ``0x02`` and never falls back to ``0x01``. A requester
+the broker cannot verify as the spawned agent (or a process carrying exactly
+its AppContainer Package SID) gets ``REQUESTER_REFUSED`` (``0x04``): a
+complete, well-formed refusal, not a transport failure, so it must not be
+confused with an old broker that doesn't understand ``0x02`` at all -- that
+case has no reply (the broker just closes the channel on an unknown opcode),
+which is indistinguishable from any other transport failure and is therefore
+never treated as a signal to retry with ``0x01``.
 
 Most rows run on every OS: only the OS handle layer (``_win_adopt`` /
 ``_win_is_readable``) is replaced, by a table of socketpair ends, and a fake
@@ -23,6 +38,7 @@ only on Windows and use real overlapped named pipes and ``DuplicateHandle``.
 from __future__ import annotations
 
 import itertools
+import os
 import select
 import socket
 import sys
@@ -38,6 +54,7 @@ from egress_broker import TLSServer, make_localhost_cert
 from hawcx_haap import egress
 from hawcx_haap.errors import (
     EgressBrokerBusy,
+    EgressBrokerRequesterRefused,
     EgressConfigError,
     EgressHostUnreachable,
     EgressPolicyDenied,
@@ -121,6 +138,7 @@ class FakeSupervisor:
         self._allow = allow
         self._script = script
         self.requests: list[bytes] = []
+        self.requester_pids: list[int] = []
         self.dials = 0
         self._t = threading.Thread(target=self._loop, daemon=True)
 
@@ -142,8 +160,15 @@ class FakeSupervisor:
             op = _recv_exact(self._control, 1)
             if op is None:
                 return
-            if op[0] != 0x01:  # unknown opcode: close, never answer
+            # REQ_CONNECT_FOR=0x02 is the only opcode this SDK ever sends. The
+            # retired REQ_CONNECT=0x01 and anything else are unknown here, just
+            # like a real broker: close, never answer (egress_broker.rs
+            # `read_mux_request` — malformed framing gets no reply).
+            if op[0] != 0x02:
                 _close(self._control)
+                return
+            pid_b = _recv_exact(self._control, 4)
+            if pid_b is None:
                 return
             rest = _recv_exact(self._control, 3)
             if rest is None:
@@ -151,7 +176,8 @@ class FakeSupervisor:
             host_b = _recv_exact(self._control, rest[2]) if rest[2] else b""
             if host_b is None:
                 return
-            self.requests.append(op + rest + host_b)
+            self.requests.append(op + pid_b + rest + host_b)
+            self.requester_pids.append(int.from_bytes(pid_b, "big"))
             host, port = host_b.decode("utf-8"), int.from_bytes(rest[:2], "big")
             if self._script is not None:
                 out = self._script(len(self.requests) - 1, host, port)
@@ -246,14 +272,27 @@ def tls():
 
 
 def test_request_bytes_match_the_supervisor_reader_exactly() -> None:
+    pid = os.getpid().to_bytes(4, "big")
     assert egress._mux_request("api.anthropic.com", 443) == (
-        b"\x01\x01\xbb\x11api.anthropic.com"
+        b"\x02" + pid + b"\x01\xbb\x11api.anthropic.com"
     )
-    assert egress._mux_request("h", 0) == b"\x01\x00\x00\x01h"
-    assert egress._mux_request("h", 65535) == b"\x01\xff\xff\x01h"
+    assert egress._mux_request("h", 0) == b"\x02" + pid + b"\x00\x00\x01h"
+    assert egress._mux_request("h", 65535) == b"\x02" + pid + b"\xff\xff\x01h"
     # Non-ASCII goes as IDNA (ASCII), never resolved locally.
-    assert egress._mux_request("bücher.example", 443)[4:] == b"xn--bcher-kva.example"
-    assert egress._mux_request("a" * 255, 1)[3] == 255
+    assert egress._mux_request("bücher.example", 443)[8:] == b"xn--bcher-kva.example"
+    assert egress._mux_request("a" * 255, 1)[7] == 255
+
+
+def test_request_always_uses_req_connect_for_and_names_this_process() -> None:
+    """Never the retired REQ_CONNECT (0x01): under a PyInstaller onefile
+    build the process that owns the placed control handle is the bootloader
+    parent, not this (the real) Python process, so a vended handle for
+    REQ_CONNECT would be meaningless here. The PID field is always this
+    process's own (os.getpid()), never a caller-suppliable value."""
+    req = egress._mux_request("h", 1)
+    assert req[0] == egress._MUX_REQ_CONNECT_FOR == 0x02
+    assert req[0] != egress._MUX_REQ_CONNECT
+    assert int.from_bytes(req[1:5], "big") == os.getpid()
 
 
 @pytest.mark.parametrize(
@@ -279,7 +318,8 @@ def test_ok_reply_yields_the_handle() -> None:
         (reply(0x01, 0x00), EgressProtocolError),  # a "denial" claiming success
         (reply(0x02), EgressBrokerBusy),
         (reply(0x03), EgressProtocolError),  # vend_failed
-        (reply(0x04), EgressProtocolError),  # unknown status
+        (reply(0x04), EgressBrokerRequesterRefused),  # requester_refused
+        (reply(0x05), EgressProtocolError),  # unknown status
         (reply(0xFF, 0xFF), EgressProtocolError),
         (reply(0x00, 0x00, 0), EgressProtocolError),  # OK with a null handle
         (reply(0x00, 0x02, 0x1F4), EgressProtocolError),  # OK carrying a rep
@@ -378,7 +418,9 @@ def test_stdlib_tls_request_over_a_vended_channel(placed, tls) -> None:
             r = http.get(f"https://localhost:{srv.port}/v1/models")
     assert r.status_code == 200
     assert r.text == "through-the-placed-channel"
-    assert sup.requests == [b"\x01" + srv.port.to_bytes(2, "big") + b"\x09localhost"]
+    pid = os.getpid().to_bytes(4, "big")
+    assert sup.requests == [b"\x02" + pid + srv.port.to_bytes(2, "big") + b"\x09localhost"]
+    assert sup.requester_pids == [os.getpid()]
     assert sup.dials == 1
     assert table.adopted[0] == control and len(table.adopted) == 2
 
@@ -440,12 +482,37 @@ def test_denial_is_typed_nothing_is_dialed_and_the_channel_stays_usable(placed, 
     assert len(table.adopted) == 2  # control + the one allowed channel; nothing vended on deny
 
 
+def test_requester_refused_is_typed_names_the_process_and_nothing_is_dialed(placed, tls) -> None:
+    """A broker that cannot verify this process as the spawned agent (or a
+    process carrying exactly its AppContainer Package SID) answers
+    REQUESTER_REFUSED (0x04). It is its own distinct, named exception --
+    never confused with a policy denial about the destination -- and the
+    control channel stays usable afterward (hx_agent_client_auth_service#821,
+    `egress_broker::resolve_vend_target`)."""
+    table, sup_end, _ = placed
+    srv, cert = tls
+    script = lambda i, h, p: reply(0x04) if i == 0 else None  # noqa: E731
+    with FallThrough(sup_end, table.vend, (srv.host, srv.port), script=script) as sup:
+        with egress.client(verify=cert, flavor="stdlib") as http:
+            with pytest.raises(
+                EgressBrokerRequesterRefused, match="not the enrolled agent's sandbox"
+            ) as ei:
+                http.get(f"https://localhost:{srv.port}/")
+            assert (ei.value.host, ei.value.port) == ("localhost", srv.port)
+            # The channel is still usable: a well-formed refusal, not a
+            # transport failure -- the NEXT (real) request still succeeds.
+            r = http.get(f"https://localhost:{srv.port}/")
+    assert r.status_code == 200
+    assert sup.dials == 1  # the refused request was never dialed
+
+
 @pytest.mark.parametrize(
     "first,exc",
     [
         (reply(0x02), EgressBrokerBusy),
         (reply(0x01, 0x04), EgressHostUnreachable),
         (reply(0x03), EgressProtocolError),
+        (reply(0x04), EgressBrokerRequesterRefused),
     ],
 )
 def test_well_formed_refusals_keep_the_channel_in_step(placed, tls, first, exc) -> None:
@@ -570,7 +637,8 @@ def test_concurrent_requests_are_serialised_on_the_control_channel(placed, tls) 
             for t in ts:
                 t.join(20)
     assert not errors and results == [200] * 8
-    assert len(sup.requests) == 8 and all(r[0] == 0x01 for r in sup.requests)
+    assert len(sup.requests) == 8 and all(r[0] == 0x02 for r in sup.requests)
+    assert sup.requester_pids == [os.getpid()] * 8
 
 
 def test_is_readable_reports_a_closed_relay(placed) -> None:

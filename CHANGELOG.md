@@ -6,6 +6,31 @@ versions track each language surface independently (Rust crate
 versions in `Cargo.toml`, Node version in `node/package.json`, Python
 version in `python/pyproject.toml`).
 
+## [0.1.16] - unreleased (Python surface only)
+
+- **FIX (Windows): the egress transport asks the broker to vend into THIS
+  process, not the one the supervisor spawned.** Under a PyInstaller onefile
+  build (e.g. `hx_ukg_poc`'s `ukg-agent.exe`), the process that inherits the
+  placed control handle is the bootloader PARENT, while this SDK actually
+  runs in the bootloader's Python CHILD -- so the old request
+  (`REQ_CONNECT`, `0x01`) got a handle vended into the wrong process, and
+  every confined Windows onefile agent's outbound call (its model call
+  included) failed.
+  The shim now sends `REQ_CONNECT_FOR` (`0x02`), naming this process's own
+  PID (`os.getpid()`, 4 bytes big-endian, right after the opcode). The
+  broker vends into the claimed PID only if it is the spawned process or a
+  process carrying exactly the spawned process's AppContainer Package SID;
+  otherwise it answers `REQUESTER_REFUSED` (`0x04`) and nothing is dialed or
+  vended (hx_agent_client_auth_service#821,
+  `egress_broker::resolve_vend_target`). That status raises the new,
+  distinctly named `EgressBrokerRequesterRefused` -- never confused with a
+  policy denial about the destination. There is no fallback to the retired
+  `REQ_CONNECT`: an older broker that does not understand `0x02` closes the
+  control channel instead of answering a distinguishable refusal, which is
+  indistinguishable from any other transport failure, so retrying with
+  `0x01` would not be safe. The Unix path, and every non-Windows behavior of
+  `client()` / `async_client()`, are unchanged.
+
 ## [0.1.15] - unreleased (Python surface only)
 
 - **FEATURE (Windows): the egress transport reaches the supervisor's placed
