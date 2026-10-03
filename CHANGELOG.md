@@ -6,6 +6,27 @@ versions track each language surface independently (Rust crate
 versions in `Cargo.toml`, Node version in `node/package.json`, Python
 version in `python/pyproject.toml`).
 
+## [0.1.17] - unreleased (Python surface only)
+
+- **ADD: the agent's TLS works behind a TLS-inspecting proxy (Zscaler,
+  Netskope) with no customer step.** The broker relays opaque bytes, so the
+  agent verifies its provider's certificate itself — and a corporate proxy
+  re-signs that chain with a root MDM put in the OS trust store, which certifi
+  does not hold and a Seatbelt-confined agent cannot consult (`truststore`
+  fails there with `OSStatus -26276`). haap-supervisor 0.14.0 exports the OS
+  store at spawn (posture-gated: `standard` only, off with
+  `HAWCX_TRUST_OS_ROOTS=0`) and names the file in
+  `HAAP_AGENT_OS_TRUST_ROOTS`. New in `hawcx_haap.egress`:
+  `os_trust_roots_path()`, `add_os_trust_roots(ctx)`, `tls_context(cafile=None)`.
+  `client()` / `async_client()` with the default `verify=True`, the stdlib
+  client, and `requests_session()` load the staged roots IN ADDITION to their
+  usual CA set; an explicit `verify=` (False, a path, an `SSLContext`) is never
+  rewritten. Nothing changes when nothing is staged.
+- **Tests:** `tests/test_egress_os_trust.py` — a loopback server presenting
+  `api.anthropic.com` re-signed by a test "inspecting proxy" root, reached
+  through the fake broker: every flavor succeeds with the staged roots and
+  fails verification without them; the context is additive.
+
 ## [0.1.16] - unreleased (Python surface only)
 
 - **FIX (Windows): the egress transport asks the broker to vend into THIS

@@ -78,12 +78,16 @@ from hawcx_haap.errors import (
 # module __getattr__ (they need the optional httpx extra), so they are not
 # listed here — `egress.EgressHTTPTransport` still resolves.
 __all__ = [
+    "ENV_OS_TRUST_ROOTS",
+    "add_os_trust_roots",
     "client",
     "async_client",
     "flavor",
     "requests_session",
     "resolve_broker_handle",
+    "os_trust_roots_path",
     "resolve_socket_path",
+    "tls_context",
 ]
 
 # SOCKS5, one method offered: NO-AUTH (0x00). The transport authenticates via
@@ -128,6 +132,74 @@ def resolve_socket_path(socket_path: str | None = None) -> str:
             "refusing to fall back to direct network access."
         )
     return path
+
+
+# ── OS trust roots staged by the supervisor (TLS-inspecting proxies) ────────
+#
+# The broker relays opaque bytes; the AGENT terminates TLS to its provider. On a
+# corporate laptop behind a TLS-inspecting proxy (Zscaler, Netskope) every such
+# connection is re-signed by a root MDM installed in the OS trust store — which
+# a Seatbelt-confined agent cannot consult (the macOS trust evaluation needs the
+# `trustd` mach service, denied in the sandbox; `truststore` fails there with
+# OSStatus -26276), and which certifi does not contain. So the supervisor, which
+# CAN read the store, exports it to a read-only PEM file at spawn and names it
+# in ``$HAAP_AGENT_OS_TRUST_ROOTS`` — only under the ``standard`` posture
+# (refused under ``windows-hardened``, and off with ``HAWCX_TRUST_OS_ROOTS=0``).
+#
+# These roots are loaded IN ADDITION to the caller's own (certifi / OpenSSL
+# defaults): a network that is not inspected verifies exactly as before, and
+# verification is never turned off.
+
+ENV_OS_TRUST_ROOTS = "HAAP_AGENT_OS_TRUST_ROOTS"
+
+
+def os_trust_roots_path() -> str | None:
+    """The supervisor-staged OS trust bundle, or ``None`` when none was staged
+    (posture refused it, the switch is off, or no supervisor launched us)."""
+    path = os.environ.get(ENV_OS_TRUST_ROOTS)
+    if path and os.path.isfile(path):
+        return path
+    return None
+
+
+def add_os_trust_roots(ctx: ssl.SSLContext) -> ssl.SSLContext:
+    """Load the staged OS roots into ``ctx`` ADDITIVELY and return it. A no-op
+    when nothing is staged. A staged file that cannot be parsed raises — a
+    bundle the supervisor wrote and the agent silently ignored would hide
+    exactly the failure this exists to fix."""
+    path = os_trust_roots_path()
+    if path is not None:
+        ctx.load_verify_locations(cafile=path)
+    return ctx
+
+
+def _default_cafile() -> str | None:
+    """certifi's bundle when certifi is importable (it ships with httpx and
+    requests), else ``None`` for OpenSSL's own default store."""
+    try:
+        return importlib.import_module("certifi").where()
+    except (ImportError, AttributeError):
+        return None
+
+
+def tls_context(cafile: str | None = None) -> ssl.SSLContext:
+    """A verifying OpenSSL context: ``cafile`` (default: certifi when present,
+    else OpenSSL's defaults) PLUS the supervisor-staged OS trust roots.
+
+    Pass it as ``verify=`` to :func:`client` / :func:`async_client` when you
+    build your own context; the default ``verify=True`` already uses it when a
+    bundle is staged."""
+    ctx = ssl.create_default_context(cafile=cafile if cafile is not None else _default_cafile())
+    return add_os_trust_roots(ctx)
+
+
+def _effective_verify(verify: Any) -> Any:
+    """``verify=True`` becomes :func:`tls_context` when the supervisor staged OS
+    roots; every other value (False, a path, a caller's SSLContext) is the
+    caller's decision and passes through untouched."""
+    if verify is True and os_trust_roots_path() is not None:
+        return tls_context()
+    return verify
 
 
 # ── SOCKS5 wire helpers (pure, no IO) ───────────────────────────────────────
@@ -1221,7 +1293,7 @@ class _StdlibClient:
         if isinstance(self._verify, str):
             return ssl.create_default_context(cafile=self._verify)
         if self._verify is True:
-            return ssl.create_default_context()
+            return add_os_trust_roots(ssl.create_default_context())
         return self._verify  # already an SSLContext
 
     def request(
@@ -1330,7 +1402,7 @@ def client(
         return _StdlibClient(path, verify=verify, **client_kwargs)
     httpx = importlib.import_module(flavor_name)
     sync_cls, _ = _build_transports(flavor_name)
-    transport = sync_cls(path, verify=verify, http2=http2)
+    transport = sync_cls(path, verify=_effective_verify(verify), http2=http2)
     client_kwargs.setdefault("timeout", _DEFAULT_TIMEOUT)
     return httpx.Client(transport=transport, **client_kwargs)
 
@@ -1357,7 +1429,7 @@ def async_client(
     httpx = importlib.import_module(flavor_name)
     _, async_cls = _build_transports(flavor_name)
     path = _resolve_broker(socket_path)
-    transport = async_cls(path, verify=verify, http2=http2)
+    transport = async_cls(path, verify=_effective_verify(verify), http2=http2)
     client_kwargs.setdefault("timeout", _DEFAULT_TIMEOUT)
     return httpx.AsyncClient(transport=transport, **client_kwargs)
 
@@ -1470,6 +1542,12 @@ def requests_session(*, socket_path: str | None = None, **adapter_kwargs: Any) -
 
     class _BrokeredAdapter(requests.adapters.HTTPAdapter):
         def init_poolmanager(self, *args: Any, **kw: Any) -> None:
+            # Staged OS trust roots ride in a pool-wide SSLContext; requests
+            # still hands urllib3 its own CA bundle (certifi, or the session's
+            # ``verify=`` path) per connection, which urllib3 loads into this
+            # same context — so the OS roots are ADDED, never substituted.
+            if os_trust_roots_path() is not None and "ssl_context" not in kw:
+                kw["ssl_context"] = add_os_trust_roots(ssl.create_default_context())
             super().init_poolmanager(*args, **kw)
             # Swap the pool classes in place rather than re-threading the
             # PoolManager's kwargs. Fails loud if urllib3 renames the mapping,
