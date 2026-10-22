@@ -6,7 +6,10 @@ versions track each language surface independently (Rust crate
 versions in `Cargo.toml`, Node version in `node/package.json`, Python
 version in `python/pyproject.toml`).
 
-## [0.1.17] - unreleased (Python surface only)
+## [0.1.17] - 2026-10-22 (Python surface only)
+
+Also carries 0.1.15 and 0.1.16 below: neither was tagged, so neither was
+published, and PyPI goes from 0.1.14 straight to 0.1.17.
 
 - **ADD: the agent's TLS works behind a TLS-inspecting proxy (Zscaler,
   Netskope) with no customer step.** The broker relays opaque bytes, so the
@@ -27,7 +30,7 @@ version in `python/pyproject.toml`).
   through the fake broker: every flavor succeeds with the staged roots and
   fails verification without them; the context is additive.
 
-## [0.1.16] - unreleased (Python surface only)
+## [0.1.16] - never published; shipped in 0.1.17 (Python surface only)
 
 - **FIX (Windows): the egress transport asks the broker to vend into THIS
   process, not the one the supervisor spawned.** Under a PyInstaller onefile
@@ -52,7 +55,7 @@ version in `python/pyproject.toml`).
   `0x01` would not be safe. The Unix path, and every non-Windows behavior of
   `client()` / `async_client()`, are unchanged.
 
-## [0.1.15] - unreleased (Python surface only)
+## [0.1.15] - never published; shipped in 0.1.17 (Python surface only)
 
 - **FEATURE (Windows): the egress transport reaches the supervisor's placed
   broker channel.** On Windows `egress.client()` raised `EgressConfigError`
