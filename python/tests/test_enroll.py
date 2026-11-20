@@ -383,3 +383,28 @@ def test_enroll_already_enrolled_returns_existing_identity(
         assert agent.enrollment.trust_level == "Enrolled"
     finally:
         agent.close()
+
+
+def test_enroll_rejects_mismatched_peer_uid_before_sending_org_token(
+    enroll_env: tuple[MockAuthenticator, _MockAssembler, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Negative control: AuthenticatorClient.connect MUST enforce kernel peer-UID
+    verification before transmitting the single-use org_token."""
+    from pathlib import Path
+
+    from hawcx_haap.errors import IpcError
+
+    auth, _asm, base = enroll_env
+    wrong_uid = os.getuid() + 1
+    monkeypatch.setenv("HAAP_SDK_EXPECTED_PEER_UID", str(wrong_uid))
+    expected_mech = "LOCAL_PEERCRED" if sys.platform == "darwin" else "SO_PEERCRED"
+
+    with pytest.raises(IpcError, match=expected_mech):
+        HawcxAgent.enroll(
+            name="researcher",
+            org_token="ot-secret-must-not-be-sent",
+            principal_allowlist=[],
+            ipc_dir=Path(base),
+        )
+    assert auth.received_payload is None

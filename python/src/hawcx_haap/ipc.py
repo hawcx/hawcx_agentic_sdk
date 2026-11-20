@@ -83,6 +83,23 @@ MSG_CLARIFICATION_ANSWER: int = 0x61
 
 MAX_MESSAGE_SIZE: int = 64 * 1024
 
+# macOS / Darwin LOCAL_PEERCRED constants (<sys/un.h>, <sys/ucred.h>).
+# CPython's stdlib `socket` exposes Linux `SO_PEERCRED` but omits Darwin's
+# `SOL_LOCAL` / `LOCAL_PEERCRED`, so we pass the kernel ABI values directly to
+# `sock.getsockopt(...)` with zero native extensions.
+#
+#   struct xucred {
+#       u_int   cr_version;          /* XUCRED_VERSION == 0 */
+#       uid_t   cr_uid;              /* effective user id */
+#       short   cr_ngroups;          /* number of groups */
+#       /* 2-byte native alignment pad */
+#       gid_t   cr_groups[16];       /* groups */
+#   };  /* sizeof == 76 bytes on arm64/x86_64 Darwin */
+_SOL_LOCAL: int = 0
+_LOCAL_PEERCRED: int = 0x001
+_XUCRED_VERSION: int = 0
+_XUCRED_FMT: str = "IIh16I"
+
 
 # ── Public types ────────────────────────────────────────────────────
 
@@ -343,28 +360,40 @@ def _diagnosable_ipc_error(
     )
 
 
+def _resolve_expected_peer_uid(sock_stat: os.stat_result) -> int:
+    """Resolve the expected peer UID from ``HAAP_SDK_EXPECTED_PEER_UID`` or ``sock_stat.st_uid``."""
+    expected_env = os.environ.get("HAAP_SDK_EXPECTED_PEER_UID")
+    if expected_env is None:
+        return sock_stat.st_uid
+    stripped = expected_env.strip()
+    if not stripped or not stripped.isdigit():
+        raise IpcError(
+            f"HAAP_SDK_EXPECTED_PEER_UID={expected_env!r} is not a valid uid"
+        )
+    expected_uid = int(stripped, 10)
+    if expected_uid < 0 or expected_uid > 0xFFFFFFFF:
+        raise IpcError(
+            f"HAAP_SDK_EXPECTED_PEER_UID={expected_env!r} is not a valid uid"
+        )
+    return expected_uid
+
+
 def _validate_ipc_socket_path(socket_path: str) -> os.stat_result | None:
-    """H-4 (2026-05-20) — validate UID + parent-dir mode before connect.
+    """H-4 (2026-05-20) — validate socket type, UID syntax, and parent-dir mode before connect.
 
-    Refuses sockets whose owner UID differs from
-    ``HAAP_SDK_EXPECTED_PEER_UID`` (or the socket file's own uid when
-    the env var is unset), and refuses parent directories whose owner
-    UID differs from ``os.getuid()`` or whose mode has any group/other
-    bit set (mask ``0o077``).
-
-    The previous client connected to any socket the kernel let it
-    ``connect(2)`` — which on a shared ``/tmp/hawcx/`` is "any process
-    on the host". This pre-connect stat catches the cross-UID case
-    before any handshake bytes are exchanged.
+    Validates ``HAAP_SDK_EXPECTED_PEER_UID`` (if set) before ``connect(2)``
+    and refuses parent directories whose owner UID is neither ``os.getuid()``
+    nor ``0`` (root), or whose mode has any group/other write bit set
+    (mask ``0o022``) unless ``HAAP_SDK_ALLOW_TMP_IPC=1`` is set.
 
     No-op on Windows: Named Pipe ACLs are handled by the kernel at
     ``CreateFileW`` time and surface as ``OSError(EACCES)`` from the
     pipe-open path; nothing to stat here.
 
     INF-08: returns the validated ``stat_result`` so the caller can
-    re-verify the connected peer (SO_PEERCRED) and/or re-stat the path to
-    detect a TOCTOU swap between this check and ``connect``. Returns
-    ``None`` on Windows.
+    re-verify the connected peer (``SO_PEERCRED`` on Linux, ``LOCAL_PEERCRED``
+    on macOS) in :func:`_verify_peer_after_connect`. Returns ``None`` on
+    Windows.
     """
     if sys.platform == "win32":
         return None
@@ -381,16 +410,9 @@ def _validate_ipc_socket_path(socket_path: str) -> os.stat_result | None:
     if not stat.S_ISSOCK(sock_stat.st_mode):
         raise IpcError(f"{socket_path} is not a Unix domain socket")
 
-    expected_env = os.environ.get("HAAP_SDK_EXPECTED_PEER_UID")
-    if expected_env is not None:
-        try:
-            expected_uid = int(expected_env, 10)
-        except ValueError as e:
-            raise IpcError(
-                f"HAAP_SDK_EXPECTED_PEER_UID={expected_env!r} is not a valid uid"
-            ) from e
-    else:
-        expected_uid = sock_stat.st_uid
+    # Validate HAAP_SDK_EXPECTED_PEER_UID syntax before connect(); the actual
+    # kernel-attested peer-UID comparison runs in _verify_peer_after_connect.
+    _resolve_expected_peer_uid(sock_stat)
 
     # H-4's inode-owner-vs-expected-peer comparison is REMOVED (Ravi, 2026-08-30).
     #
@@ -401,18 +423,10 @@ def _validate_ipc_socket_path(socket_path: str) -> os.stat_result | None:
     # on the inherited fd as the CREDENTIAL principal -- which is what
     # HAAP_SDK_EXPECTED_PEER_UID names. See graph.rs:4318-4333 and 5781-5785.
     #
-    # The comparison could never fire correctly:
-    #   unset -> expected_uid = sock_stat.st_uid, so the test is `x != x`
-    #   set   -> CAS deliberately makes the two differ: guaranteed false positive
-    #
-    # The surviving control is stronger and untouched: `_verify_peer_after_connect`
-    # reads SO_PEERCRED off the CONNECTED socket and compares it to the credential
-    # principal -- kernel-attested and immune to the path swap a pre-connect stat
-    # can never catch. `expected_uid` is still resolved above because that
-    # function reuses the same env resolution.
-    #
-    # This removes a check that was structurally incapable of working; it does
-    # not loosen the peer-identity guarantee.
+    # The surviving control is stronger and kernel-attested:
+    # `_verify_peer_after_connect` reads SO_PEERCRED (Linux) or LOCAL_PEERCRED
+    # (macOS) off the CONNECTED socket and compares it to the credential
+    # principal -- immune to the path swap a pre-connect stat can never catch.
 
     parent = sock_path.parent
     try:
@@ -482,32 +496,42 @@ def _verify_peer_after_connect(
 ) -> None:
     """INF-08: close the stat→connect TOCTOU window after ``connect``.
 
-    Two complementary checks:
+    Kernel-attested peer credential verification on the *connected* socket:
 
-    1. ``SO_PEERCRED`` (Linux) — read the kernel-attested peer credentials
-       of the *connected* socket and assert the peer UID equals the UID we
-       validated. This is OS-enforced peer identity: it cannot be defeated
-       by a path swap, because it reflects the process actually on the
-       other end of *this* connection.
-    2. A path re-stat fallback — on platforms without ``SO_PEERCRED``
-       (e.g. macOS, where ``LOCAL_PEERCRED`` is not exposed by the stdlib
-       ``socket`` module), re-stat the path and assert it still resolves to
-       the same ``(st_dev, st_ino, st_uid)`` we validated. A swap changes
-       the inode, so a replaced socket is rejected.
+    1. ``SO_PEERCRED`` (Linux) — reads ``struct ucred`` via ``SOL_SOCKET`` /
+       ``SO_PEERCRED`` and asserts ``peer_uid == expected_uid``.
+    2. ``LOCAL_PEERCRED`` (macOS / Darwin) — reads ``struct xucred`` via
+       ``SOL_LOCAL`` (0) / ``LOCAL_PEERCRED`` (0x001), verifies
+       ``cr_version == 0``, and asserts ``cr_uid == expected_uid``.
+    3. Other POSIX platforms without ``SO_PEERCRED`` / Darwin ``LOCAL_PEERCRED``:
+       fails closed if ``HAAP_SDK_EXPECTED_PEER_UID`` is explicitly set;
+       otherwise falls back to a post-connect path re-stat asserting
+       ``(st_dev, st_ino, st_uid)`` did not change.
 
-    Raises ``IpcError`` on any mismatch. The expected UID honours
-    ``HAAP_SDK_EXPECTED_PEER_UID`` (same resolution as the pre-connect
-    check), defaulting to the validated socket's own owner UID.
+    Raises ``IpcError`` on any mismatch or syscall failure (closing ``sock``
+    before raising). The expected UID honours ``HAAP_SDK_EXPECTED_PEER_UID``,
+    defaulting to the validated socket's own owner UID.
     """
-    expected_env = os.environ.get("HAAP_SDK_EXPECTED_PEER_UID")
-    expected_uid = int(expected_env, 10) if expected_env is not None else pre_stat.st_uid
+    expected_uid = _resolve_expected_peer_uid(pre_stat)
 
     so_peercred = getattr(socket, "SO_PEERCRED", None)
     if so_peercred is not None:
-        # struct ucred { pid_t pid; uid_t uid; gid_t gid; } — three native
-        # ints. Read uid (the 2nd field) and compare.
-        creds = sock.getsockopt(socket.SOL_SOCKET, so_peercred, struct.calcsize("3i"))
-        _pid, peer_uid, _gid = struct.unpack("3i", creds)
+        # struct ucred { pid_t pid; uid_t uid; gid_t gid; }
+        ucred_size = struct.calcsize("i2I")
+        try:
+            creds = sock.getsockopt(socket.SOL_SOCKET, so_peercred, ucred_size)
+        except OSError as e:
+            sock.close()
+            raise IpcError(
+                f"SO_PEERCRED lookup on {socket_path} failed: {e}; refusing the connection"
+            ) from e
+        if len(creds) != ucred_size:
+            sock.close()
+            raise IpcError(
+                f"SO_PEERCRED on {socket_path} returned {len(creds)} bytes "
+                f"(expected {ucred_size}); refusing the connection"
+            )
+        _pid, peer_uid, _gid = struct.unpack("i2I", creds)
         if peer_uid != expected_uid:
             sock.close()
             raise IpcError(
@@ -516,7 +540,45 @@ def _verify_peer_after_connect(
             )
         return
 
-    # No SO_PEERCRED (macOS): fall back to a post-connect path re-stat.
+    if sys.platform == "darwin":
+        xucred_size = struct.calcsize(_XUCRED_FMT)
+        try:
+            raw = sock.getsockopt(_SOL_LOCAL, _LOCAL_PEERCRED, xucred_size)
+        except OSError as e:
+            sock.close()
+            raise IpcError(
+                f"LOCAL_PEERCRED lookup on {socket_path} failed: {e}; refusing the connection"
+            ) from e
+        if len(raw) != xucred_size:
+            sock.close()
+            raise IpcError(
+                f"LOCAL_PEERCRED on {socket_path} returned {len(raw)} bytes "
+                f"(expected {xucred_size}); refusing the connection"
+            )
+        fields = struct.unpack(_XUCRED_FMT, raw)
+        cr_version, peer_uid = fields[0], fields[1]
+        if cr_version != _XUCRED_VERSION:
+            sock.close()
+            raise IpcError(
+                f"LOCAL_PEERCRED on {socket_path} returned unsupported xucred "
+                f"version {cr_version} (expected {_XUCRED_VERSION}); refusing the connection"
+            )
+        if peer_uid != expected_uid:
+            sock.close()
+            raise IpcError(
+                f"IPC peer on {socket_path} has uid {peer_uid}, expected "
+                f"{expected_uid} (LOCAL_PEERCRED); refusing the connection"
+            )
+        return
+
+    # Unsupported POSIX platform without SO_PEERCRED or Darwin LOCAL_PEERCRED.
+    if os.environ.get("HAAP_SDK_EXPECTED_PEER_UID") is not None:
+        sock.close()
+        raise IpcError(
+            f"cannot verify HAAP_SDK_EXPECTED_PEER_UID={expected_uid} on "
+            f"{socket_path}: platform {sys.platform!r} exposes neither "
+            "SO_PEERCRED nor LOCAL_PEERCRED; refusing the connection"
+        )
     try:
         post_stat = Path(socket_path).stat()
     except OSError as e:

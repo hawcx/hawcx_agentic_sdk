@@ -3,14 +3,25 @@
  */
 
 import { Buffer } from "node:buffer";
+import * as fs from "node:fs";
+import * as net from "node:net";
+import * as os from "node:os";
+import * as path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  EnrollmentRejected,
   HawcxAgent,
+  HawcxError,
+  IpcError,
+  MSG_REGISTER_REQ,
+  MSG_REGISTER_RESP,
   RequestRejected,
   TokenTransport,
+  defaultAuthControlSocketFor,
   defaultEndpointFor,
+  encodeFrame,
 } from "../src";
 
 import { MockAssembler } from "./mockAssembler";
@@ -368,5 +379,315 @@ describe.skipIf(process.platform === "win32")("invoke transports", () => {
       agent.close();
     }
     expect(mock.receivedRequest?.transport).toBe("mcp_meta");
+  });
+
+  it("forwards mcpToolName via invoke and invokeFor", async () => {
+    const agent = await HawcxAgent.connect(mock.socketPath, {
+      principalAllowlist: ["alice"],
+    });
+    try {
+      await agent.invokeFor("alice", {
+        targetRsUrl: "https://mcp.example.com",
+        httpMethod: "POST",
+        tool: "docs.read",
+        mcpToolName: "read-doc",
+        transport: TokenTransport.McpMeta,
+      });
+    } finally {
+      agent.close();
+    }
+    expect(mock.receivedRequest?.tool).toBe("docs.read");
+    expect(mock.receivedRequest?.mcp_tool_name).toBe("read-doc");
+    expect(mock.receivedRequest?.acting_for_user).toBe("alice");
+  });
+});
+
+class MockAuthenticator {
+  receivedPayload: Record<string, unknown> | null = null;
+  private server: net.Server | null = null;
+  private response: Record<string, unknown> = {
+    type: "Enrolled",
+    agent_instance_id: "aid-001",
+    client_id: "client-001",
+    ik_fingerprint: "ab".repeat(32),
+    session_id: "sess-001",
+  };
+
+  constructor(readonly socketPath: string) {}
+
+  respondWith(response: Record<string, unknown>): void {
+    this.response = response;
+  }
+
+  start(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.server = net.createServer((sock) => {
+        let buf = Buffer.alloc(0);
+        sock.on("data", (chunk: Buffer) => {
+          buf = Buffer.concat([buf, chunk]);
+          if (buf.length < 4) return;
+          const msgLen = buf.readUInt32BE(0);
+          if (buf.length < 4 + msgLen) return;
+          const msgType = buf.readUInt8(4);
+          const payload = buf.subarray(5, 4 + msgLen);
+          if (msgType !== MSG_REGISTER_REQ) {
+            sock.destroy();
+            return;
+          }
+          this.receivedPayload = JSON.parse(
+            payload.toString("utf-8"),
+          ) as Record<string, unknown>;
+          const body = Buffer.from(JSON.stringify(this.response), "utf-8");
+          sock.write(encodeFrame(MSG_REGISTER_RESP, body));
+        });
+        sock.on("error", () => sock.destroy());
+      });
+      this.server.on("error", reject);
+      this.server.listen(this.socketPath, () => {
+        this.server!.off("error", reject);
+        resolve();
+      });
+    });
+  }
+
+  async close(): Promise<void> {
+    await new Promise<void>((resolve) => {
+      if (!this.server) return resolve();
+      this.server.close(() => resolve());
+    });
+  }
+}
+
+describe("defaultAuthControlSocketFor", () => {
+  const savedOverride = process.env.HAAP_AUTH_CONTROL_SOCK;
+
+  afterEach(() => {
+    if (savedOverride === undefined) {
+      delete process.env.HAAP_AUTH_CONTROL_SOCK;
+    } else {
+      process.env.HAAP_AUTH_CONTROL_SOCK = savedOverride;
+    }
+  });
+
+  it("computes the canonical Unix control socket path", () => {
+    if (process.platform === "win32") return;
+    delete process.env.HAAP_AUTH_CONTROL_SOCK;
+    expect(
+      defaultAuthControlSocketFor("researcher", { ipcDir: "/var/run/haap" }),
+    ).toBe("/var/run/haap/researcher/auth-control.sock");
+  });
+
+  it("honors HAAP_AUTH_CONTROL_SOCK override", () => {
+    process.env.HAAP_AUTH_CONTROL_SOCK = "/custom/path/auth.sock";
+    expect(defaultAuthControlSocketFor("ignored")).toBe(
+      "/custom/path/auth.sock",
+    );
+  });
+});
+
+describe.skipIf(process.platform === "win32")("HawcxAgent.enroll", () => {
+  let baseDir: string;
+  let auth: MockAuthenticator;
+  let asmServer: net.Server;
+  const savedExpectedUid = process.env.HAAP_SDK_EXPECTED_PEER_UID;
+  const savedAuthOverride = process.env.HAAP_AUTH_CONTROL_SOCK;
+
+  beforeEach(async () => {
+    delete process.env.HAAP_SDK_EXPECTED_PEER_UID;
+    delete process.env.HAAP_AUTH_CONTROL_SOCK;
+    baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "hx-enroll-"));
+    fs.chmodSync(baseDir, 0o700);
+
+    const authDir = path.join(baseDir, "researcher");
+    fs.mkdirSync(authDir, { mode: 0o700 });
+    auth = new MockAuthenticator(path.join(authDir, "auth-control.sock"));
+    await auth.start();
+
+    const asmDir = path.join(baseDir, "aid-001");
+    fs.mkdirSync(asmDir, { mode: 0o700 });
+    const asmPath = path.join(asmDir, "agent-assembler-0.sock");
+    asmServer = net.createServer((sock) => {
+      let handshakeDone = false;
+      let buf = Buffer.alloc(0);
+      sock.on("data", (chunk: Buffer) => {
+        buf = Buffer.concat([buf, chunk]);
+        while (buf.length >= 4) {
+          const msgLen = buf.readUInt32BE(0);
+          if (buf.length < 4 + msgLen) return;
+          const msgType = buf.readUInt8(4);
+          const payload = buf.subarray(5, 4 + msgLen);
+          buf = Buffer.from(buf.subarray(4 + msgLen));
+          if (!handshakeDone) {
+            const reply = Buffer.allocUnsafe(9);
+            reply.writeUInt16BE(1, 0);
+            reply.writeUInt16BE(0, 2);
+            reply.writeUInt16BE(5, 4);
+            reply.writeUInt16BE(0, 6);
+            reply.writeUInt8(0x05, 8);
+            sock.write(encodeFrame(0x00, reply));
+            handshakeDone = true;
+          } else if (msgType === 0x52) {
+            const req = JSON.parse(payload.toString("utf-8")) as {
+              request_id: string;
+            };
+            const resp = Buffer.from(
+              JSON.stringify({
+                request_id: req.request_id,
+                http_status: 200,
+                headers: {},
+                body: Buffer.from("enrolled-ok").toString("base64"),
+              }),
+              "utf-8",
+            );
+            sock.write(encodeFrame(0x53, resp));
+          }
+        }
+      });
+      sock.on("error", () => sock.destroy());
+    });
+    await new Promise<void>((resolve) => asmServer.listen(asmPath, resolve));
+  });
+
+  afterEach(async () => {
+    if (savedExpectedUid === undefined) {
+      delete process.env.HAAP_SDK_EXPECTED_PEER_UID;
+    } else {
+      process.env.HAAP_SDK_EXPECTED_PEER_UID = savedExpectedUid;
+    }
+    if (savedAuthOverride === undefined) {
+      delete process.env.HAAP_AUTH_CONTROL_SOCK;
+    } else {
+      process.env.HAAP_AUTH_CONTROL_SOCK = savedAuthOverride;
+    }
+    await auth.close();
+    await new Promise<void>((resolve) => asmServer.close(() => resolve()));
+    fs.rmSync(baseDir, { recursive: true, force: true });
+  });
+
+  it("drives Authenticator control socket and returns a connected HawcxAgent", async () => {
+    const agent = await HawcxAgent.enroll({
+      name: "researcher",
+      orgToken: "ot-test-token-XYZ",
+      principalAllowlist: ["alice"],
+      ipcDir: baseDir,
+    });
+    try {
+      expect(auth.receivedPayload).toEqual({
+        agent_class: "default",
+        subject_user_id: "researcher",
+        org_token: "ot-test-token-XYZ",
+        prepared_agent_id: "researcher",
+      });
+      expect(agent.enrollment).toEqual({
+        agentInstanceId: "aid-001",
+        clientId: "client-001",
+        ikFingerprint: "ab".repeat(32),
+        sessionId: "sess-001",
+        alreadyEnrolled: false,
+      });
+      const resp = await agent.invoke({
+        actingForUser: "alice",
+        targetRsUrl: "https://api.example.com/ping",
+        httpMethod: "GET",
+        tool: "ping",
+      });
+      expect(resp.body.toString()).toBe("enrolled-ok");
+    } finally {
+      agent.close();
+    }
+  });
+
+  it("handles AlreadyEnrolled as a success path", async () => {
+    auth.respondWith({
+      type: "AlreadyEnrolled",
+      agent_instance_id: "aid-001",
+      client_id: "client-001",
+      ik_fingerprint: "ab".repeat(32),
+      session_id: "sess-001",
+      trust_level: "Enrolled",
+    });
+    const agent = await HawcxAgent.enroll({
+      name: "researcher",
+      orgToken: "ot-test",
+      principalAllowlist: [],
+      ipcDir: baseDir,
+    });
+    try {
+      expect(agent.enrollment?.alreadyEnrolled).toBe(true);
+      expect(agent.enrollment?.trustLevel).toBe("Enrolled");
+    } finally {
+      agent.close();
+    }
+  });
+
+  it("throws EnrollmentRejected on Degraded response with agentInstanceId", async () => {
+    auth.respondWith({
+      type: "Degraded",
+      agent_instance_id: "aid-001",
+      reason: "tqs policy push failed: connection refused",
+    });
+    await expect(
+      HawcxAgent.enroll({
+        name: "researcher",
+        orgToken: "ot-test",
+        principalAllowlist: [],
+        ipcDir: baseDir,
+      }),
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof EnrollmentRejected &&
+        err.reason.includes("tqs policy push") &&
+        err.agentInstanceId === "aid-001",
+    );
+  });
+
+  it("throws EnrollmentRejected on generic error envelope", async () => {
+    auth.respondWith({ error: "invalid RegisterAgent payload" });
+    await expect(
+      HawcxAgent.enroll({
+        name: "researcher",
+        orgToken: "ot-test",
+        principalAllowlist: [],
+        ipcDir: baseDir,
+      }),
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof EnrollmentRejected &&
+        err.reason.includes("invalid") &&
+        err.agentInstanceId === null,
+    );
+  });
+
+  it("rejects empty name or empty orgToken before IPC", async () => {
+    await expect(
+      HawcxAgent.enroll({
+        name: "",
+        orgToken: "ot-x",
+        principalAllowlist: [],
+        ipcDir: baseDir,
+      }),
+    ).rejects.toBeInstanceOf(HawcxError);
+    await expect(
+      HawcxAgent.enroll({
+        name: "researcher",
+        orgToken: "",
+        principalAllowlist: [],
+        ipcDir: baseDir,
+      }),
+    ).rejects.toBeInstanceOf(HawcxError);
+    expect(auth.receivedPayload).toBeNull();
+  });
+
+  it("rejects mismatched peer UID on Authenticator control socket before sending orgToken", async () => {
+    process.env.HAAP_SDK_EXPECTED_PEER_UID = String(process.getuid!() + 1);
+    await expect(
+      HawcxAgent.enroll({
+        name: "researcher",
+        orgToken: "ot-must-not-leak",
+        principalAllowlist: [],
+        ipcDir: baseDir,
+      }),
+    ).rejects.toBeInstanceOf(IpcError);
+    expect(auth.receivedPayload).toBeNull();
   });
 });

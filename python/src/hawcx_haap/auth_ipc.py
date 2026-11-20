@@ -49,6 +49,7 @@ from hawcx_haap.errors import HawcxError, IpcError
 from hawcx_haap.ipc import (
     MAX_MESSAGE_SIZE,
     _validate_ipc_socket_path,
+    _verify_peer_after_connect,
     read_frame,
     write_frame,
 )
@@ -157,11 +158,20 @@ class AuthenticatorClient:
 
             sock = pipe_win.connect(endpoint, timeout_secs=timeout_secs)  # type: ignore[assignment]
         else:
-            _validate_ipc_socket_path(endpoint)
+            pre_stat = _validate_ipc_socket_path(endpoint)
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             if timeout_secs is not None:
                 sock.settimeout(timeout_secs)
-            sock.connect(endpoint)
+            try:
+                sock.connect(endpoint)
+            except OSError as e:
+                sock.close()
+                raise IpcError(
+                    f"connect to Authenticator endpoint {endpoint!r} failed: "
+                    f"{type(e).__name__}: {e}"
+                ) from e
+            if pre_stat is not None:
+                _verify_peer_after_connect(sock, pre_stat, endpoint)
         return cls(sock)
 
     def register_agent(

@@ -20,6 +20,7 @@
  */
 
 import { Buffer } from "node:buffer";
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as net from "node:net";
 import * as path from "node:path";
@@ -51,34 +52,25 @@ export const MAX_MESSAGE_SIZE = 64 * 1024;
  * Per-call outbound transport selector.
  *
  * - `http_header` (default): token in `Authorization: HAAP <b64>` HTTP header.
- * - `mcp_meta`: legacy v6.7.4 §34 carriage. Token placed at
- *   `params._meta["haap/tbac"].token`. Retained for compatibility
- *   with MCP servers that have not yet negotiated v7.2.5; will be
- *   removed once every shipped server advertises
- *   `experimental.hawcx-haap-v7-2-5`.
- * - `mcp_meta_v7_2_5`: current carriage per HAAP v7.2.5 §45.7.5.
- *   The Assembler places the HAAP token at
- *   `params._meta.hawcx.haap_token` and any OAuth bridging bearer at
- *   `params._meta.hawcx.oauth_bearer`. RSV strip-on-egress semantics
- *   apply: the gateway MUST remove the `_meta.hawcx` envelope before
- *   forwarding to the underlying tool. JSON-RPC error mapping per
- *   §45.7.5: rejection codes `-32000` … `-32005`, with
- *   `data.hawcx_reason_code` carrying the Hawcx-side reason.
+ * - `mcp_meta`: standard MCP carriage accepted by Rust `haap-assembler`.
+ *   Token placed in JSON-RPC `params._meta`.
+ *
+ * Note: shipped Rust `haap-assembler` crates accept ONLY `"http_header"` and
+ * `"mcp_meta"` (they reject `"mcp_meta_v7_2_5"` with `unknown variant`).
+ * `McpMetaV725` is retained as a deprecated alias to `"mcp_meta"` so existing
+ * TypeScript callers continue to compile and work against shipped Assemblers.
  *
  * Values match serde `#[rename_all = "snake_case"]` on the Rust side.
- *
- * Wire selector change (M-6, 2026-05-20): `mcp_meta_v7_2_5` is a new
- * selector value; callers must opt in explicitly. The Assembler
- * advertises support via the `experimental.hawcx-haap-v7-2-5`
- * capability at MCP `initialize`; see
- * `AssemblerClient.connect`'s `experimentalCapabilities` option for
- * the connect-time advertisement.
  */
 export enum TokenTransport {
   HttpHeader = "http_header",
-  /** @deprecated v6.7.4 carriage. Use `McpMetaV725` for new code. */
   McpMeta = "mcp_meta",
-  McpMetaV725 = "mcp_meta_v7_2_5",
+  /**
+   * @deprecated Shipped Rust `haap-assembler` rejects `"mcp_meta_v7_2_5"` and
+   * expects `"http_header"` or `"mcp_meta"`. Aliased to `"mcp_meta"`; use
+   * {@link TokenTransport.McpMeta}.
+   */
+  McpMetaV725 = "mcp_meta",
 }
 
 /**
@@ -103,6 +95,13 @@ export interface ToolCallRequest {
   httpMethod: string;
   headers?: Record<string, string>;
   tool: string;
+  /**
+   * Downstream MCP tool name (kebab route) that becomes JSON-RPC `params.name`
+   * on the `mcp_meta` flight. Distinct from `tool`, which is the dotted TBAC id
+   * used for policy/scope matching. Omitted from the wire when undefined
+   * (Assembler falls back to `tool`). Mirrors Python `ToolCallRequest.mcp_tool_name`.
+   */
+  mcpToolName?: string;
   action?: readonly string[];
   resource?: string;
   constraints?: Record<string, unknown>;
@@ -155,6 +154,9 @@ function toolCallRequestToWire(req: ToolCallRequest): Record<string, unknown> {
     resource: req.resource ?? "*",
     constraints: req.constraints ?? {},
   };
+  if (req.mcpToolName !== undefined) {
+    wire.mcp_tool_name = req.mcpToolName;
+  }
   if (req.body !== undefined && req.body !== null) {
     wire.plaintext_request_body = req.body.toString("base64");
   }
@@ -221,7 +223,7 @@ export function encodeFrame(msgType: number, payload: Buffer): Buffer {
  * resolved with it. `error`, `end`, and `close` events propagate to all pending
  * waiters.
  */
-class FrameReader {
+export class FrameReader {
   private buffer = Buffer.alloc(0);
   private waiters: Array<{
     resolve: (frame: [number, Buffer]) => void;
@@ -365,15 +367,322 @@ function decodeHandshake(payload: Buffer): DecodedHandshake {
  * - the dir's uid does not equal `process.getuid()`, OR
  * - the dir's mode has any group/other bit set (mask `0o077`).
  */
-function validateIpcSocketPath(endpoint: string): fs.Stats | null {
-  if (process.platform === "win32") {
-    return null; // Named Pipe ACLs handled by the kernel; nothing to stat.
+export interface UnixPeerCredResult {
+  uid: number;
+  mechanism: "SO_PEERCRED" | "LOCAL_PEERCRED";
+}
+
+export interface WindowsPipeServerInfo {
+  serverPid: number;
+  ownerSid: string;
+  currentUserSid: string;
+}
+
+export type UnixPeerCredQueryFn = (
+  fd: number,
+  platform: NodeJS.Platform,
+) => UnixPeerCredResult;
+
+export type WindowsPipeServerQueryFn = (
+  endpoint: string,
+) => WindowsPipeServerInfo;
+
+const LOCAL_WINDOWS_PIPE_RE = /^\\\\\.\\pipe\\[^\\/]+$/;
+const WINDOWS_SID_RE = /^S-\d+-\d+(?:-\d+)+$/i;
+const WINDOWS_TRUSTED_SYSTEM_SIDS = new Set(["S-1-5-18", "S-1-5-19"]);
+
+const PYTHON_LINUX_PEERCRED_SCRIPT = [
+  "import socket, struct",
+  "s = socket.fromfd(3, socket.AF_UNIX, socket.SOCK_STREAM)",
+  "try:",
+  "    raw = s.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize('i2I'))",
+  "    _pid, uid, _gid = struct.unpack('i2I', raw)",
+  "    print(uid)",
+  "finally:",
+  "    s.close()",
+].join("\n");
+
+const PERL_LINUX_PEERCRED_SCRIPT = [
+  "use Socket qw(SOL_SOCKET);",
+  "my $opt = eval { Socket::SO_PEERCRED() };",
+  "$opt = 17 unless defined $opt;",
+  "open(my $fh, '+<&=', 3) or die \"open fd 3: $!\";",
+  "my $c = getsockopt($fh, SOL_SOCKET, $opt);",
+  "die \"getsockopt SO_PEERCRED: $!\" unless defined $c;",
+  "my ($pid, $uid, $gid) = unpack('iII', $c);",
+  "print \"$uid\\n\";",
+].join("\n");
+
+const PYTHON_DARWIN_PEERCRED_SCRIPT = [
+  "import socket, struct",
+  "s = socket.fromfd(3, socket.AF_UNIX, socket.SOCK_STREAM)",
+  "try:",
+  "    fmt = 'IIh16I'",
+  "    raw = s.getsockopt(0, 0x001, struct.calcsize(fmt))",
+  "    ver, uid = struct.unpack(fmt, raw)[:2]",
+  "    if ver != 0:",
+  "        raise RuntimeError(f'unexpected xucred version {ver}')",
+  "    print(uid)",
+  "finally:",
+  "    s.close()",
+].join("\n");
+
+const PERL_DARWIN_PEERCRED_SCRIPT = [
+  "open(my $fh, '+<&=', 3) or die \"open fd 3: $!\";",
+  "my $c = getsockopt($fh, 0, 1);",
+  "die \"getsockopt LOCAL_PEERCRED: $!\" unless defined $c;",
+  "die 'short xucred' if length($c) < 8;",
+  "my ($ver, $uid) = unpack('II', $c);",
+  "die \"unexpected xucred version $ver\" unless $ver == 0;",
+  "print \"$uid\\n\";",
+].join("\n");
+
+const POWERSHELL_WIN_PIPE_VERIFY_SCRIPT = `
+$ErrorActionPreference = 'Stop'
+$pipePath = $env:HAAP_VERIFY_PIPE_PATH
+if (-not $pipePath) { throw 'missing HAAP_VERIFY_PIPE_PATH' }
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Security.Principal;
+public static class HaapPipeVerifier {
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  public static extern IntPtr CreateFileW(
+    string lpFileName, uint dwDesiredAccess, uint dwShareMode,
+    IntPtr lpSecurityAttributes, uint dwCreationDisposition,
+    uint dwFlagsAndAttributes, IntPtr hTemplateFile);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  public static extern bool GetNamedPipeServerProcessId(IntPtr Pipe, out uint ServerProcessId);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  public static extern bool CloseHandle(IntPtr hObject);
+  [DllImport("advapi32.dll", SetLastError = true)]
+  public static extern uint GetSecurityInfo(
+    IntPtr handle, int ObjectType, uint SecurityInfo,
+    out IntPtr ppsidOwner, out IntPtr ppsidGroup,
+    out IntPtr ppDacl, out IntPtr ppSacl, out IntPtr ppSecurityDescriptor);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  public static extern IntPtr LocalFree(IntPtr hMem);
+
+  public static string Inspect(string path) {
+    // READ_CONTROL (0x00020000) | FILE_READ_ATTRIBUTES (0x00000080)
+    // SECURITY_SQOS_PRESENT (0x00100000) | SECURITY_IDENTIFICATION (0x00010000)
+    IntPtr h = CreateFileW(path, 0x00020080u, 0u, IntPtr.Zero, 3u, 0x00110000u, IntPtr.Zero);
+    if (h == new IntPtr(-1)) {
+      throw new Exception("CreateFileW failed: " + Marshal.GetLastWin32Error());
+    }
+    try {
+      uint pid = 0;
+      if (!GetNamedPipeServerProcessId(h, out pid) || pid == 0) {
+        throw new Exception("GetNamedPipeServerProcessId failed: " + Marshal.GetLastWin32Error());
+      }
+      IntPtr pOwner, pGroup, pDacl, pSacl, pSd;
+      uint rc = GetSecurityInfo(h, 6 /* SE_KERNEL_OBJECT */, 1 /* OWNER_SECURITY_INFORMATION */,
+                                out pOwner, out pGroup, out pDacl, out pSacl, out pSd);
+      if (rc != 0) {
+        throw new Exception("GetSecurityInfo failed: " + rc);
+      }
+      try {
+        string ownerSid = new SecurityIdentifier(pOwner).Value;
+        string selfSid = WindowsIdentity.GetCurrent().User.Value;
+        return pid.ToString() + "|" + ownerSid + "|" + selfSid;
+      } finally {
+        if (pSd != IntPtr.Zero) LocalFree(pSd);
+      }
+    } finally {
+      CloseHandle(h);
+    }
   }
+}
+"@
+[HaapPipeVerifier]::Inspect($pipePath)
+`;
+
+function parseStrictUid(raw: string, label: string): number {
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    throw new IpcError(`${label}=${raw} is not a valid uid`);
+  }
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > 0xffffffff) {
+    throw new IpcError(`${label}=${raw} is not a valid uid`);
+  }
+  return parsed;
+}
+
+function defaultQueryUnixPeerUid(
+  fd: number,
+  platform: NodeJS.Platform,
+): UnixPeerCredResult {
+  if (platform !== "linux" && platform !== "darwin") {
+    throw new IpcError(
+      `kernel peer-UID verification is unsupported on platform '${platform}'`,
+    );
+  }
+  const mechanism: "SO_PEERCRED" | "LOCAL_PEERCRED" =
+    platform === "linux" ? "SO_PEERCRED" : "LOCAL_PEERCRED";
+  const candidates: Array<{ bin: string; args: string[] }> =
+    platform === "linux"
+      ? [
+          { bin: "python3", args: ["-c", PYTHON_LINUX_PEERCRED_SCRIPT] },
+          { bin: "perl", args: ["-e", PERL_LINUX_PEERCRED_SCRIPT] },
+        ]
+      : [
+          { bin: "python3", args: ["-c", PYTHON_DARWIN_PEERCRED_SCRIPT] },
+          { bin: "perl", args: ["-e", PERL_DARWIN_PEERCRED_SCRIPT] },
+        ];
+
+  let lastErr: Error | null = null;
+  for (const { bin, args } of candidates) {
+    try {
+      // Pass the connected socket fd as inherited fd 3 to the helper so it
+      // executes getsockopt(3, ...) on the exact connected kernel socket.
+      const out = execFileSync(bin, args, {
+        stdio: ["ignore", "pipe", "pipe", fd],
+        encoding: "utf8",
+        timeout: 5000,
+      });
+      const uid = parseStrictUid(out, `${mechanism} peer uid`);
+      return { uid, mechanism };
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code === "ENOENT") {
+        lastErr = e;
+        continue;
+      }
+      throw new IpcError(
+        `${mechanism} lookup via ${bin} failed: ${e.message}`,
+      );
+    }
+  }
+  throw new IpcError(
+    `cannot verify ${mechanism}: neither python3 nor perl is available (${lastErr?.message ?? "ENOENT"})`,
+  );
+}
+
+function defaultQueryWindowsPipeServer(endpoint: string): WindowsPipeServerInfo {
+  let out: string;
+  try {
+    out = execFileSync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", POWERSHELL_WIN_PIPE_VERIFY_SCRIPT],
+      {
+        stdio: ["ignore", "pipe", "pipe"],
+        encoding: "utf8",
+        timeout: 10000,
+        env: { ...process.env, HAAP_VERIFY_PIPE_PATH: endpoint },
+      },
+    );
+  } catch (err) {
+    throw new IpcError(
+      `Windows Named Pipe server verification failed for ${endpoint}: ${(err as Error).message}`,
+    );
+  }
+  const parts = out.trim().split("|");
+  if (parts.length !== 3) {
+    throw new IpcError(
+      `Windows Named Pipe server verification returned malformed output for ${endpoint}`,
+    );
+  }
+  const serverPid = Number.parseInt(parts[0] ?? "", 10);
+  const ownerSid = (parts[1] ?? "").trim();
+  const currentUserSid = (parts[2] ?? "").trim();
+  if (
+    !Number.isSafeInteger(serverPid) ||
+    serverPid <= 0 ||
+    !WINDOWS_SID_RE.test(ownerSid) ||
+    !WINDOWS_SID_RE.test(currentUserSid)
+  ) {
+    throw new IpcError(
+      `Windows Named Pipe server verification returned invalid identity for ${endpoint}`,
+    );
+  }
+  return { serverPid, ownerSid, currentUserSid };
+}
+
+let unixPeerCredQueryImpl: UnixPeerCredQueryFn = defaultQueryUnixPeerUid;
+let windowsPipeServerQueryImpl: WindowsPipeServerQueryFn =
+  defaultQueryWindowsPipeServer;
+
+/**
+ * @internal Override peer-credential query hooks in unit tests.
+ */
+export function _setPeerVerifiersForTesting(overrides: {
+  unix?: UnixPeerCredQueryFn | null;
+  windows?: WindowsPipeServerQueryFn | null;
+}): void {
+  if ("unix" in overrides) {
+    unixPeerCredQueryImpl = overrides.unix ?? defaultQueryUnixPeerUid;
+  }
+  if ("windows" in overrides) {
+    windowsPipeServerQueryImpl =
+      overrides.windows ?? defaultQueryWindowsPipeServer;
+  }
+}
+
+/**
+ * Validate a Windows Named Pipe endpoint path and optional
+ * `HAAP_SDK_EXPECTED_PEER_SID` env var before connecting.
+ *
+ * Refuses remote UNC pipes and path traversal.
+ */
+export function validateWindowsNamedPipePath(endpoint: string): string | null {
+  if (!LOCAL_WINDOWS_PIPE_RE.test(endpoint)) {
+    throw new IpcError(
+      `Windows IPC endpoint '${endpoint}' must be a local Named Pipe (\\\\.\\pipe\\<name>); refusing remote or malformed pipe path`,
+    );
+  }
+  const expectedSidEnv = process.env.HAAP_SDK_EXPECTED_PEER_SID;
+  if (expectedSidEnv === undefined) {
+    return null;
+  }
+  const trimmed = expectedSidEnv.trim();
+  if (!WINDOWS_SID_RE.test(trimmed)) {
+    throw new IpcError(
+      `HAAP_SDK_EXPECTED_PEER_SID=${expectedSidEnv} is not a valid Windows SID`,
+    );
+  }
+  return trimmed;
+}
+
+/**
+ * Verify a Windows Named Pipe server's local PID and owner SID before
+ * exchanging any IPC handshake bytes.
+ */
+export function verifyWindowsNamedPipeServer(
+  endpoint: string,
+  expectedSid: string | null,
+): void {
+  const info = windowsPipeServerQueryImpl(endpoint);
+  if (!Number.isSafeInteger(info.serverPid) || info.serverPid <= 0) {
+    throw new IpcError(
+      `Windows Named Pipe ${endpoint} reported invalid server PID ${info.serverPid}; refusing the connection`,
+    );
+  }
+  const ownerUpper = info.ownerSid.toUpperCase();
+  if (expectedSid !== null) {
+    if (ownerUpper !== expectedSid.toUpperCase()) {
+      throw new IpcError(
+        `Windows Named Pipe ${endpoint} is owned by SID ${info.ownerSid}, expected ${expectedSid}; refusing the connection`,
+      );
+    }
+    return;
+  }
+  const selfUpper = info.currentUserSid.toUpperCase();
+  if (ownerUpper !== selfUpper && !WINDOWS_TRUSTED_SYSTEM_SIDS.has(ownerUpper)) {
+    throw new IpcError(
+      `Windows Named Pipe ${endpoint} is owned by untrusted SID ${info.ownerSid} (current user SID ${info.currentUserSid}); refusing the connection`,
+    );
+  }
+}
+
+interface ValidatedUnixSocket {
+  sockStat: fs.Stats;
+  expectedUid: number;
+}
+
+function validateIpcSocketPath(endpoint: string): ValidatedUnixSocket {
   const getuid = process.getuid;
   if (typeof getuid !== "function") {
-    // Shouldn't happen on a non-Win32 platform, but make the
-    // type-narrowing explicit so a Bun / Deno port doesn't silently
-    // skip the check.
     throw new IpcError(
       "process.getuid() is unavailable on this platform; refusing to " +
         "connect to a UDS without UID validation",
@@ -396,13 +705,8 @@ function validateIpcSocketPath(endpoint: string): fs.Stats | null {
   const expectedUidEnv = process.env.HAAP_SDK_EXPECTED_PEER_UID;
   const expectedUid =
     expectedUidEnv !== undefined
-      ? Number.parseInt(expectedUidEnv, 10)
+      ? parseStrictUid(expectedUidEnv, "HAAP_SDK_EXPECTED_PEER_UID")
       : sockStat.uid;
-  if (!Number.isFinite(expectedUid) || expectedUid < 0) {
-    throw new IpcError(
-      `HAAP_SDK_EXPECTED_PEER_UID=${expectedUidEnv} is not a valid uid`,
-    );
-  }
   // H-4's inode-owner-vs-expected-peer comparison is REMOVED (Ravi, 2026-08-30).
   //
   // It compared a file OWNERSHIP stat against a peer-PROCESS expectation, and
@@ -483,9 +787,46 @@ function validateIpcSocketPath(endpoint: string): fs.Stats | null {
       );
     }
   }
-  // INF-08: return the validated stat so the caller can re-stat the
-  // *connected* socket and detect a swap between this check and connect.
-  return sockStat;
+  return { sockStat, expectedUid };
+}
+
+/**
+ * Verify the connected Unix domain socket peer's kernel-attested UID against
+ * `expectedUid` using `SO_PEERCRED` (Linux) or `LOCAL_PEERCRED` (macOS).
+ *
+ * Destroys `sock` and throws `IpcError` on any mismatch or lookup failure.
+ */
+function verifyPeerAfterConnect(
+  sock: net.Socket,
+  expectedUid: number,
+  endpoint: string,
+): void {
+  const handle = (sock as unknown as { _handle?: { fd?: number } })._handle;
+  const fd = handle?.fd;
+  if (typeof fd !== "number" || fd < 0) {
+    sock.destroy();
+    throw new IpcError(
+      `connected IPC socket ${endpoint} has no underlying OS file descriptor; refusing without peer-UID verification`,
+    );
+  }
+  let peer: UnixPeerCredResult;
+  try {
+    peer = unixPeerCredQueryImpl(fd, process.platform);
+  } catch (err) {
+    sock.destroy();
+    if (err instanceof IpcError) {
+      throw err;
+    }
+    throw new IpcError(
+      `peer credential verification on ${endpoint} failed: ${(err as Error).message}`,
+    );
+  }
+  if (peer.uid !== expectedUid) {
+    sock.destroy();
+    throw new IpcError(
+      `IPC peer on ${endpoint} has uid ${peer.uid}, expected ${expectedUid} (${peer.mechanism}); refusing the connection`,
+    );
+  }
 }
 
 /**
@@ -500,22 +841,44 @@ export function connectAssembler(
   endpoint: string,
   timeoutMs: number,
 ): Promise<net.Socket> {
-  // H-4: validate UID + parent-dir mode before attaching. Throws
-  // synchronously on mismatch — the Promise constructor's `executor`
-  // call catches it and rejects, so caller's `await` still sees an
-  // IpcError without partial side effects.
-  //
-  // INF-08: capture the validated socket's stat so we can re-stat the
-  // *connected* path and detect a path-based TOCTOU swap (an attacker who
-  // can write in the parent dir replacing the socket between stat and
-  // connect). Node's `net` does not expose SO_PEERCRED without a native
-  // binding (forbidden in this pure-language client — see CLAUDE.md), so
-  // we close the window by asserting the path still resolves to the same
-  // (dev, ino, uid) we validated. A swap changes the inode. This is
-  // strongest on a 0o700 parent owned by us (the default); the residual
-  // window only matters under the opt-in legacy HAAP_SDK_ALLOW_TMP_IPC=1
-  // /tmp/hawcx/ path, where a same-UID parent owner is no longer required.
-  const preStat = validateIpcSocketPath(endpoint);
+  if (process.platform === "win32") {
+    let expectedSid: string | null;
+    try {
+      expectedSid = validateWindowsNamedPipePath(endpoint);
+      verifyWindowsNamedPipeServer(endpoint, expectedSid);
+    } catch (err) {
+      return Promise.reject(err);
+    }
+    return new Promise((resolve, reject) => {
+      const sock = net.createConnection({ path: endpoint });
+      const timer =
+        timeoutMs > 0
+          ? setTimeout(() => {
+              sock.destroy();
+              reject(new IpcError(`timed out connecting to ${endpoint}`));
+            }, timeoutMs)
+          : null;
+      const onError = (err: Error) => {
+        if (timer) clearTimeout(timer);
+        reject(new IpcError(`connect ${endpoint} failed: ${err.message}`));
+      };
+      sock.once("error", onError);
+      sock.once("connect", () => {
+        if (timer) clearTimeout(timer);
+        sock.removeListener("error", onError);
+        resolve(sock);
+      });
+    });
+  }
+
+  let validated: ValidatedUnixSocket;
+  try {
+    validated = validateIpcSocketPath(endpoint);
+  } catch (err) {
+    return Promise.reject(err);
+  }
+  const { expectedUid } = validated;
+
   return new Promise((resolve, reject) => {
     const sock = net.createConnection({ path: endpoint });
     const timer =
@@ -533,35 +896,11 @@ export function connectAssembler(
     sock.once("connect", () => {
       if (timer) clearTimeout(timer);
       sock.removeListener("error", onError);
-      // INF-08: re-stat after connect and compare identity. On Windows
-      // preStat is null (Named Pipe ACLs are kernel-enforced) — skip.
-      if (preStat !== null) {
-        try {
-          const postStat = fs.statSync(endpoint);
-          if (
-            !postStat.isSocket() ||
-            postStat.dev !== preStat.dev ||
-            postStat.ino !== preStat.ino ||
-            postStat.uid !== preStat.uid
-          ) {
-            sock.destroy();
-            reject(
-              new IpcError(
-                `IPC socket ${endpoint} changed identity between validation and ` +
-                  "connect (possible TOCTOU swap); refusing the connection",
-              ),
-            );
-            return;
-          }
-        } catch (err) {
-          sock.destroy();
-          reject(
-            new IpcError(
-              `re-stat ${endpoint} after connect failed: ${(err as Error).message}`,
-            ),
-          );
-          return;
-        }
+      try {
+        verifyPeerAfterConnect(sock, expectedUid, endpoint);
+      } catch (err) {
+        reject(err);
+        return;
       }
       resolve(sock);
     });
@@ -724,11 +1063,15 @@ export function encodeSessionIdForWire(
   return typeof sessionId === "bigint" ? sessionId.toString(10) : sessionId;
 }
 
-function write(sock: net.Socket, data: Buffer): Promise<void> {
+export function writeFrameBytes(sock: net.Socket, data: Buffer): Promise<void> {
   return new Promise((resolve, reject) => {
     sock.write(data, (err) => {
       if (err) reject(new IpcError(`write failed: ${err.message}`));
       else resolve();
     });
   });
+}
+
+function write(sock: net.Socket, data: Buffer): Promise<void> {
+  return writeFrameBytes(sock, data);
 }

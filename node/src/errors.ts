@@ -42,3 +42,16 @@ export class RequestRejected extends HawcxError {
     super(`HAAP request '${requestId}' rejected: ${reason}`);
   }
 }
+
+/**
+ * The Authenticator rejected runtime enrollment (`Degraded` variant or generic
+ * `{"error": "..."}` envelope). Mirrors Python `EnrollmentRejected`.
+ */
+export class EnrollmentRejected extends HawcxError {
+  constructor(
+    readonly reason: string,
+    readonly agentInstanceId: string | null = null,
+  ) {
+    super(`HAAP enrollment rejected: ${reason}`);
+  }
+}

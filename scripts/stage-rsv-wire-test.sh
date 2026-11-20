@@ -35,8 +35,13 @@
 # script failure or Ctrl-C. The script exits non-zero on the first
 # failing assertion and prints a "FAIL: <reason>" line.
 
-set -u
-set -o pipefail
+set -euo pipefail
+
+echo "RETIRED: scripts/stage-rsv-wire-test.sh depended on scripts/mint-helper (pinned at haap-core 0.8), which was removed in Wave-0 (HAAP-AUD-15)." >&2
+echo "Run wire-level RSV tests from hx_agent_authorizer against the current haap-core / haap-rsv release instead." >&2
+exit 1
+
+# Historical implementation retained below for reference only:
 # NB: we deliberately do NOT use `set -e` — every assertion needs to
 # run so we can print PASS/FAIL for each, and the trap-driven cleanup
 # needs the script to keep going after a failed step.
