@@ -53,15 +53,25 @@
 export { HawcxAgent, defaultEndpointFor } from "./agent";
 export type {
   HawcxAgentInvokeOptions,
+  HawcxAgentOptions,
+  HawcxAgentConnectByAgentIdOptions,
   HawcxAgentEnrollOptions,
   EnrollmentResult,
 } from "./agent";
+export {
+  AuthenticatorClient,
+  defaultAuthControlSocketFor,
+  MSG_REGISTER_REQ,
+  MSG_REGISTER_RESP,
+} from "./authIpc";
 export {
   AssemblerClient,
   TokenTransport,
   HAWCX_HAAP_V7_2_5_CAPABILITY,
   encodeFrame,
   encodeSessionIdForWire,
+  validateWindowsNamedPipePath,
+  verifyWindowsNamedPipeServer,
   MSG_TOOL_CALL_REQUEST,
   MSG_TOOL_CALL_RESPONSE,
   MSG_REQUEST_REJECTED,
@@ -70,5 +80,11 @@ export {
   MAX_MESSAGE_SIZE,
 } from "./ipc";
 export type { ToolCallRequest, ToolCallResponse } from "./ipc";
-export { HawcxError, IpcError, HandshakeError, RequestRejected } from "./errors";
+export {
+  HawcxError,
+  IpcError,
+  HandshakeError,
+  RequestRejected,
+  EnrollmentRejected,
+} from "./errors";
 export { getBinaryPath } from "./binary";

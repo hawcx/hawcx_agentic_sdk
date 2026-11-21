@@ -5,8 +5,11 @@
 # `/encrypt-response`, then drives the round trip with a Rust-built client.
 # See the matching CHANGELOG entry for the full step sequence.
 
-set -u
-set -o pipefail
+set -euo pipefail
+
+echo "RETIRED: scripts/stage-mcp-sidecar-test.sh depended on scripts/mint-helper (pinned at haap-core 0.8), which was removed in Wave-0 (HAAP-AUD-15)." >&2
+echo "Run MCP sidecar wire tests from hx_agent_authorizer against the current haap-core / haap-rsv release instead." >&2
+exit 1
 
 STAGE_PROJECT="${STAGE_PROJECT:-hawcx-stage-client}"
 STAGE_CLUSTER="${STAGE_CLUSTER:-hx-stage-client-gke}"

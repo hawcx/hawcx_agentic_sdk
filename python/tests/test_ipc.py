@@ -303,3 +303,138 @@ def test_connect_refused_names_endpoint_and_operation(short_sock_path: str) -> N
     assert short_sock_path in msg, "message must name the endpoint"
     assert "connect" in msg, "must name the OPERATION that failed"
     assert "ConnectionRefusedError" in msg
+
+
+# ── Peer-UID verification (SO_PEERCRED on Linux / LOCAL_PEERCRED on macOS) ──
+
+
+def test_peer_uid_mismatch_rejected_via_kernel_peercred(
+    mock_assembler,
+    mock_assembler_endpoint: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Negative control (HAAP-AUD-15): setting HAAP_SDK_EXPECTED_PEER_UID to a
+    different UID MUST fail closed via SO_PEERCRED (Linux) or LOCAL_PEERCRED
+    (macOS) before any handshake or tool-call bytes are exchanged."""
+    import os
+    import sys
+
+    wrong_uid = os.getuid() + 1
+    monkeypatch.setenv("HAAP_SDK_EXPECTED_PEER_UID", str(wrong_uid))
+    expected_mech = "LOCAL_PEERCRED" if sys.platform == "darwin" else "SO_PEERCRED"
+
+    with pytest.raises(IpcError) as ei:
+        AssemblerClient.connect(mock_assembler_endpoint, timeout_secs=1.0)
+    msg = str(ei.value)
+    assert expected_mech in msg
+    assert f"expected {wrong_uid}" in msg
+    assert mock_assembler.received_request is None
+
+
+def test_peer_uid_explicit_match_succeeds(
+    mock_assembler_endpoint: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Happy path: explicit HAAP_SDK_EXPECTED_PEER_UID equal to our UID connects."""
+    import os
+
+    monkeypatch.setenv("HAAP_SDK_EXPECTED_PEER_UID", str(os.getuid()))
+    client = AssemblerClient.connect(mock_assembler_endpoint, timeout_secs=1.0)
+    try:
+        resp = client.invoke(
+            ToolCallRequest(
+                request_id="req-uid-ok",
+                target_rs_url="https://api.example.com/echo",
+                http_method="POST",
+                tool="echo",
+                plaintext_request_body=b"verified",
+            )
+        )
+        assert resp.body == b"verified"
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("bad_uid", ["", "-1", "abc", "123abc", "4294967296"])
+def test_invalid_expected_peer_uid_rejected_before_connect(
+    mock_assembler_endpoint: str,
+    monkeypatch: pytest.MonkeyPatch,
+    bad_uid: str,
+) -> None:
+    """Boundary control: malformed or out-of-range HAAP_SDK_EXPECTED_PEER_UID fails closed."""
+    monkeypatch.setenv("HAAP_SDK_EXPECTED_PEER_UID", bad_uid)
+    with pytest.raises(IpcError, match="not a valid uid"):
+        AssemblerClient.connect(mock_assembler_endpoint, timeout_secs=1.0)
+
+
+def test_darwin_local_peercred_bad_xucred_version_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Boundary control: unexpected xucred cr_version on macOS closes socket and raises."""
+    import os
+    import sys
+    from unittest.mock import MagicMock
+
+    from hawcx_haap import ipc
+
+    monkeypatch.delenv("HAAP_SDK_EXPECTED_PEER_UID", raising=False)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.delattr(socket, "SO_PEERCRED", raising=False)
+    fake_uid = os.getuid() if hasattr(os, "getuid") else 1000
+    monkeypatch.setattr(os, "getuid", lambda: fake_uid, raising=False)
+
+    fake_sock = MagicMock()
+    bad_xucred = struct.pack(ipc._XUCRED_FMT, 99, fake_uid, 0, *([0] * 16))
+    fake_sock.getsockopt.return_value = bad_xucred
+    fake_stat = MagicMock(st_uid=fake_uid)
+
+    with pytest.raises(IpcError, match="unsupported xucred version 99"):
+        ipc._verify_peer_after_connect(fake_sock, fake_stat, "/tmp/test.sock")
+    fake_sock.close.assert_called_once()
+
+
+def test_darwin_local_peercred_getsockopt_error_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Boundary control: getsockopt OSError on macOS fails closed without re-stat fallback."""
+    import os
+    import sys
+    from unittest.mock import MagicMock
+
+    from hawcx_haap import ipc
+
+    monkeypatch.delenv("HAAP_SDK_EXPECTED_PEER_UID", raising=False)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.delattr(socket, "SO_PEERCRED", raising=False)
+    fake_uid = os.getuid() if hasattr(os, "getuid") else 1000
+    monkeypatch.setattr(os, "getuid", lambda: fake_uid, raising=False)
+
+    fake_sock = MagicMock()
+    fake_sock.getsockopt.side_effect = OSError("EINVAL")
+    fake_stat = MagicMock(st_uid=fake_uid)
+
+    with pytest.raises(IpcError, match="LOCAL_PEERCRED lookup"):
+        ipc._verify_peer_after_connect(fake_sock, fake_stat, "/tmp/test.sock")
+    fake_sock.close.assert_called_once()
+
+
+def test_unsupported_posix_platform_with_explicit_expected_uid_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Boundary control: if HAAP_SDK_EXPECTED_PEER_UID is explicitly set on a
+    POSIX platform without SO_PEERCRED/LOCAL_PEERCRED, fail closed instead of ignoring."""
+    import sys
+    from unittest.mock import MagicMock
+
+    from hawcx_haap import ipc
+
+    monkeypatch.setenv("HAAP_SDK_EXPECTED_PEER_UID", "1000")
+    monkeypatch.setattr(sys, "platform", "freebsd14")
+    monkeypatch.delattr(socket, "SO_PEERCRED", raising=False)
+
+    fake_sock = MagicMock()
+    fake_stat = MagicMock(st_uid=1000)
+
+    with pytest.raises(IpcError, match="exposes neither SO_PEERCRED nor LOCAL_PEERCRED"):
+        ipc._verify_peer_after_connect(fake_sock, fake_stat, "/tmp/test.sock")
+    fake_sock.close.assert_called_once()

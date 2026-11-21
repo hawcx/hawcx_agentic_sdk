@@ -20,16 +20,29 @@ import * as path from "node:path";
 import * as process from "node:process";
 
 import {
+  AuthenticatorClient,
+  defaultAuthControlSocketFor,
+  type EnrollmentResult,
+} from "./authIpc";
+import { HawcxError } from "./errors";
+import {
   AssemblerClient,
   TokenTransport,
   type ToolCallResponse,
 } from "./ipc";
+
+export type { EnrollmentResult } from "./authIpc";
 
 export interface HawcxAgentInvokeOptions {
   targetRsUrl: string;
   httpMethod?: string;
   headers?: Record<string, string>;
   tool?: string;
+  /**
+   * Downstream MCP tool name (kebab route) that becomes JSON-RPC `params.name`
+   * on `mcp_meta` calls. Distinct from `tool` (dotted TBAC id).
+   */
+  mcpToolName?: string;
   action?: readonly string[];
   resource?: string;
   constraints?: Record<string, unknown>;
@@ -166,47 +179,11 @@ export interface HawcxAgentEnrollOptions extends HawcxAgentOptions {
   enrollTimeoutMs?: number;
 }
 
-/**
- * Result of a successful `HawcxAgent.enroll` — mirrors the Python
- * `EnrollmentResult` dataclass and the Rust
- * `RegisterAgentResult::Enrolled` variant.
- */
-export interface EnrollmentResult {
-  agentInstanceId: string;
-  clientId: string;
-  ikFingerprint: string;
-  sessionId: string;
-  alreadyEnrolled: boolean;
-  trustLevel?: string;
-}
-
-/**
- * High-level HAAP agent client. Connect once, invoke many times, close.
- *
- *     const agent = await HawcxAgent.connect(
- *       "/var/run/haap/research-u1/agent-assembler-0.sock",
- *       { principalAllowlist: ["alice", "bob"] },
- *     );
- *     try {
- *       const response = await agent.invoke({
- *         targetRsUrl: "https://api.example.com/search",
- *         httpMethod: "POST",
- *         headers: { "Content-Type": "application/json" },
- *         tool: "search",
- *         action: ["read"],
- *         body: Buffer.from('{"query": "agents"}'),
- *       });
- *     } finally {
- *       agent.close();
- *     }
- *
- * Not thread-safe; for concurrent use, wrap in a queue or open multiple
- * agents.
- */
 export class HawcxAgent {
   private constructor(
     private client: AssemblerClient | null,
     private readonly principalAllowlist: ReadonlySet<string>,
+    readonly enrollment: EnrollmentResult | null = null,
   ) {}
 
   /**
@@ -248,26 +225,50 @@ export class HawcxAgent {
    * Drives the per-agent Authenticator over its control socket to perform
    * X3DH Mode B (§5.2) against the configured AS using the supplied
    * `orgToken`, then opens the Assembler agent socket for the resulting
-   * `agent_instance_id`.
-   *
-   * **Status — 2026-05-22 (v7.2.6 task #11):** the Python SDK ships the
-   * canonical implementation of this surface. The Node SDK exposes the
-   * type contract here so customers using `@hawcx/hawcx-haap` can compile
-   * against the same API; the wire client lands in a follow-up. Until
-   * then this method throws `Error("HawcxAgent.enroll not yet implemented
-   * in Node SDK — use the Python SDK or HawcxAgent.connectByAgentId")`.
+   * `agentInstanceId`.
    *
    * `orgToken` is a single-use bearer credential — do not persist or log.
    */
   static async enroll(
-    _options: HawcxAgentEnrollOptions,
+    options: HawcxAgentEnrollOptions,
   ): Promise<HawcxAgent> {
-    throw new Error(
-      "HawcxAgent.enroll not yet implemented in Node SDK — " +
-        "use the Python SDK for runtime enrollment, or " +
-        "HawcxAgent.connectByAgentId with a pre-provisioned agent_id. " +
-        "Tracking: v7.2.6 task #11 follow-up.",
+    const allowlist = validatePrincipalAllowlist(options.principalAllowlist);
+    if (!options.name) {
+      throw new HawcxError("HawcxAgent.enroll requires a non-empty `name`");
+    }
+    if (!options.orgToken) {
+      throw new HawcxError(
+        "HawcxAgent.enroll requires a non-empty `orgToken`; " +
+          "obtain one from the Hawcx Admin Console (CS v7.2.6 §4.2)",
+      );
+    }
+    const authEndpoint =
+      options.authenticatorSocket ??
+      defaultAuthControlSocketFor(options.name, { ipcDir: options.ipcDir });
+
+    let result: EnrollmentResult;
+    const auth = await AuthenticatorClient.connect(authEndpoint, {
+      timeoutMs: options.enrollTimeoutMs ?? 30_000,
+    });
+    try {
+      result = await auth.registerAgent({
+        agentClass: options.agentClass ?? "default",
+        subjectUserId: options.name,
+        orgToken: options.orgToken,
+        preparedAgentId: options.name,
+      });
+    } finally {
+      auth.close();
+    }
+
+    const client = await AssemblerClient.connect(
+      defaultEndpointFor(result.agentInstanceId, {
+        index: options.index,
+        ipcDir: options.ipcDir,
+      }),
+      { timeoutMs: options.timeoutMs },
     );
+    return new HawcxAgent(client, allowlist, result);
   }
 
   /**
@@ -308,6 +309,7 @@ export class HawcxAgent {
       httpMethod: (opts.httpMethod ?? "POST").toUpperCase(),
       headers: opts.headers,
       tool: opts.tool ?? "",
+      mcpToolName: opts.mcpToolName,
       action: opts.action,
       resource: opts.resource,
       constraints: opts.constraints,
@@ -336,7 +338,9 @@ export class HawcxAgent {
    */
   async invokeFor(
     userPrincipalId: string,
-    opts: HawcxAgentInvokeOptions,
+    opts: Omit<HawcxAgentInvokeOptions, "actingForUser"> & {
+      actingForUser?: string | null;
+    },
   ): Promise<ToolCallResponse> {
     if (!userPrincipalId) {
       throw new Error(

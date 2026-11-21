@@ -6,6 +6,33 @@ versions track each language surface independently (Rust crate
 versions in `Cargo.toml`, Node version in `node/package.json`, Python
 version in `python/pyproject.toml`).
 
+## [0.1.18] - 2026-11-20 (Python surface) / [0.1.6] - 2026-11-20 (Node surface)
+
+Security hardening and SDK parity closeout (`HAAP-AUD-15` / Wave-0):
+
+- **FIX (Node SDK `0.1.6`):** Enforce kernel-attested peer-UID verification on
+  connected Unix domain sockets (`SO_PEERCRED` on Linux, `LOCAL_PEERCRED` on
+  macOS via the connected socket fd) and local Named Pipe server verification
+  on Windows (rejecting remote UNC pipes and verifying server PID + owner SID
+  against `HAAP_SDK_EXPECTED_PEER_SID` or the current user / LocalSystem /
+  LocalService) before exchanging any handshake bytes. Previously `expectedUid`
+  in `node/src/ipc.ts` was parsed and ignored because `verifyPeerAfterConnect`
+  did not exist.
+- **FIX (Node SDK `0.1.6`):** Undeprecate `TokenTransport.McpMeta` (`"mcp_meta"`),
+  alias deprecated `TokenTransport.McpMetaV725` to `"mcp_meta"` so calls are
+  accepted by shipped Rust `haap-assembler` builds (which reject
+  `"mcp_meta_v7_2_5"`), add `mcpToolName` -> `mcp_tool_name` wire forwarding,
+  and implement `HawcxAgent.enroll()` + `AuthenticatorClient` +
+  `EnrollmentRejected` (matching Python `auth_ipc.py` with peer-credential
+  enforcement on the Authenticator control socket).
+- **FIX (Python SDK `0.1.18`):** Add Darwin `LOCAL_PEERCRED`
+  (`SOL_LOCAL = 0`, `LOCAL_PEERCRED = 0x001`, `struct xucred`) kernel
+  peer-UID verification in `hawcx_haap.ipc._verify_peer_after_connect`
+  alongside Linux `SO_PEERCRED` and Windows `pipe_win` DACL checks, and apply
+  post-connect peer verification to `AuthenticatorClient.connect` as well.
+- **CLEANUP:** Remove stale `scripts/mint-helper` (pinned at `haap-core 0.8`)
+  and add `merge_group:` trigger to `.github/workflows/ci.yml`.
+
 ## [0.1.17] - 2026-10-22 (Python surface only)
 
 Also carries 0.1.15 and 0.1.16 below: neither was tagged, so neither was

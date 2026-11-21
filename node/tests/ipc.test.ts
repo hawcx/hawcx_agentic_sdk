@@ -16,7 +16,10 @@ import {
   RequestRejected,
   TokenTransport,
   encodeFrame,
+  validateWindowsNamedPipePath,
+  verifyWindowsNamedPipeServer,
 } from "../src";
+import { _setPeerVerifiersForTesting } from "../src/ipc";
 
 import { MockAssembler } from "./mockAssembler";
 
@@ -126,8 +129,265 @@ describe.skipIf(process.platform === "win32")("AssemblerClient (UDS)", () => {
     expect(mock.receivedRequest).not.toHaveProperty("plaintext_request_body");
     expect(mock.receivedRequest).not.toHaveProperty("transport");
     expect(mock.receivedRequest).not.toHaveProperty("claimed_intent_hash");
+    expect(mock.receivedRequest).not.toHaveProperty("mcp_tool_name");
+  });
+
+  it("serializes mcpToolName as mcp_tool_name distinct from tool", async () => {
+    const client = await AssemblerClient.connect(mock.socketPath);
+    try {
+      await client.invoke({
+        requestId: "req-mcp-1",
+        targetRsUrl: "https://mcp.example.com",
+        httpMethod: "POST",
+        tool: "docs.write",
+        mcpToolName: "write-doc",
+        transport: TokenTransport.McpMeta,
+      });
+    } finally {
+      client.close();
+    }
+    expect(mock.receivedRequest?.tool).toBe("docs.write");
+    expect(mock.receivedRequest?.mcp_tool_name).toBe("write-doc");
+    expect(mock.receivedRequest?.transport).toBe("mcp_meta");
+  });
+
+  it("TokenTransport.McpMetaV725 aliases to mcp_meta (never emits unsupported mcp_meta_v7_2_5)", async () => {
+    expect(TokenTransport.McpMeta).toBe("mcp_meta");
+    expect(TokenTransport.McpMetaV725).toBe("mcp_meta");
+    const client = await AssemblerClient.connect(mock.socketPath);
+    try {
+      await client.invoke({
+        requestId: "req-mcp-alias",
+        targetRsUrl: "https://mcp.example.com",
+        httpMethod: "POST",
+        tool: "search",
+        transport: TokenTransport.McpMetaV725,
+      });
+    } finally {
+      client.close();
+    }
+    expect(mock.receivedRequest?.transport).toBe("mcp_meta");
   });
 });
+
+describe.skipIf(process.platform === "win32")(
+  "Unix peer-UID verification (SO_PEERCRED / LOCAL_PEERCRED)",
+  () => {
+    let mock: MockAssembler;
+    const savedExpectedUid = process.env.HAAP_SDK_EXPECTED_PEER_UID;
+
+    beforeEach(async () => {
+      delete process.env.HAAP_SDK_EXPECTED_PEER_UID;
+      _setPeerVerifiersForTesting({ unix: null });
+      mock = new MockAssembler();
+      await mock.start();
+    });
+
+    afterEach(async () => {
+      _setPeerVerifiersForTesting({ unix: null });
+      if (savedExpectedUid === undefined) {
+        delete process.env.HAAP_SDK_EXPECTED_PEER_UID;
+      } else {
+        process.env.HAAP_SDK_EXPECTED_PEER_UID = savedExpectedUid;
+      }
+      await mock.close();
+    });
+
+    it("rejects mismatched HAAP_SDK_EXPECTED_PEER_UID via real kernel peercred before handshake", async () => {
+      const wrongUid = process.getuid!() + 1;
+      process.env.HAAP_SDK_EXPECTED_PEER_UID = String(wrongUid);
+      const expectedMechanism =
+        process.platform === "darwin" ? "LOCAL_PEERCRED" : "SO_PEERCRED";
+
+      await expect(AssemblerClient.connect(mock.socketPath)).rejects.toSatisfy(
+        (err: unknown) =>
+          err instanceof IpcError &&
+          err.message.includes(expectedMechanism) &&
+          err.message.includes(`expected ${wrongUid}`),
+      );
+      expect(mock.receivedRequest).toBeNull();
+    });
+
+    it("succeeds when explicit HAAP_SDK_EXPECTED_PEER_UID matches our UID", async () => {
+      process.env.HAAP_SDK_EXPECTED_PEER_UID = String(process.getuid!());
+      const client = await AssemblerClient.connect(mock.socketPath);
+      try {
+        const resp = await client.invoke({
+          requestId: "req-peer-ok",
+          targetRsUrl: "https://api.example.com/echo",
+          httpMethod: "POST",
+          tool: "echo",
+          body: Buffer.from("peer-ok"),
+        });
+        expect(resp.body.toString()).toBe("peer-ok");
+      } finally {
+        client.close();
+      }
+    });
+
+    it.each(["", "-1", "abc", "123abc", "4294967296"])(
+      "rejects malformed HAAP_SDK_EXPECTED_PEER_UID=%j before connect",
+      async (badUid) => {
+        process.env.HAAP_SDK_EXPECTED_PEER_UID = badUid;
+        await expect(AssemblerClient.connect(mock.socketPath)).rejects.toThrow(
+          /not a valid uid/,
+        );
+      },
+    );
+
+    it("fails closed if the peer-credential lookup throws", async () => {
+      _setPeerVerifiersForTesting({
+        unix: () => {
+          throw new IpcError("simulated SO_PEERCRED syscall failure");
+        },
+      });
+      await expect(AssemblerClient.connect(mock.socketPath)).rejects.toThrow(
+        /simulated SO_PEERCRED syscall failure/,
+      );
+    });
+  },
+);
+
+describe("Windows Named Pipe server verification", () => {
+  const savedExpectedSid = process.env.HAAP_SDK_EXPECTED_PEER_SID;
+
+  beforeEach(() => {
+    delete process.env.HAAP_SDK_EXPECTED_PEER_SID;
+    _setPeerVerifiersForTesting({ windows: null });
+  });
+
+  afterEach(() => {
+    _setPeerVerifiersForTesting({ windows: null });
+    if (savedExpectedSid === undefined) {
+      delete process.env.HAAP_SDK_EXPECTED_PEER_SID;
+    } else {
+      process.env.HAAP_SDK_EXPECTED_PEER_SID = savedExpectedSid;
+    }
+  });
+
+  it("rejects remote UNC pipes and traversal paths", () => {
+    expect(() =>
+      validateWindowsNamedPipePath("\\\\attacker\\pipe\\haap-agent-0"),
+    ).toThrow(IpcError);
+    expect(() =>
+      validateWindowsNamedPipePath("\\\\.\\pipe\\nested\\haap-agent-0"),
+    ).toThrow(IpcError);
+    expect(() => validateWindowsNamedPipePath("/tmp/haap.sock")).toThrow(
+      IpcError,
+    );
+  });
+
+  it("rejects malformed HAAP_SDK_EXPECTED_PEER_SID", () => {
+    process.env.HAAP_SDK_EXPECTED_PEER_SID = "not-a-sid";
+    expect(() =>
+      validateWindowsNamedPipePath("\\\\.\\pipe\\haap-a1-agent-assembler-0"),
+    ).toThrow(/not a valid Windows SID/);
+  });
+
+  it("rejects untrusted pipe owner SID (negative control)", () => {
+    const pipe = "\\\\.\\pipe\\haap-a1-agent-assembler-0";
+    _setPeerVerifiersForTesting({
+      windows: () => ({
+        serverPid: 4242,
+        ownerSid: "S-1-5-21-100-200-300-9999",
+        currentUserSid: "S-1-5-21-100-200-300-1001",
+      }),
+    });
+    expect(() => verifyWindowsNamedPipeServer(pipe, null)).toThrow(
+      /untrusted SID/,
+    );
+  });
+
+  it("rejects mismatched explicit HAAP_SDK_EXPECTED_PEER_SID", () => {
+    const pipe = "\\\\.\\pipe\\haap-a1-agent-assembler-0";
+    process.env.HAAP_SDK_EXPECTED_PEER_SID = "S-1-5-21-100-200-300-1001";
+    const expected = validateWindowsNamedPipePath(pipe);
+    _setPeerVerifiersForTesting({
+      windows: () => ({
+        serverPid: 4242,
+        ownerSid: "S-1-5-21-100-200-300-1002",
+        currentUserSid: "S-1-5-21-100-200-300-1001",
+      }),
+    });
+    expect(() => verifyWindowsNamedPipeServer(pipe, expected)).toThrow(
+      /expected S-1-5-21-100-200-300-1001/,
+    );
+  });
+
+  it("accepts current user SID, LocalSystem (S-1-5-18), LocalService (S-1-5-19), and matching explicit SID", () => {
+    const pipe = "\\\\.\\pipe\\haap-a1-agent-assembler-0";
+    for (const ownerSid of [
+      "S-1-5-21-100-200-300-1001",
+      "S-1-5-18",
+      "S-1-5-19",
+    ]) {
+      _setPeerVerifiersForTesting({
+        windows: () => ({
+          serverPid: 4242,
+          ownerSid,
+          currentUserSid: "S-1-5-21-100-200-300-1001",
+        }),
+      });
+      expect(() => verifyWindowsNamedPipeServer(pipe, null)).not.toThrow();
+    }
+
+    process.env.HAAP_SDK_EXPECTED_PEER_SID = "s-1-5-21-100-200-300-1001";
+    const expected = validateWindowsNamedPipePath(pipe);
+    _setPeerVerifiersForTesting({
+      windows: () => ({
+        serverPid: 4242,
+        ownerSid: "S-1-5-21-100-200-300-1001",
+        currentUserSid: "S-1-5-21-100-200-300-9999",
+      }),
+    });
+    expect(() => verifyWindowsNamedPipeServer(pipe, expected)).not.toThrow();
+  });
+
+  it("rejects invalid server PID 0", () => {
+    const pipe = "\\\\.\\pipe\\haap-a1-agent-assembler-0";
+    _setPeerVerifiersForTesting({
+      windows: () => ({
+        serverPid: 0,
+        ownerSid: "S-1-5-18",
+        currentUserSid: "S-1-5-18",
+      }),
+    });
+    expect(() => verifyWindowsNamedPipeServer(pipe, null)).toThrow(
+      /invalid server PID/,
+    );
+  });
+});
+
+describe.runIf(process.platform === "win32")(
+  "Windows Named Pipe live server verification",
+  () => {
+    const savedExpectedSid = process.env.HAAP_SDK_EXPECTED_PEER_SID;
+
+    afterEach(() => {
+      if (savedExpectedSid === undefined) {
+        delete process.env.HAAP_SDK_EXPECTED_PEER_SID;
+      } else {
+        process.env.HAAP_SDK_EXPECTED_PEER_SID = savedExpectedSid;
+      }
+    });
+
+    it("accepts our own local named pipe and rejects a mismatched expected SID", async () => {
+      const pipe = `\\\\.\\pipe\\hawcx-sdk-test-${process.pid}-${Date.now()}`;
+      const server = net.createServer((sock) => {
+        sock.on("error", () => sock.destroy());
+      });
+      await new Promise<void>((resolve) => server.listen(pipe, resolve));
+      try {
+        expect(() => verifyWindowsNamedPipeServer(pipe, null)).not.toThrow();
+        expect(() =>
+          verifyWindowsNamedPipeServer(pipe, "S-1-5-21-0-0-0-999999"),
+        ).toThrow(/expected S-1-5-21-0-0-0-999999/);
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    });
+  },
+);
 
 // Windows: same UDS portability gap as the (UDS) block above.
 // Linux: these tests bind sockets under their own per-test dir (created

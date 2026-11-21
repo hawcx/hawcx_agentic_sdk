@@ -11,14 +11,15 @@ no Rust source for any artifact shipped to customers. What lives here:
 - `docs/`, `README.md`, `CHANGELOG.md`, `AUDIT.md`, `CLAUDE.md`
 - `node/`, `python/` — pure-language SDK clients (no NAPI / pyo3 /
   WASM — design choice; do not change without spec review)
-- `scripts/` — **operator tooling only.** Small Rust helpers (their own
-  `Cargo.toml`, `target/` and `Cargo.lock` gitignored) are permitted
-  here when they enable wire-level testing against deployed images
-  (e.g., `scripts/mint-helper/` for the stage RSV wire test). These
-  binaries are NEVER bundled into any release artifact, NEVER published
-  to npm/PyPI/GHCR/`cargo.hawcx.com`, and NEVER referenced by any
-  workflow that ships to customers. If a helper needs broader reuse,
-  promote it to a sibling repo and publish to `cargo.hawcx.com`.
+- `scripts/` — **operator tooling only.** Small helpers are permitted
+  here when they enable packaging verification or wire-level testing
+  against deployed images. Any Rust helper pinned to stale pre-v7.20
+  crates (`scripts/mint-helper/` pinned to `haap-core 0.8`) has been
+  removed. Helpers here are NEVER bundled into any release artifact,
+  NEVER published to npm/PyPI/GHCR/`cargo.hawcx.com`, and NEVER
+  referenced by any workflow that ships to customers. If a helper needs
+  broader reuse, promote it to a sibling repo and publish to
+  `cargo.hawcx.com`.
 
 The binaries assembled into the SDK image, npm platform packages, and
 release tarballs are pulled from the private Kellnr registry at
