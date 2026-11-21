@@ -380,11 +380,13 @@ def test_darwin_local_peercred_bad_xucred_version_fails_closed(
     monkeypatch.delenv("HAAP_SDK_EXPECTED_PEER_UID", raising=False)
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.delattr(socket, "SO_PEERCRED", raising=False)
+    fake_uid = os.getuid() if hasattr(os, "getuid") else 1000
+    monkeypatch.setattr(os, "getuid", lambda: fake_uid, raising=False)
 
     fake_sock = MagicMock()
-    bad_xucred = struct.pack(ipc._XUCRED_FMT, 99, os.getuid(), 0, *([0] * 16))
+    bad_xucred = struct.pack(ipc._XUCRED_FMT, 99, fake_uid, 0, *([0] * 16))
     fake_sock.getsockopt.return_value = bad_xucred
-    fake_stat = MagicMock(st_uid=os.getuid())
+    fake_stat = MagicMock(st_uid=fake_uid)
 
     with pytest.raises(IpcError, match="unsupported xucred version 99"):
         ipc._verify_peer_after_connect(fake_sock, fake_stat, "/tmp/test.sock")
@@ -404,10 +406,12 @@ def test_darwin_local_peercred_getsockopt_error_fails_closed(
     monkeypatch.delenv("HAAP_SDK_EXPECTED_PEER_UID", raising=False)
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.delattr(socket, "SO_PEERCRED", raising=False)
+    fake_uid = os.getuid() if hasattr(os, "getuid") else 1000
+    monkeypatch.setattr(os, "getuid", lambda: fake_uid, raising=False)
 
     fake_sock = MagicMock()
     fake_sock.getsockopt.side_effect = OSError("EINVAL")
-    fake_stat = MagicMock(st_uid=os.getuid())
+    fake_stat = MagicMock(st_uid=fake_uid)
 
     with pytest.raises(IpcError, match="LOCAL_PEERCRED lookup"):
         ipc._verify_peer_after_connect(fake_sock, fake_stat, "/tmp/test.sock")

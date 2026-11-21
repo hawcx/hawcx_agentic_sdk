@@ -389,7 +389,11 @@ export type WindowsPipeServerQueryFn = (
 
 const LOCAL_WINDOWS_PIPE_RE = /^\\\\\.\\pipe\\[^\\/]+$/;
 const WINDOWS_SID_RE = /^S-\d+-\d+(?:-\d+)+$/i;
-const WINDOWS_TRUSTED_SYSTEM_SIDS = new Set(["S-1-5-18", "S-1-5-19"]);
+const WINDOWS_TRUSTED_SYSTEM_SIDS = new Set([
+  "S-1-5-18",     // NT AUTHORITY\SYSTEM
+  "S-1-5-19",     // NT AUTHORITY\LOCAL SERVICE
+  "S-1-5-32-544", // BUILTIN\Administrators (default object owner for elevated processes)
+]);
 
 const PYTHON_LINUX_PEERCRED_SCRIPT = [
   "import socket, struct",
