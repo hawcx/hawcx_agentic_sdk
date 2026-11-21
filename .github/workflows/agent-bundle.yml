@@ -72,7 +72,7 @@ on:
           Runner to build on. The digest is PER-PLATFORM: pip resolves wheels for
           the running interpreter and platform, so a macOS build is not a valid
           exec target on a Linux host. Linux is the default because that is where
-          agents run; set macos-14 deliberately, never incidentally.
+          agents run; set macos-15 deliberately, never incidentally.
         required: false
         type: string
         default: ubuntu-latest
