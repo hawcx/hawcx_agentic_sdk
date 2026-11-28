@@ -27,18 +27,197 @@ JSON schemas mirror the serde derives in
 from __future__ import annotations
 
 import base64
+import binascii
 import json
+import math
 import os
 import socket
 import stat
 import struct
 import sys
+import threading
+import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from hawcx_haap.errors import HandshakeError, IpcError, RequestRejected
+from hawcx_haap.errors import HandshakeError, HawcxError, IpcError, RequestRejected
+
+
+def _validate_ipc_timeout(timeout_secs: float | None, name: str = "timeout_secs") -> float | None:
+    if timeout_secs is None:
+        return None
+    if isinstance(timeout_secs, bool) or not (
+        type(timeout_secs) is int or type(timeout_secs) is float
+    ):
+        raise TypeError(f"{name} must be float or None; got {type(timeout_secs).__name__}")
+    val = float(timeout_secs)
+    if math.isnan(val) or math.isinf(val) or val < 0:
+        raise ValueError(f"{name} must be a finite non-negative number; got {timeout_secs!r}")
+    return val
+
+
+_FORBIDDEN_CONSTRAINT_AUTHORITY_KEYS: frozenset[str] = frozenset(
+    {"user_principal_id", "acting_for_user", "user_subject"}
+)
+
+
+def _normalize_wire_key(key: str) -> str:
+    nfkc = unicodedata.normalize("NFKC", key)
+    cleaned = "".join(
+        ch
+        for ch in nfkc
+        if not ch.isspace()
+        and ord(ch) > 0x20
+        and ord(ch) != 0x7F
+        and not unicodedata.category(ch).startswith("C")
+    )
+    return cleaned.casefold()
+
+
+def _scan_constraints_node(
+    node: Any,
+    *,
+    _depth: int = 0,
+    _seen: set[int] | None = None,
+    max_depth: int = 64,
+) -> None:
+    if _depth > max_depth:
+        raise ValueError(f"constraints exceed maximum nesting depth ({max_depth})")
+    if isinstance(node, dict):
+        seen = _seen if _seen is not None else set()
+        obj_id = id(node)
+        if obj_id in seen:
+            raise ValueError("cyclic container inside constraints")
+        seen.add(obj_id)
+        try:
+            for k, v in node.items():
+                if not isinstance(k, str):
+                    raise TypeError("constraints keys must be strings")
+                norm_k = _normalize_wire_key(k)
+                if norm_k == "provider":
+                    raise ValueError(
+                        "ToolCallRequest.provider must be passed as the top-level `provider` "
+                        "field, never nested inside `constraints` (FIX-017)"
+                    )
+                if norm_k in _FORBIDDEN_CONSTRAINT_AUTHORITY_KEYS:
+                    raise HawcxError(
+                        f"E_AUTHORITY_CLAIM (0x0058): authority field {k!r} is forbidden "
+                        "inside constraints"
+                    )
+                if norm_k == "ciba_approved" and v is not False:
+                    raise HawcxError(
+                        "E_AUTHORITY_CLAIM (0x0058): ciba_approved in constraints must not "
+                        "be set to a non-False value by the caller"
+                    )
+                _scan_constraints_node(v, _depth=_depth + 1, _seen=seen, max_depth=max_depth)
+        finally:
+            seen.discard(obj_id)
+    elif isinstance(node, (list, tuple, set, frozenset)):
+        seen = _seen if _seen is not None else set()
+        obj_id = id(node)
+        if obj_id in seen:
+            raise ValueError("cyclic container inside constraints")
+        seen.add(obj_id)
+        try:
+            for item in node:
+                _scan_constraints_node(item, _depth=_depth + 1, _seen=seen, max_depth=max_depth)
+        finally:
+            seen.discard(obj_id)
+
+
+def _validate_constraints(constraints: dict[str, Any] | None) -> dict[str, Any]:
+    if constraints is None:
+        return {}
+    if not isinstance(constraints, dict):
+        raise TypeError(
+            f"constraints must be dict[str, Any] or None; got {type(constraints).__name__}"
+        )
+    _scan_constraints_node(constraints)
+    if "max_requests" in constraints and constraints["max_requests"] is not None:
+        max_req = constraints["max_requests"]
+        if not (type(max_req) is int and not isinstance(max_req, bool)):
+            raise TypeError(
+                f"constraints['max_requests'] must be int; got {type(max_req).__name__}"
+            )
+        if not (0 <= max_req <= 0xFFFFFFFFFFFFFFFF):
+            raise ValueError(f"constraints['max_requests'] out of u64 range: {max_req}")
+    if "require_pop" in constraints and constraints["require_pop"] is not None:
+        req_pop = constraints["require_pop"]
+        if not isinstance(req_pop, bool):
+            raise TypeError(
+                f"constraints['require_pop'] must be bool; got {type(req_pop).__name__}"
+            )
+    return dict(constraints)
+
+
+def _validate_tool_arguments(tool_arguments: Any) -> dict[str, Any] | None:
+    if tool_arguments is None:
+        return None
+    if not isinstance(tool_arguments, dict):
+        raise TypeError(
+            f"tool_arguments must be dict[str, Any] or None; got {type(tool_arguments).__name__}"
+        )
+    if not all(isinstance(k, str) for k in tool_arguments):
+        raise TypeError("tool_arguments keys must be strings")
+    return dict(tool_arguments)
+
+
+def _validate_provider(provider: str | None) -> str | None:
+    if provider is None:
+        return None
+    if not isinstance(provider, str):
+        raise TypeError(f"provider must be str or None; got {type(provider).__name__}")
+    if (
+        not provider
+        or provider != provider.strip()
+        or any(
+            ord(c) < 0x20 or ord(c) == 0x7F or unicodedata.category(c).startswith("C")
+            for c in provider
+        )
+    ):
+        raise ValueError(
+            "provider must be a non-empty string without leading/trailing whitespace "
+            "or control characters"
+        )
+    return provider
+
+
+def _validate_headers_i2(headers: dict[str, str] | None) -> dict[str, str]:
+    if headers is None:
+        return {}
+    if not isinstance(headers, dict):
+        raise TypeError(f"headers must be dict[str, str] or None; got {type(headers).__name__}")
+    parent_record_count = 0
+    out: dict[str, str] = {}
+    for k, v in headers.items():
+        if not isinstance(k, str) or not isinstance(v, str):
+            raise TypeError("header names and values must be strings")
+        if (
+            any(ch in k or ch in v for ch in ("\r", "\n", "\x00"))
+            or not k.strip()
+            or k != k.strip()
+            or any(
+                ch.isspace()
+                or ch == ":"
+                or ord(ch) < 0x20
+                or ord(ch) == 0x7F
+                or unicodedata.category(ch).startswith("C")
+                for ch in k
+            )
+        ):
+            raise ValueError(
+                "header names and values must be valid HTTP header strings without CR, LF, or NUL"
+            )
+        if _normalize_wire_key(k) == "x-hawcx-parent-call-record":
+            parent_record_count += 1
+        out[k] = v
+    if parent_record_count > 1:
+        raise HawcxError(
+            "E_AUTHORITY_CLAIM (0x0058): duplicate X-Hawcx-Parent-Call-Record header is forbidden"
+        )
+    return out
 
 # Default deadline for the Assembler connect + handshake.
 #
@@ -190,15 +369,19 @@ class ToolCallRequest:
     provider: str | None = None
 
     def to_wire(self) -> dict[str, Any]:
+        validated_headers = _validate_headers_i2(self.headers)
+        validated_constraints = _validate_constraints(self.constraints)
+        validated_tool_args = _validate_tool_arguments(self.tool_arguments)
+        validated_provider = _validate_provider(self.provider)
         out: dict[str, Any] = {
             "request_id": self.request_id,
             "target_rs_url": self.target_rs_url,
             "http_method": self.http_method,
-            "headers": self.headers,
+            "headers": validated_headers,
             "tool": self.tool,
             "action": self.action,
             "resource": self.resource,
-            "constraints": self.constraints,
+            "constraints": validated_constraints,
         }
         if self.mcp_tool_name is not None:
             out["mcp_tool_name"] = self.mcp_tool_name
@@ -208,8 +391,8 @@ class ToolCallRequest:
             ).decode("ascii")
         if self.claimed_intent_hash is not None:
             out["claimed_intent_hash"] = self.claimed_intent_hash
-        if self.tool_arguments is not None:
-            out["tool_arguments"] = self.tool_arguments
+        if validated_tool_args is not None:
+            out["tool_arguments"] = validated_tool_args
         if self.content_type is not None:
             out["content_type"] = self.content_type
         if self.transport is not None:
@@ -219,10 +402,10 @@ class ToolCallRequest:
             # Assembler projects this into `scope_json.user_principal_id`
             # at token-mint time per CS v6.9.0 line 163.
             out["acting_for_user"] = self.acting_for_user
-        if self.provider is not None:
+        if validated_provider is not None:
             # ASS-4: OAuth provider id (e.g. "slack"). The Assembler uses it to
             # fetch the provider bearer and route the call to the RSV OAuth proxy.
-            out["provider"] = self.provider
+            out["provider"] = validated_provider
         return out
 
 
@@ -240,12 +423,44 @@ class ToolCallResponse:
 
     @classmethod
     def from_wire(cls, obj: dict[str, Any]) -> ToolCallResponse:
+        if not isinstance(obj, dict):
+            raise IpcError(
+                f"ToolCallResponse wire payload must be a JSON object; got {type(obj).__name__}"
+            )
+        if obj.get("reject_code") is not None or obj.get("error") is not None:
+            raise IpcError("contradictory ToolCallResponse carries reject_code or error")
+        request_id = obj.get("request_id")
+        if not isinstance(request_id, str) or not request_id:
+            raise IpcError("ToolCallResponse.request_id must be a non-empty string")
+        raw_status = obj.get("http_status")
+        if not (type(raw_status) is int and not isinstance(raw_status, bool)) or not (
+            0 <= raw_status <= 0xFFFF
+        ):
+            raise IpcError(
+                f"ToolCallResponse.http_status must be an int in 0..65535; got {raw_status!r}"
+            )
+        raw_headers = obj.get("headers")
+        if raw_headers is None:
+            headers: dict[str, str] = {}
+        elif isinstance(raw_headers, dict) and all(
+            isinstance(k, str) and isinstance(v, str) for k, v in raw_headers.items()
+        ):
+            headers = dict(raw_headers)
+        else:
+            raise IpcError(
+                "ToolCallResponse.headers must be a JSON object of string keys and values"
+            )
         body_b64 = obj.get("body", "")
-        body = base64.b64decode(body_b64) if body_b64 else b""
+        if not isinstance(body_b64, str):
+            raise IpcError("ToolCallResponse.body must be a base64 string")
+        try:
+            body = base64.b64decode(body_b64, validate=True) if body_b64 else b""
+        except (binascii.Error, ValueError) as e:
+            raise IpcError(f"ToolCallResponse.body is not valid base64: {e}") from e
         return cls(
-            request_id=obj["request_id"],
-            http_status=int(obj["http_status"]),
-            headers=dict(obj.get("headers") or {}),
+            request_id=request_id,
+            http_status=raw_status,
+            headers=headers,
             body=body,
         )
 
@@ -254,19 +469,31 @@ class ToolCallResponse:
 
 
 def encode_frame(msg_type: int, payload: bytes) -> bytes:
+    if not (type(msg_type) is int and not isinstance(msg_type, bool)) or not (
+        0 <= msg_type <= 0xFF
+    ):
+        raise IpcError(f"invalid IPC msg_type: {msg_type!r}")
     msg_len = 1 + len(payload)
     if msg_len > MAX_MESSAGE_SIZE:
         raise IpcError(
             f"frame too large: {msg_len} bytes (max {MAX_MESSAGE_SIZE})"
         )
-    return struct.pack(">I", msg_len) + bytes([msg_type & 0xFF]) + payload
+    return struct.pack(">I", msg_len) + bytes([msg_type]) + payload
 
 
-def _recv_exact(sock: socket.socket, n: int) -> bytes:
+class _PeerClosedError(IpcError):
+    """Raised when the IPC peer cleanly closed the stream before frame start."""
+
+
+def _recv_exact(
+    sock: socket.socket, n: int, *, clean_eof_ok: bool = False
+) -> bytes:
     buf = bytearray()
     while len(buf) < n:
         chunk = sock.recv(n - len(buf))
         if not chunk:
+            if clean_eof_ok and len(buf) == 0:
+                raise _PeerClosedError("IPC peer closed connection mid-message")
             raise IpcError("IPC peer closed connection mid-message")
         buf.extend(chunk)
     return bytes(buf)
@@ -274,7 +501,7 @@ def _recv_exact(sock: socket.socket, n: int) -> bytes:
 
 def read_frame(sock: socket.socket) -> tuple[int, bytes]:
     """Read one ``[len: u32 BE][type: u8][payload]`` frame."""
-    length_bytes = _recv_exact(sock, 4)
+    length_bytes = _recv_exact(sock, 4, clean_eof_ok=True)
     msg_len = struct.unpack(">I", length_bytes)[0]
     if msg_len == 0:
         raise IpcError("frame length 0 (illegal)")
@@ -296,13 +523,15 @@ def write_frame(sock: socket.socket, msg_type: int, payload: bytes) -> None:
 
 
 def _encode_handshake(role: int) -> bytes:
+    if not (type(role) is int and not isinstance(role, bool)) or not (0 <= role <= 0xFF):
+        raise IpcError(f"invalid handshake role: {role!r}")
     return struct.pack(
         ">HHHHB",
         PROTOCOL_VERSION,
         SDK_VERSION_MAJOR,
         SDK_VERSION_MINOR,
         SDK_VERSION_PATCH,
-        role & 0xFF,
+        role,
     )
 
 
@@ -325,7 +554,11 @@ def perform_handshake(sock: socket.socket, local_role: int = ROLE_AGENT) -> int:
         raise IpcError(
             f"expected handshake (0x00), got 0x{msg_type:02x}"
         )
-    _proto, major, _minor, _patch, role = _decode_handshake(payload)
+    proto, major, _minor, _patch, role = _decode_handshake(payload)
+    if proto != PROTOCOL_VERSION:
+        raise IpcError(
+            f"unsupported IPC protocol version {proto} (expected {PROTOCOL_VERSION})"
+        )
     if major != SDK_VERSION_MAJOR:
         raise HandshakeError(local_major=SDK_VERSION_MAJOR, remote_major=major)
     return role
@@ -618,10 +851,12 @@ def _connect_named_pipe(path: str, timeout_secs: float | None) -> _WindowsPipeSo
     # Lazy import — Windows-only path. Implemented in pipe_win.py.
     from hawcx_haap import pipe_win  # noqa: WPS433
 
-    return pipe_win.connect(path, timeout_secs=timeout_secs)
+    return pipe_win.connect(path, timeout_secs=timeout_secs)  # type: ignore[return-value]
 
 
-def connect_assembler(endpoint: str, *, timeout_secs: float | None = _DEFAULT_IPC_TIMEOUT) -> socket.socket:
+def connect_assembler(
+    endpoint: str, *, timeout_secs: float | None = _DEFAULT_IPC_TIMEOUT
+) -> socket.socket:
     """Open a transport to the Assembler endpoint.
 
     On Unix, ``endpoint`` is a filesystem path to a UDS. On Windows, it is a
@@ -629,9 +864,10 @@ def connect_assembler(endpoint: str, *, timeout_secs: float | None = _DEFAULT_IP
     Returns a ``socket.socket``-compatible object (real ``socket`` on Unix; a
     file-handle-backed wrapper on Windows).
     """
+    validated_timeout = _validate_ipc_timeout(timeout_secs, "timeout_secs")
     if sys.platform == "win32":
-        return _connect_named_pipe(endpoint, timeout_secs)  # type: ignore[return-value]
-    return _connect_unix(endpoint, timeout_secs)
+        return _connect_named_pipe(endpoint, validated_timeout)  # type: ignore[return-value]
+    return _connect_unix(endpoint, validated_timeout)
 
 
 # ── AssemblerClient ─────────────────────────────────────────────────
@@ -649,9 +885,14 @@ class AssemblerClient:
         sock: socket.socket,
         experimental_capabilities: tuple[str, ...] = (),
     ) -> None:
+        self._lock = threading.RLock()
         self._sock = sock
-        # Set when a timed-out call closed `_sock`; the next `invoke` re-dials.
+        self._closed = False
+        # Set when a timed-out or corrupted call retired `_sock`; the next `invoke` re-dials.
         self._needs_redial = False
+        self._endpoint: str | None = None
+        self._timeout_secs: float | None = _DEFAULT_IPC_TIMEOUT
+        self._tool_call_timeout_secs: float | None = _DEFAULT_TOOL_CALL_TIMEOUT
         # Experimental MCP capabilities the SDK advertises on this
         # connection. The Assembler echoes these into the
         # ``experimental`` field of its outbound MCP ``initialize``
@@ -680,7 +921,11 @@ class AssemblerClient:
         enable v7.2.5 payload carriage end-to-end. Empty tuple
         (default) means legacy v6.7.4 carriage only.
         """
-        sock = connect_assembler(endpoint, timeout_secs=timeout_secs)
+        validated_timeout = _validate_ipc_timeout(timeout_secs, "timeout_secs")
+        validated_call_timeout = _validate_ipc_timeout(
+            tool_call_timeout_secs, "tool_call_timeout_secs"
+        )
+        sock = connect_assembler(endpoint, timeout_secs=validated_timeout)
         try:
             peer_role = perform_handshake(sock, local_role=ROLE_AGENT)
         except HandshakeError:
@@ -713,7 +958,7 @@ class AssemblerClient:
             raise IpcError(
                 f"expected peer role Assembler (0x05), got 0x{peer_role:02x}"
             )
-        sock.settimeout(tool_call_timeout_secs)
+        sock.settimeout(validated_call_timeout)
         client = cls(sock, experimental_capabilities=experimental_capabilities)
         # Remember how we got here so `invoke` can re-dial. The Assembler
         # serves ONE request per accepted connection (its accept loop calls
@@ -721,9 +966,18 @@ class AssemblerClient:
         # dropping the stream), while this client holds `self._sock` for the
         # life of the object. Without the endpoint we cannot recover.
         client._endpoint = endpoint
-        client._timeout_secs = timeout_secs
-        client._tool_call_timeout_secs = tool_call_timeout_secs
+        client._timeout_secs = validated_timeout
+        client._tool_call_timeout_secs = validated_call_timeout
         return client
+
+    def _retire_socket_for_redial(self) -> None:
+        with self._lock:
+            if not self._closed:
+                self._needs_redial = True
+            try:
+                self._sock.close()
+            except Exception:
+                pass
 
     def _reconnect(self) -> None:
         """Re-dial the Assembler and redo the handshake.
@@ -734,25 +988,30 @@ class AssemblerClient:
         and raises BrokenPipeError. That looked like a transport fault for a
         long time; it is a protocol mismatch between the two sides.
         """
-        if not getattr(self, "_endpoint", None):
-            raise IpcError(
-                "assembler connection is closed and this client has no endpoint "
-                "to re-dial (it was constructed from a bare socket)"
+        with self._lock:
+            if self._closed:
+                raise IpcError("assembler client already closed")
+            endpoint = self._endpoint
+            # Mark `_needs_redial = True` BEFORE closing `_sock` so any
+            # transient failure in `connect(...)` leaves the client in
+            # `NeedsRedial` rather than permanently wedging subsequent calls
+            # with raw `OSError(EBADF)`.
+            self._retire_socket_for_redial()
+            if not endpoint:
+                raise IpcError(
+                    "assembler connection is closed and this client has no endpoint "
+                    "to re-dial (it was constructed from a bare socket)"
+                )
+            fresh = type(self).connect(
+                endpoint,
+                timeout_secs=getattr(self, "_timeout_secs", _DEFAULT_IPC_TIMEOUT),
+                experimental_capabilities=self._experimental_capabilities,
+                tool_call_timeout_secs=getattr(
+                    self, "_tool_call_timeout_secs", _DEFAULT_TOOL_CALL_TIMEOUT
+                ),
             )
-        try:
-            self._sock.close()
-        except Exception:
-            pass
-        fresh = type(self).connect(
-            self._endpoint,
-            timeout_secs=getattr(self, "_timeout_secs", _DEFAULT_IPC_TIMEOUT),
-            experimental_capabilities=self._experimental_capabilities,
-            tool_call_timeout_secs=getattr(
-                self, "_tool_call_timeout_secs", _DEFAULT_TOOL_CALL_TIMEOUT
-            ),
-        )
-        self._sock = fresh._sock
-        self._needs_redial = False
+            self._sock = fresh._sock
+            self._needs_redial = False
 
     def invoke(self, req: ToolCallRequest) -> ToolCallResponse:
         """Send a ToolCallRequest; await ToolCallResponse or RequestRejected.
@@ -769,28 +1028,52 @@ class AssemblerClient:
         Raises :class:`TimeoutError` if no reply arrives within
         ``tool_call_timeout_secs``; that call is abandoned, not retried.
         """
-        if self._needs_redial:
-            self._reconnect()
-        try:
-            return self._invoke_once(req)
-        except (BrokenPipeError, ConnectionResetError, EOFError):
-            # The WRITE hit the closed socket.
-            self._reconnect()
-            return self._invoke_once(req)
-        except IpcError as e:
-            # The write landed in the socket buffer and the READ found the
-            # peer gone: `read_frame` reports that as IpcError("IPC peer
-            # closed connection mid-message"), not an OSError. Only that
-            # shape is retried — a genuine framing violation (bad length,
-            # unknown opcode, short handshake) is a protocol error and
-            # must surface, not be papered over by a second attempt.
-            if "closed connection" not in str(e):
+        with self._lock:
+            if self._closed:
+                raise IpcError("assembler client already closed")
+            # Validate wire request before dialing or writing any IPC bytes.
+            wire = req.to_wire()
+            if self._needs_redial:
+                self._reconnect()
+            try:
+                return self._invoke_once(req, _prevalidated_wire=wire)
+            except (BrokenPipeError, ConnectionResetError, EOFError):
+                # The WRITE hit the closed socket.
+                self._reconnect()
+                try:
+                    return self._invoke_once(req, _prevalidated_wire=dict(wire))
+                except TimeoutError:
+                    raise
+                except OSError as e:
+                    raise IpcError(
+                        f"Assembler IPC transport error: {type(e).__name__}: {e}"
+                    ) from e
+            except _PeerClosedError:
+                # The write landed in the socket buffer and the READ found the
+                # peer cleanly gone before any frame header byte was sent.
+                self._reconnect()
+                try:
+                    return self._invoke_once(req, _prevalidated_wire=dict(wire))
+                except TimeoutError:
+                    raise
+                except OSError as e:
+                    raise IpcError(
+                        f"Assembler IPC transport error: {type(e).__name__}: {e}"
+                    ) from e
+            except TimeoutError:
                 raise
-            self._reconnect()
-            return self._invoke_once(req)
+            except OSError as e:
+                raise IpcError(
+                    f"Assembler IPC transport error: {type(e).__name__}: {e}"
+                ) from e
 
-    def _invoke_once(self, req: ToolCallRequest) -> ToolCallResponse:
-        wire = req.to_wire()
+    def _invoke_once(
+        self,
+        req: ToolCallRequest,
+        *,
+        _prevalidated_wire: dict[str, Any] | None = None,
+    ) -> ToolCallResponse:
+        wire = dict(_prevalidated_wire) if _prevalidated_wire is not None else req.to_wire()
         # Forward the connection-level experimental capability list on
         # every call so the Assembler can re-key its MCP initialize
         # when a new upstream server is contacted. Wire key matches
@@ -800,26 +1083,67 @@ class AssemblerClient:
                 self._experimental_capabilities
             )
         payload = json.dumps(wire, separators=(",", ":")).encode("utf-8")
+        frame_bytes = encode_frame(MSG_TOOL_CALL_REQUEST, payload)
         try:
-            write_frame(self._sock, MSG_TOOL_CALL_REQUEST, payload)
+            self._sock.sendall(frame_bytes)
             msg_type, body = read_frame(self._sock)
         except TimeoutError:
             # The Assembler may still answer this call on this socket. Read by
             # the next invoke(), that late reply would be returned as the answer
             # to a different request, so the socket goes and the next call
             # re-dials.
-            self.close()
-            self._needs_redial = True
+            self._retire_socket_for_redial()
             raise
-        if msg_type == MSG_TOOL_CALL_RESPONSE:
-            obj = json.loads(body.decode("utf-8"))
-            return ToolCallResponse.from_wire(obj)
-        if msg_type == MSG_REQUEST_REJECTED:
-            obj = json.loads(body.decode("utf-8"))
+        except (OSError, IpcError):
+            self._retire_socket_for_redial()
+            raise
+        if msg_type in (MSG_TOOL_CALL_RESPONSE, MSG_REQUEST_REJECTED):
+            try:
+                obj = json.loads(body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as e:
+                self._retire_socket_for_redial()
+                raise IpcError(
+                    f"malformed JSON in Assembler response 0x{msg_type:02x}: {e}"
+                ) from e
+            if not isinstance(obj, dict):
+                self._retire_socket_for_redial()
+                raise IpcError(
+                    f"Assembler response 0x{msg_type:02x} must be a JSON object; "
+                    f"got {type(obj).__name__}"
+                )
+            if msg_type == MSG_TOOL_CALL_RESPONSE:
+                try:
+                    resp = ToolCallResponse.from_wire(obj)
+                except IpcError:
+                    self._retire_socket_for_redial()
+                    raise
+                if resp.request_id != req.request_id:
+                    self._retire_socket_for_redial()
+                    raise IpcError(
+                        f"Assembler response request_id mismatch: expected "
+                        f"{req.request_id!r}, got {resp.request_id!r}"
+                    )
+                return resp
+            raw_rej_req_id = obj.get("request_id")
+            rej_reason = obj.get("reason", "")
+            if raw_rej_req_id is not None and not isinstance(raw_rej_req_id, str):
+                self._retire_socket_for_redial()
+                raise IpcError("RequestRejected fields request_id and reason must be strings")
+            if not isinstance(rej_reason, str):
+                self._retire_socket_for_redial()
+                raise IpcError("RequestRejected fields request_id and reason must be strings")
+            if raw_rej_req_id and raw_rej_req_id != req.request_id:
+                self._retire_socket_for_redial()
+                raise IpcError(
+                    f"Assembler RequestRejected request_id mismatch: expected "
+                    f"{req.request_id!r}, got {raw_rej_req_id!r}"
+                )
+            rej_req_id = raw_rej_req_id if raw_rej_req_id else req.request_id
             raise RequestRejected(
-                request_id=obj.get("request_id", req.request_id),
-                reason=obj.get("reason", ""),
+                request_id=rej_req_id,
+                reason=rej_reason,
             )
+        self._retire_socket_for_redial()
         raise IpcError(
             f"unexpected response msg_type 0x{msg_type:02x}; "
             "expected 0x53 (ToolCallResponse) or 0x54 (RequestRejected)"
@@ -838,22 +1162,72 @@ class AssemblerClient:
         Per CS v6.7.4 §39.7 the answer is forwarded by the Assembler to the
         TQS as the second hop (0x5E).
         """
+        with self._lock:
+            if self._closed:
+                raise IpcError("assembler client already closed")
+        if not isinstance(pending_id, str):
+            raise TypeError(f"pending_id must be str; got {type(pending_id).__name__}")
+        if not pending_id.strip():
+            raise ValueError("pending_id must be a non-empty string")
+        if not (type(session_id) is int and not isinstance(session_id, bool)):
+            raise TypeError(f"session_id must be int; got {type(session_id).__name__}")
+        if not (0 <= session_id <= 0xFFFFFFFFFFFFFFFF):
+            raise ValueError(f"session_id out of u64 range: {session_id}")
         obj: dict[str, Any] = {
             "pending_id": pending_id,
-            "session_id": int(session_id),
+            "session_id": session_id,
         }
         if answer_index is not None:
-            obj["answer_index"] = int(answer_index)
+            if not (type(answer_index) is int and not isinstance(answer_index, bool)):
+                raise TypeError(
+                    f"answer_index must be int or None; got {type(answer_index).__name__}"
+                )
+            if not (0 <= answer_index <= 0xFF):
+                raise ValueError(f"answer_index out of u8 range: {answer_index}")
+            obj["answer_index"] = answer_index
         if answer_text is not None:
+            if not isinstance(answer_text, str):
+                raise TypeError(
+                    f"answer_text must be str or None; got {type(answer_text).__name__}"
+                )
             obj["answer_text"] = answer_text
         payload = json.dumps(obj, separators=(",", ":")).encode("utf-8")
-        write_frame(self._sock, MSG_CLARIFICATION_ANSWER, payload)
+        frame_bytes = encode_frame(MSG_CLARIFICATION_ANSWER, payload)
+        with self._lock:
+            if self._closed:
+                raise IpcError("assembler client already closed")
+            if self._needs_redial:
+                self._reconnect()
+            try:
+                self._sock.sendall(frame_bytes)
+            except (BrokenPipeError, ConnectionResetError, EOFError) as e:
+                self._retire_socket_for_redial()
+                if not self._endpoint:
+                    raise IpcError(
+                        f"Assembler IPC transport error: {type(e).__name__}: {e}"
+                    ) from e
+                self._reconnect()
+                try:
+                    self._sock.sendall(frame_bytes)
+                except OSError as retry_err:
+                    self._retire_socket_for_redial()
+                    raise IpcError(
+                        f"Assembler IPC transport error: {type(retry_err).__name__}: {retry_err}"
+                    ) from retry_err
+            except OSError as e:
+                self._retire_socket_for_redial()
+                raise IpcError(
+                    f"Assembler IPC transport error: {type(e).__name__}: {e}"
+                ) from e
 
     def close(self) -> None:
-        try:
-            self._sock.close()
-        except Exception:
-            pass
+        with self._lock:
+            self._closed = True
+            self._needs_redial = False
+            try:
+                self._sock.close()
+            except Exception:
+                pass
 
     def __enter__(self) -> AssemblerClient:
         return self

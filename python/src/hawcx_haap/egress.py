@@ -53,6 +53,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import io
+import math
 import os
 import socket
 import ssl
@@ -65,6 +66,8 @@ from hawcx_haap.errors import (
     EgressBrokerBusy,
     EgressBrokerRequesterRefused,
     EgressConfigError,
+    EgressConfigTypeError,
+    EgressConfigValueError,
     EgressError,
     EgressHostUnreachable,
     EgressHTTPStatusError,
@@ -94,6 +97,34 @@ __all__ = [
 # SO_PEERCRED on the UDS (ADR-0048 D48-3), so there is no in-band credential.
 _GREETING = b"\x05\x01\x00"
 _DEFAULT_TIMEOUT = 30.0
+
+
+def _validate_egress_timeout(timeout: Any, name: str = "timeout") -> float | None:
+    """Validate a numeric or ``None`` timeout fail-closed (I3 / V-17e)."""
+    if timeout is None:
+        return None
+    if isinstance(timeout, bool) or not (type(timeout) is int or type(timeout) is float):
+        raise EgressConfigTypeError(
+            f"{name} must be float, int, or None; got {type(timeout).__name__}"
+        )
+    val = float(timeout)
+    if math.isnan(val) or math.isinf(val) or val < 0:
+        raise EgressConfigValueError(
+            f"{name} must be a finite non-negative number; got {timeout!r}"
+        )
+    return val
+
+
+def _validate_httpx_client_timeout(raw_timeout: Any, httpx_mod: Any) -> None:
+    """Validate ``timeout=`` passed to :func:`client` / :func:`async_client`."""
+    if raw_timeout is None:
+        return
+    timeout_cls = getattr(httpx_mod, "Timeout", None)
+    if isinstance(timeout_cls, type) and isinstance(raw_timeout, timeout_cls):
+        for phase in ("connect", "read", "write", "pool"):
+            _validate_egress_timeout(getattr(raw_timeout, phase, None), f"timeout.{phase}")
+        return
+    _validate_egress_timeout(raw_timeout, "timeout")
 
 
 # ── socket resolution ───────────────────────────────────────────────────────
@@ -232,7 +263,7 @@ def _encode_host(host: str) -> bytes:
 def _connect_request(host: str, port: int) -> bytes:
     """Build the SOCKS5 CONNECT request. ATYP is ALWAYS 0x03 (DOMAINNAME) —
     the shim never sends 0x01/0x04 literal-IP requests (ADR-0048)."""
-    if not isinstance(port, int) or not 0 <= port <= 0xFFFF:
+    if not (type(port) is int and not isinstance(port, bool)) or not 0 <= port <= 0xFFFF:
         raise EgressProtocolError(f"egress port {port!r} out of range 0..65535")
     raw = _encode_host(host)
     return b"\x05\x01\x00\x03" + bytes([len(raw)]) + raw + port.to_bytes(2, "big")
@@ -303,8 +334,8 @@ def _closed_mid_handshake(*, peer_cred: bool, got_bytes: bool) -> EgressError:
 def _sendall_sync(sock: socket.socket, data: bytes, *, peer_cred: bool) -> None:
     try:
         sock.sendall(data)
-    # socket.timeout IS an OSError subclass, so it must be caught first.
-    except socket.timeout as exc:  # noqa: UP041 - socket.timeout is what sendall raises
+    # socket.timeout / BlockingIOError ARE OSError subclasses, so catch them first.
+    except (socket.timeout, BlockingIOError) as exc:  # noqa: UP041 - socket.timeout is what sendall raises
         raise EgressProtocolError("timed out writing the broker handshake") from exc
     except OSError as exc:
         raise _closed_mid_handshake(peer_cred=peer_cred, got_bytes=False) from exc
@@ -315,9 +346,9 @@ def _recv_exact_sync(sock: socket.socket, n: int, *, peer_cred: bool) -> bytes:
     while len(buf) < n:
         try:
             chunk = sock.recv(n - len(buf))
-        except socket.timeout as exc:  # noqa: UP041 - socket.timeout is what recv raises
+        except (socket.timeout, BlockingIOError) as exc:  # noqa: UP041 - socket.timeout is what recv raises
             raise EgressProtocolError("timed out awaiting broker handshake reply") from exc
-        except ConnectionResetError as exc:
+        except OSError as exc:
             raise _closed_mid_handshake(peer_cred=peer_cred, got_bytes=bool(buf)) from exc
         if not chunk:
             raise _closed_mid_handshake(peer_cred=peer_cred, got_bytes=bool(buf))
@@ -328,12 +359,13 @@ def _recv_exact_sync(sock: socket.socket, n: int, *, peer_cred: bool) -> bytes:
 def _socks5_connect_sync(
     socket_path: str, host: str, port: int, timeout: float | None
 ) -> socket.socket:
+    validated_timeout = _validate_egress_timeout(timeout)
     if not hasattr(socket, "AF_UNIX"):
         raise EgressConfigError("egress broker requires AF_UNIX sockets (Unix only)")
     request = _connect_request(host, port)  # validate before touching the network
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        sock.settimeout(timeout)
+        sock.settimeout(validated_timeout)
         try:
             sock.connect(socket_path)
         except OSError as exc:
@@ -390,12 +422,13 @@ async def _send_all_async(stream: Any, data: bytes, *, peer_cred: bool) -> None:
 async def _socks5_connect_async(
     socket_path: str, host: str, port: int, timeout: float | None
 ) -> Any:
+    validated_timeout = _validate_egress_timeout(timeout)
     import anyio
 
     request = _connect_request(host, port)  # validate before touching the network
     stream = None
     try:
-        with anyio.fail_after(timeout):
+        with anyio.fail_after(validated_timeout):
             try:
                 stream = await anyio.connect_unix(socket_path)
             except OSError as exc:
@@ -547,7 +580,7 @@ def _mux_request(host: str, port: int) -> bytes:
     bootloader parent, not this (the real) Python process; the vended handle
     would be meaningless here. There is deliberately no fallback to ``0x01``:
     see the module docstring and ``_parse_mux_reply``."""
-    if not isinstance(port, int) or isinstance(port, bool) or not 0 <= port <= 0xFFFF:
+    if not (type(port) is int and not isinstance(port, bool)) or not 0 <= port <= 0xFFFF:
         raise EgressProtocolError(f"egress port {port!r} out of range 0..65535")
     raw = _encode_host(host)
     pid = os.getpid().to_bytes(4, "big")
@@ -834,6 +867,7 @@ class _ControlChannel:
 
     def request(self, host: str, port: int, timeout: float | None) -> int:
         """Ask the broker for a channel to host:port; return the vended handle."""
+        validated_timeout = _validate_egress_timeout(timeout)
         req = _mux_request(host, port)  # validate before touching the channel
         with self._lock:
             if self._broken is not None:
@@ -844,7 +878,7 @@ class _ControlChannel:
             if self._raw is None:
                 self._raw = _PipeStream(_win_adopt(self.handle))
             try:
-                self._raw.settimeout(timeout)
+                self._raw.settimeout(validated_timeout)
                 self._raw.sendall(req)
                 reply = bytearray()
                 while len(reply) < _MUX_REPLY_LEN:
@@ -893,14 +927,15 @@ class _PlacedBroker:
         return f"<placed egress broker handle={self._control.handle}>"
 
     def connect(self, host: str, port: int, timeout: float | None) -> _PipeStream:
-        vended = self._control.request(host, port, timeout)
+        validated_timeout = _validate_egress_timeout(timeout)
+        vended = self._control.request(host, port, validated_timeout)
         try:
             raw = _win_adopt(vended)
         except EgressConfigError as exc:
             self._control._retire("vended handle is not a pipe")
             raise EgressProtocolError(str(exc)) from exc
         stream = _PipeStream(raw)
-        stream.settimeout(timeout)
+        stream.settimeout(validated_timeout)
         return stream
 
 
@@ -912,8 +947,8 @@ def resolve_broker_handle(handle: int | str | None = None) -> int:
     :func:`_parse_broker_handle`)."""
     if handle is None:
         return _parse_broker_handle(os.environ.get(_ENV_BROKER_HANDLE))
-    if isinstance(handle, bool) or not isinstance(handle, (int, str)):
-        raise EgressConfigError(f"egress broker handle must be an int or str, not {handle!r}")
+    if isinstance(handle, bool) or not (type(handle) is int or type(handle) is str):
+        raise EgressConfigTypeError(f"egress broker handle must be an int or str, not {handle!r}")
     return _parse_broker_handle(str(handle))
 
 
@@ -1268,7 +1303,7 @@ class _StdlibClient:
     ) -> None:
         self._socket_path = socket_path
         self._verify = verify
-        self._timeout = timeout
+        self._timeout = _validate_egress_timeout(timeout)
         self._headers = dict(headers or {})
 
     # Context-manager parity with httpx.Client, so `with egress.client() as c:`
@@ -1334,7 +1369,9 @@ class _StdlibClient:
             body = content
         send_headers.update(headers or {})
 
-        effective_timeout = self._timeout if timeout is None else timeout
+        effective_timeout = (
+            self._timeout if timeout is None else _validate_egress_timeout(timeout)
+        )
         sock = _broker_connect_sync(self._socket_path, host, port, effective_timeout)
         try:
             if parts.scheme == "https":
@@ -1388,6 +1425,8 @@ def client(
     The returned object is what ``anthropic.Anthropic(http_client=...)`` expects
     whenever ``httpx2`` is the resolved flavor.
     """
+    if not isinstance(http2, bool):
+        raise EgressConfigTypeError(f"http2 must be bool; got {type(http2).__name__}")
     flavor_name = _select_flavor(flavor)
     path = _resolve_broker(socket_path)
     if flavor_name == _STDLIB_FLAVOR:
@@ -1399,11 +1438,13 @@ def client(
                 "client speaks HTTP/1.1 only"
             )
         client_kwargs.setdefault("timeout", _DEFAULT_TIMEOUT)
+        _validate_egress_timeout(client_kwargs["timeout"])
         return _StdlibClient(path, verify=verify, **client_kwargs)
     httpx = importlib.import_module(flavor_name)
+    client_kwargs.setdefault("timeout", _DEFAULT_TIMEOUT)
+    _validate_httpx_client_timeout(client_kwargs["timeout"], httpx)
     sync_cls, _ = _build_transports(flavor_name)
     transport = sync_cls(path, verify=_effective_verify(verify), http2=http2)
-    client_kwargs.setdefault("timeout", _DEFAULT_TIMEOUT)
     return httpx.Client(transport=transport, **client_kwargs)
 
 
@@ -1416,6 +1457,8 @@ def async_client(
     **client_kwargs: Any,
 ) -> Any:
     """Async counterpart of :func:`client`."""
+    if not isinstance(http2, bool):
+        raise EgressConfigTypeError(f"http2 must be bool; got {type(http2).__name__}")
     flavor_name = _select_flavor(flavor)
     if flavor_name == _STDLIB_FLAVOR:
         # No stdlib async counterpart: asyncio has no HTTP client, and writing
@@ -1427,10 +1470,11 @@ def async_client(
             "falls back to a stdlib HTTP/1.1 implementation"
         )
     httpx = importlib.import_module(flavor_name)
+    client_kwargs.setdefault("timeout", _DEFAULT_TIMEOUT)
+    _validate_httpx_client_timeout(client_kwargs["timeout"], httpx)
     _, async_cls = _build_transports(flavor_name)
     path = _resolve_broker(socket_path)
     transport = async_cls(path, verify=_effective_verify(verify), http2=http2)
-    client_kwargs.setdefault("timeout", _DEFAULT_TIMEOUT)
     return httpx.AsyncClient(transport=transport, **client_kwargs)
 
 
@@ -1458,7 +1502,12 @@ def _brokered_pool_classes(socket_path: str) -> tuple[type, type]:
     try:
         import urllib3.connection
         import urllib3.connectionpool
-        from urllib3.util.timeout import _DEFAULT_TIMEOUT as _URLLIB3_DEFAULT_TIMEOUT
+        from urllib3.util.timeout import (
+            _DEFAULT_TIMEOUT as _URLLIB3_DEFAULT_TIMEOUT,
+        )
+        from urllib3.util.timeout import (
+            Timeout as _Urllib3Timeout,
+        )
     except (ModuleNotFoundError, ImportError) as exc:  # fail loud, never silently direct
         raise EgressConfigError(
             f"egress transport could not load the urllib3 connection seam: {exc}. "
@@ -1475,7 +1524,14 @@ def _brokered_pool_classes(socket_path: str) -> tuple[type, type]:
         # the proven downstream implementation does, and the failure it guards
         # against is a TypeError at connect time on every request.
         # ponytail: defensive, measured-unreachable on urllib3 2.x.
-        timeout = None if self.timeout is _URLLIB3_DEFAULT_TIMEOUT else self.timeout
+        raw_timeout = (
+            self.timeout.connect_timeout
+            if isinstance(self.timeout, _Urllib3Timeout)
+            else self.timeout
+        )
+        timeout = _validate_egress_timeout(
+            None if raw_timeout is _URLLIB3_DEFAULT_TIMEOUT else raw_timeout
+        )
         # self.host, never self._dns_host: the broker must receive the name the
         # caller asked for. The allowlist is by hostname, so resolving locally
         # and dialling the result would be a security regression, not a style

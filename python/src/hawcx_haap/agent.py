@@ -15,12 +15,13 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
+import unicodedata
 import uuid
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from hawcx_haap.errors import HawcxError
+from hawcx_haap.errors import HawcxError, InvalidIdentifierError
 from hawcx_haap.ipc import (
     # `connect`/`connect_by_agent_id` used to hardcode their own `5.0`
     # default here, independent of ipc.py's `_DEFAULT_IPC_TIMEOUT` (30s,
@@ -34,6 +35,11 @@ from hawcx_haap.ipc import (
     TokenTransport,
     ToolCallRequest,
     ToolCallResponse,
+    _validate_constraints,
+    _validate_headers_i2,
+    _validate_ipc_timeout,
+    _validate_provider,
+    _validate_tool_arguments,
 )
 
 
@@ -82,10 +88,12 @@ def default_endpoint_for(
     - Unix:    ``{ipc_dir}/{agent_id}/agent-assembler-{index}.sock``
     - Windows: ``\\\\.\\pipe\\haap-{agent_id}-agent-assembler-{index}``
     """
+    clean_agent_id = _validate_safe_segment(agent_id, "agent_id")
+    _validate_non_bool_index(index)
     if sys.platform == "win32":
-        return rf"\\.\pipe\haap-{agent_id}-agent-assembler-{index}"
+        return rf"\\.\pipe\haap-{clean_agent_id}-agent-assembler-{index}"
     base = ipc_dir or _default_ipc_dir()
-    return str(base / agent_id / f"agent-assembler-{index}.sock")
+    return str(base / clean_agent_id / f"agent-assembler-{index}.sock")
 
 
 class HawcxAgent:
@@ -133,7 +141,8 @@ class HawcxAgent:
         to forbid runtime principal switching entirely.
         """
         allowlist = _validate_principal_allowlist(principal_allowlist)
-        client = AssemblerClient.connect(endpoint, timeout_secs=timeout_secs)
+        validated_timeout = _validate_ipc_timeout(timeout_secs, "timeout_secs")
+        client = AssemblerClient.connect(endpoint, timeout_secs=validated_timeout)
         return cls(client, allowlist)
 
     @classmethod
@@ -240,26 +249,34 @@ class HawcxAgent:
         )
 
         allowlist = _validate_principal_allowlist(principal_allowlist)
-        if not name:
-            raise HawcxError("HawcxAgent.enroll requires a non-empty `name`")
-        if not org_token:
+        _validate_non_bool_index(index)
+        validated_connect_timeout = _validate_ipc_timeout(
+            connect_timeout_secs, "connect_timeout_secs"
+        )
+        validated_enroll_timeout = _validate_ipc_timeout(
+            enroll_timeout_secs, "enroll_timeout_secs"
+        )
+        clean_name = _validate_safe_segment(name, "name")
+        if not isinstance(org_token, str):
+            raise TypeError(f"org_token must be str; got {type(org_token).__name__}")
+        if not org_token or not org_token.strip():
             raise HawcxError(
                 "HawcxAgent.enroll requires a non-empty `org_token`; "
                 "obtain one from the Hawcx Admin Console (CS v7.2.6 §4.2)"
             )
         auth_endpoint = authenticator_socket or default_auth_control_socket_for(
-            name, ipc_dir=ipc_dir
+            clean_name, ipc_dir=ipc_dir
         )
 
         # Phase 1 — Authenticator-driven enrollment ceremony.
         with AuthenticatorClient.connect(
-            auth_endpoint, timeout_secs=enroll_timeout_secs
+            auth_endpoint, timeout_secs=validated_enroll_timeout
         ) as auth:
             result = auth.register_agent(
                 agent_class=agent_class,
-                subject_user_id=name,
+                subject_user_id=clean_name,
                 org_token=org_token,
-                prepared_agent_id=name,
+                prepared_agent_id=clean_name,
             )
 
         # Phase 2 — connect to the Assembler agent socket for the
@@ -270,7 +287,7 @@ class HawcxAgent:
             default_endpoint_for(
                 result.agent_instance_id, index=index, ipc_dir=ipc_dir
             ),
-            timeout_secs=connect_timeout_secs,
+            timeout_secs=validated_connect_timeout,
         )
         agent = cls(client, allowlist)
         # Attach enrollment metadata so callers can introspect the
@@ -306,7 +323,8 @@ class HawcxAgent:
         content_type: str | None = None,
         transport: TokenTransport | None = None,
         request_id: str | None = None,
-        acting_for_user: str | None,  # Ask 2: required kwarg (no silent default); pass None for an explicit unprincipled call
+        # Ask 2: required kwarg (no silent default); pass None for unprincipled calls.
+        acting_for_user: str | None,
         provider: str | None = None,
     ) -> ToolCallResponse:
         """Profile E tool call.
@@ -348,29 +366,34 @@ class HawcxAgent:
         construction. Out-of-list values raise :class:`HawcxError`
         before any IPC bytes are written.
         """
-        if self._client is None:
+        client = self._client
+        if client is None:
             raise HawcxError("agent already closed")
         if acting_for_user is not None:
             self._assert_principal_allowed(acting_for_user)
+        validated_provider = _validate_provider(provider)
+        validated_headers = _validate_headers_i2(headers)
+        validated_constraints = _validate_constraints(constraints)
+        validated_tool_args = _validate_tool_arguments(tool_arguments)
         req = ToolCallRequest(
             request_id=request_id or f"req-{uuid.uuid4().hex[:16]}",
             target_rs_url=target_rs_url,
             http_method=http_method.upper(),
-            headers=dict(headers or {}),
+            headers=validated_headers,
             tool=tool,
             mcp_tool_name=mcp_tool_name,
             action=list(action or []),
             resource=resource,
-            constraints=dict(constraints or {}),
+            constraints=validated_constraints,
             plaintext_request_body=body,
             claimed_intent_hash=claimed_intent_hash,
-            tool_arguments=tool_arguments,
+            tool_arguments=validated_tool_args,
             content_type=content_type,
             transport=transport,
             acting_for_user=acting_for_user,
-            provider=provider,
+            provider=validated_provider,
         )
-        return self._client.invoke(req)
+        return client.invoke(req)
 
     def invoke_for(
         self,
@@ -390,6 +413,7 @@ class HawcxAgent:
         content_type: str | None = None,
         transport: TokenTransport | None = None,
         request_id: str | None = None,
+        provider: str | None = None,
     ) -> ToolCallResponse:
         """Sugar for :meth:`invoke` with a required ``acting_for_user``.
 
@@ -403,10 +427,14 @@ class HawcxAgent:
         :meth:`invoke` directly if "no principal" is the intended
         semantic).
         """
+        if not isinstance(user_principal_id, str):
+            raise TypeError(
+                f"user_principal_id must be str; got {type(user_principal_id).__name__}"
+            )
         if not user_principal_id:
             raise ValueError(
                 "invoke_for requires a non-empty user_principal_id; "
-                "use invoke(...) without acting_for_user for unprincipled calls"
+                "use invoke(...) with acting_for_user=None for unprincipled calls"
             )
         # Pre-check here so the stack trace points at the invoke_for
         # call site rather than the inner invoke() forward.
@@ -427,6 +455,7 @@ class HawcxAgent:
             transport=transport,
             request_id=request_id,
             acting_for_user=user_principal_id,
+            provider=provider,
         )
 
     def send_clarification_answer(
@@ -438,9 +467,10 @@ class HawcxAgent:
         answer_text: str | None = None,
     ) -> None:
         """Profile E first hop: forward a clarification answer to the Assembler."""
-        if self._client is None:
+        client = self._client
+        if client is None:
             raise HawcxError("agent already closed")
-        self._client.send_clarification_answer(
+        client.send_clarification_answer(
             pending_id=pending_id,
             session_id=session_id,
             answer_index=answer_index,
@@ -456,24 +486,29 @@ class HawcxAgent:
         principal IDs cannot use the exception text as an enumeration
         oracle.
         """
+        if not isinstance(principal, str):
+            raise TypeError(
+                f"acting_for_user must be str or None; got {type(principal).__name__}"
+            )
         if principal == "":
             raise HawcxError(
-                "acting_for_user must be a non-empty string; omit the "
-                "field to opt out of runtime principal switching"
+                "acting_for_user must be a non-empty string; pass "
+                "acting_for_user=None to opt out of runtime principal switching"
             )
         if principal not in self._principal_allowlist:
             fp = _principal_fingerprint(principal)
             raise HawcxError(
                 f"acting_for_user principal not in principal_allowlist "
                 f"(fingerprint={fp}); add the principal to the allowlist "
-                "at HawcxAgent.connect() time or omit acting_for_user. "
+                "at HawcxAgent.connect() time or pass acting_for_user=None. "
                 "See README 'Threat model - runtime principal'."
             )
 
     def close(self) -> None:
-        if self._client is not None:
-            self._client.close()
-            self._client = None  # type: ignore[assignment]
+        client = self._client
+        if client is not None:
+            self._client = None
+            client.close()
 
     def __enter__(self) -> HawcxAgent:
         return self
@@ -483,6 +518,39 @@ class HawcxAgent:
 
 
 # ── Module-level helpers ────────────────────────────────────────────
+
+
+def _validate_safe_segment(val: Any, field_name: str = "agent_id") -> str:
+    if type(val) is not str:
+        raise TypeError(f"{field_name} must be str; got {type(val).__name__}")
+    if (
+        not val
+        or val != val.strip()
+        or val in (".", "..")
+        or ".." in val
+        or "/" in val
+        or "\\" in val
+        or any(
+            ch.isspace()
+            or ord(ch) < 0x20
+            or ord(ch) == 0x7F
+            or unicodedata.category(ch).startswith("C")
+            for ch in val
+        )
+    ):
+        raise InvalidIdentifierError(
+            f"{field_name} must be a non-empty single path segment without "
+            "'/', '\\\\', '..', whitespace, or control characters"
+        )
+    return val
+
+
+def _validate_non_bool_index(index: int) -> int:
+    if not (type(index) is int and not isinstance(index, bool)):
+        raise TypeError(f"index must be int; got {type(index).__name__}")
+    if index < 0:
+        raise ValueError(f"index must be >= 0; got {index}")
+    return index
 
 
 def _validate_principal_allowlist(list_arg: list[str]) -> frozenset[str]:

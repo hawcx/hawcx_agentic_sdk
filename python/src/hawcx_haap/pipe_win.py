@@ -16,11 +16,23 @@ This module is importable on any platform; the kernel32 bindings and
 from __future__ import annotations
 
 import ctypes
+import math
 import sys
 import time
 from typing import Any
 
 from hawcx_haap.errors import IpcError
+
+
+def _validate_pipe_timeout(timeout: float | None) -> float | None:
+    if timeout is None:
+        return None
+    if isinstance(timeout, bool) or not (type(timeout) is int or type(timeout) is float):
+        raise TypeError(f"timeout must be float or None; got {type(timeout).__name__}")
+    val = float(timeout)
+    if math.isnan(val) or math.isinf(val) or val < 0:
+        raise ValueError(f"timeout must be a finite non-negative number; got {timeout!r}")
+    return val
 
 # wintypes is only meaningful on Windows; fall back to plain ctypes types so
 # this module is importable for pytest collection / mypy on Unix.
@@ -89,13 +101,21 @@ class WindowsPipeSocket:
     """Subset of :class:`socket.socket` backed by a Windows pipe handle."""
 
     def __init__(self, handle: int) -> None:
+        if not (type(handle) is int and not isinstance(handle, bool)):
+            raise TypeError(f"handle must be int; got {type(handle).__name__}")
+        if (
+            handle <= 0
+            or handle >= 0xFFFFFFFFFFFFFFFF
+            or handle == INVALID_HANDLE_VALUE
+        ):
+            raise ValueError(f"invalid Windows pipe handle: {handle!r}")
         self._handle = handle
         self._timeout: float | None = None
 
     def settimeout(self, timeout: float | None) -> None:
         # Enforced per read and write, like a socket's (#129). It used to be
         # stored and ignored, so a Windows read never timed out at all.
-        self._timeout = timeout
+        self._timeout = _validate_pipe_timeout(timeout)
 
     def _finish(self, ov: Any, err: int) -> int:
         """Wait out an overlapped read or write, cancelling it at the deadline.
@@ -122,12 +142,16 @@ class WindowsPipeSocket:
         except TimeoutError:
             raise
         except OSError as e:
-            raise IpcError(f"WriteFile failed (error {e.winerror})") from e
+            raise IpcError(f"WriteFile failed (error {getattr(e, 'winerror', e.errno)})") from e
         if written != len(data):
             raise IpcError(f"WriteFile failed (wrote {written}/{len(data)})")
 
     def recv(self, nbytes: int) -> bytes:
-        if nbytes <= 0:
+        if not (type(nbytes) is int and not isinstance(nbytes, bool)):
+            raise TypeError(f"nbytes must be int; got {type(nbytes).__name__}")
+        if nbytes < 0:
+            raise ValueError(f"nbytes must be non-negative; got {nbytes}")
+        if nbytes == 0:
             return b""
         try:
             ov, err = _winapi.ReadFile(self._handle, nbytes, overlapped=True)
@@ -135,9 +159,10 @@ class WindowsPipeSocket:
         except TimeoutError:
             raise
         except OSError as e:
-            if e.winerror in (ERROR_BROKEN_PIPE, ERROR_NO_DATA):
+            winerr = getattr(e, "winerror", None)
+            if winerr in (ERROR_BROKEN_PIPE, ERROR_NO_DATA):
                 return b""
-            raise IpcError(f"ReadFile failed (error {e.winerror})") from e
+            raise IpcError(f"ReadFile failed (error {winerr})") from e
         return bytes(ov.getbuffer())
 
     def close(self) -> None:
@@ -148,9 +173,10 @@ class WindowsPipeSocket:
 
 def connect(path: str, *, timeout_secs: float | None = 5.0) -> WindowsPipeSocket:
     """Open a Named Pipe handle to ``path`` and wrap it as a socket-like object."""
+    validated_timeout = _validate_pipe_timeout(timeout_secs)
     if sys.platform != "win32":
         raise IpcError("hawcx_haap.pipe_win.connect() is Windows-only")
-    deadline = time.monotonic() + timeout_secs if timeout_secs is not None else None
+    deadline = time.monotonic() + validated_timeout if validated_timeout is not None else None
     while True:
         handle = _kernel32.CreateFileW(
             path,

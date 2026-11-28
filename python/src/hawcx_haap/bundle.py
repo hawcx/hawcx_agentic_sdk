@@ -53,6 +53,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import zipapp
 
 __all__ = ["BundleError", "build_bundle", "NATIVE_SUFFIXES"]
@@ -241,8 +242,8 @@ def _refuse_native_extensions(staging: pathlib.Path) -> None:
         "refusing to bundle: native extension module(s) found in "
         f"{len(packages)} package(s) -- " + ", ".join(packages),
     ]
-    for _pkg, rel in offenders[:10]:
-        lines.append(f"  {rel}")
+    for _pkg, rel_posix in offenders[:10]:
+        lines.append(f"  {rel_posix}")
     if len(offenders) > 10:
         lines.append(f"  ... and {len(offenders) - 10} more")
     lines.append(
@@ -300,6 +301,19 @@ def build_bundle(
     Overwrites *output* unconditionally -- the clobber refusal lives in the CLI
     so that a caller who has already decided is not fought a second time.
     """
+    if (
+        not isinstance(interpreter, str)
+        or not interpreter
+        or interpreter != interpreter.strip()
+        or any(
+            ord(ch) < 0x20 or ord(ch) == 0x7F or unicodedata.category(ch).startswith("C")
+            for ch in interpreter
+        )
+    ):
+        raise BundleError(
+            "invalid interpreter: must be a non-empty string without leading/trailing "
+            "whitespace, newlines, NUL, or control characters"
+        )
     source = source.resolve()
     if not source.is_dir():
         raise BundleError(f"{source}: not a directory (bundle takes an agent project directory)")
