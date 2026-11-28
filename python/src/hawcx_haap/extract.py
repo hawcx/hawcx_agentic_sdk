@@ -143,6 +143,10 @@ def extract_from_names(
     it. Synthesising one (`tool.add_group_member`, say) would mint a HAAP tool
     identity out of nothing, and identity is what policy binds to.
     """
+    if not isinstance(namespace, str):
+        raise ExtractError(f"namespace must be a string; got {type(namespace).__name__}")
+    if not isinstance(names, (list, tuple)):
+        raise ExtractError(f"names must be a list of tool name strings; got {type(names).__name__}")
     rep = report or ExtractReport()
     ns = _normalize_segment(namespace)
     if not ns:
@@ -153,6 +157,9 @@ def extract_from_names(
 
     seen: set[str] = set()
     for raw in names:
+        if not isinstance(raw, str):
+            rep.refused.append((repr(raw)[:60], "tool name must be a string"))
+            continue
         seg = _normalize_segment(raw)
         if not seg:
             rep.refused.append((raw, "name normalises to an empty id segment"))
@@ -209,9 +216,12 @@ def extract_from_mcp_tools_list(payload: Any, *, namespace: str) -> ExtractRepor
     because all three are what people actually have on disk after capturing a
     session.
     """
+    if not isinstance(namespace, str):
+        raise ExtractError(f"namespace must be a string; got {type(namespace).__name__}")
     node = payload
     if isinstance(node, dict):
         node = node.get("result", node)
+    if isinstance(node, dict):
         node = node.get("tools", node)
     if not isinstance(node, list):
         raise ExtractError(
@@ -226,7 +236,7 @@ def extract_from_mcp_tools_list(payload: Any, *, namespace: str) -> ExtractRepor
         elif isinstance(entry, dict) and isinstance(entry.get("name"), str):
             names.append(entry["name"])
         else:
-            rep.refused.append((json.dumps(entry)[:60], "no string `name` field"))
+            rep.refused.append((json.dumps(entry, default=repr)[:60], "no string `name` field"))
     if not names and not rep.refused:
         raise ExtractError("the tools array is empty")
     return extract_from_names(names, namespace=namespace, report=rep)

@@ -217,6 +217,28 @@ jobs:
         working-directory: python
         shell: bash
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
-          python -m pip install -e '.[dev]'
+          python -m pip install -e '.[dev]' 'pydantic>=2.0'
           pytest -v
+          PYTHONPATH=../python-crewai/src pytest -v ../python-crewai/tests
+
+  python-crewai:
+    name: python-crewai + lint + typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install + test + ruff + mypy
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -e ./python -e './python-crewai[dev]'
+          pytest -v python-crewai/tests
+          ruff check --config python/pyproject.toml python/src python/examples/crewai_integration.py python/tests/test_v17_wire_and_principal_guards.py
+          ruff check --config python-crewai/pyproject.toml python-crewai/src python-crewai/tests
+          MYPYPATH=python/src mypy --config-file python/pyproject.toml python/src
+          MYPYPATH=python-crewai/src:python/src mypy --config-file python-crewai/pyproject.toml python-crewai/src

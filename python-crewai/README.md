@@ -54,22 +54,21 @@ with HawcxAgent.connect_by_agent_id(
     # researcher = Agent(role="...", tools=[nim_search], ...)
 ```
 
-## Multi-tenant (per-user principal)
+## Multi-tenant (host-bound per-user principal)
 
-When one agent process serves many end-users, declare the per-call
-principal in your tool's `args_schema` so the LLM can supply it, and let
-the SDK enforce the operator-controlled allowlist:
+Per HAAP Canonical Specification v7.21.4 §9.1, end-user identity must never cross
+the untrusted LLM tool-call boundary (`args_schema` / tool `kwargs`). Instead,
+bind the principal on the host via `default_user_principal_id` or materialize
+one sibling tool per end-user via `tool.for_user(...)` (cheap — shares the
+single `HawcxAgent` IPC connection):
 
 ```python
 from pydantic import BaseModel, Field
 
 class SearchInput(BaseModel):
     query: str = Field(description="Search query.")
-    user_principal_id: str = Field(
-        description="End-user on whose behalf the search runs."
-    )
 
-tool = HawcxTool(
+base_tool = HawcxTool(
     name="hawcx_search",
     description="Search the protected knowledge base.",
     hawcx_agent=agent,
@@ -78,17 +77,17 @@ tool = HawcxTool(
     endpoint="https://api.example.com/search",
     args_schema=SearchInput,
 )
+
+alice_tool = base_tool.for_user("alice@example.com")
 ```
 
-`HawcxAgent.connect(..., principal_allowlist=[...])` is the enforcement
+`HawcxAgent.connect(..., principal_allowlist=[...])` is the host enforcement
 boundary: any `user_principal_id` not on the allowlist is rejected
 synchronously before a single IPC byte is written. The error message
 redacts the rejected principal to a 12-hex-char SHA-256 fingerprint, so
-the exception text is not an enumeration oracle.
-
-If your flow materializes one tool per user instead, use
-`tool.for_user("alice@example.com")` to get a sibling instance bound to
-that principal.
+the exception text is not an enumeration oracle. Any attempt by an LLM or
+custom `args_schema` to pass `user_principal_id` / `acting_for_user` in tool
+arguments is rejected fail-closed (`E_AUTHORITY_CLAIM` / `0x0058`).
 
 ## Backward-compat factories
 

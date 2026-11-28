@@ -328,52 +328,96 @@ def _classify(tool_id: str, principal: str, resp: Any) -> Decision:
 
     for doc in documents:
         err = doc.get("error")
-        if not err:
-            continue
-        if isinstance(err, dict) and err.get("code") in HAWCX_REJECT_CODES:
-            data = err.get("data")
+        if err is not None:
+            code = err.get("code") if isinstance(err, dict) else None
+            if (
+                isinstance(err, dict)
+                and type(code) is int and not isinstance(code, bool)
+                and code in HAWCX_REJECT_CODES
+            ):
+                data = err.get("data")
+                return Decision(
+                    tool=tool_id,
+                    principal=principal,
+                    allowed=False,
+                    reason=str(err.get("message") or "rejected by the HAAP MCP gateway"),
+                    reason_code=(
+                        str(data["hawcx_reason_code"])
+                        if isinstance(data, dict) and data.get("hawcx_reason_code")
+                        else None
+                    ),
+                    http_status=(
+                        status if type(status) is int and not isinstance(status, bool) else None
+                    ),
+                    body=body_text,
+                    request_id=request_id,
+                )
+            # Any OTHER error envelope is a downstream/transport fault, not a policy
+            # decision and not a success: a JSON-RPC application error
+            # (-32602/-32601/-32603/…) outside the reserved range, or the RSV /proxy
+            # failure envelope (``{"error": "<string>"}``). Fail CLOSED — the call
+            # returned no data, so an agent must not proceed as if it had — but leave
+            # `reason_code` None so a consumer bucketing by HAAP policy code never
+            # mistakes this for a decision that was actually made. Reporting it as a
+            # policy denial would manufacture evidence of a decision nobody made;
+            # reporting it as ALLOW (the prior behaviour) hands an error body to the
+            # model as the resource's answer. #119.
             return Decision(
                 tool=tool_id,
                 principal=principal,
                 allowed=False,
-                reason=str(err.get("message") or "rejected by the HAAP MCP gateway"),
-                reason_code=(
-                    str(data["hawcx_reason_code"])
-                    if isinstance(data, dict) and data.get("hawcx_reason_code")
-                    else None
+                reason=_downstream_error_reason(err),
+                reason_code=None,
+                http_status=(
+                    status if type(status) is int and not isinstance(status, bool) else None
                 ),
-                http_status=status,
                 body=body_text,
                 request_id=request_id,
             )
-        # Any OTHER error envelope is a downstream/transport fault, not a policy
-        # decision and not a success: a JSON-RPC application error
-        # (-32602/-32601/-32603/…) outside the reserved range, or the RSV /proxy
-        # failure envelope (``{"error": "<string>"}``). Fail CLOSED — the call
-        # returned no data, so an agent must not proceed as if it had — but leave
-        # `reason_code` None so a consumer bucketing by HAAP policy code never
-        # mistakes this for a decision that was actually made. Reporting it as a
-        # policy denial would manufacture evidence of a decision nobody made;
-        # reporting it as ALLOW (the prior behaviour) hands an error body to the
-        # model as the resource's answer. #119.
+        if "decision" in doc and (
+            doc.get("decision") != "allow" or doc.get("reject_code") is not None
+        ):
+            return Decision(
+                tool=tool_id,
+                principal=principal,
+                allowed=False,
+                reason="contradictory or non-allow decision envelope",
+                http_status=(
+                    status if type(status) is int and not isinstance(status, bool) else None
+                ),
+                body=body_text,
+                request_id=request_id,
+            )
+
+    if status is not None and not (type(status) is int and not isinstance(status, bool)):
         return Decision(
             tool=tool_id,
             principal=principal,
             allowed=False,
-            reason=_downstream_error_reason(err),
-            reason_code=None,
-            http_status=status,
+            reason=f"invalid response http_status: {status!r}",
+            http_status=None,
             body=body_text,
             request_id=request_id,
         )
 
     # An HTTP-level 401/403 is a refusal too, not a transport fault.
-    if isinstance(status, int) and status in (401, 403):
+    if type(status) is int and not isinstance(status, bool) and status in (401, 403):
         return Decision(
             tool=tool_id,
             principal=principal,
             allowed=False,
             reason=f"destination refused with HTTP {status}",
+            http_status=status,
+            body=body_text,
+            request_id=request_id,
+        )
+
+    if type(status) is int and not isinstance(status, bool) and not (200 <= status < 300):
+        return Decision(
+            tool=tool_id,
+            principal=principal,
+            allowed=False,
+            reason=f"destination returned non-2xx HTTP {status}",
             http_status=status,
             body=body_text,
             request_id=request_id,

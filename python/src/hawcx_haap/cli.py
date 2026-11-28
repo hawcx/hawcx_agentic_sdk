@@ -182,8 +182,9 @@ def _cmd_submit(args: argparse.Namespace) -> int:
         )
     except SubmitError as e:
         print(f"submit failed: {e}", file=sys.stderr)
-        for err in e.errors:
-            print(f"  {err.get('code', '?'):28} {err.get('path', '?')}", file=sys.stderr)
+        for err in e.errors if isinstance(e.errors, list) else []:
+            if isinstance(err, dict):
+                print(f"  {err.get('code', '?'):28} {err.get('path', '?')}", file=sys.stderr)
         return 1
 
     print(

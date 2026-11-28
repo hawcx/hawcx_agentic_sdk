@@ -39,7 +39,6 @@ from __future__ import annotations
 import json
 import os
 import socket
-import struct
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,6 +48,7 @@ from hawcx_haap.errors import HawcxError, IpcError
 from hawcx_haap.ipc import (
     MAX_MESSAGE_SIZE,
     _validate_ipc_socket_path,
+    _validate_ipc_timeout,
     _verify_peer_after_connect,
     read_frame,
     write_frame,
@@ -115,15 +115,16 @@ def default_auth_control_socket_for(
     ``export`` flips both the Rust supervisor and the Python client to
     a non-default path.
     """
+    from hawcx_haap.agent import _default_ipc_dir, _validate_safe_segment
+
+    clean_agent_id = _validate_safe_segment(agent_id, "agent_id")
     override = os.environ.get("HAAP_AUTH_CONTROL_SOCK")
     if override:
         return override
     if sys.platform == "win32":
-        return rf"\\.\pipe\haap-{agent_id}-auth-control"
-    from hawcx_haap.agent import _default_ipc_dir  # circular-safe at call time
-
+        return rf"\\.\pipe\haap-{clean_agent_id}-auth-control"
     base = ipc_dir or _default_ipc_dir()
-    return str(base / agent_id / "auth-control.sock")
+    return str(base / clean_agent_id / "auth-control.sock")
 
 
 # ── AuthenticatorClient ──────────────────────────────────────────────
@@ -153,15 +154,16 @@ class AuthenticatorClient:
         X3DH ceremony against the AS (network round-trip), unlike a
         local tool-call which is ~milliseconds.
         """
+        validated_timeout = _validate_ipc_timeout(timeout_secs, "timeout_secs")
         if sys.platform == "win32":
             from hawcx_haap import pipe_win  # noqa: WPS433
 
-            sock = pipe_win.connect(endpoint, timeout_secs=timeout_secs)  # type: ignore[assignment]
+            sock = pipe_win.connect(endpoint, timeout_secs=validated_timeout)  # type: ignore[assignment]
         else:
             pre_stat = _validate_ipc_socket_path(endpoint)
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            if timeout_secs is not None:
-                sock.settimeout(timeout_secs)
+            if validated_timeout is not None:
+                sock.settimeout(validated_timeout)
             try:
                 sock.connect(endpoint)
             except OSError as e:
@@ -254,6 +256,13 @@ class AuthenticatorClient:
 # ── Response parser ──────────────────────────────────────────────────
 
 
+def _require_non_empty_str(obj: dict[str, Any], key: str) -> str:
+    val = obj.get(key)
+    if not isinstance(val, str) or not val:
+        raise IpcError(f"register response field {key!r} must be a non-empty string")
+    return val
+
+
 def _parse_register_response(body: bytes) -> EnrollmentResult:
     """Decode the JSON ``RegisterAgentResult`` enum into an EnrollmentResult.
 
@@ -261,9 +270,14 @@ def _parse_register_response(body: bytes) -> EnrollmentResult:
     envelopes (``{"error": "..."}``).
     """
     try:
-        obj: dict[str, Any] = json.loads(body.decode("utf-8"))
+        obj = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
         raise IpcError(f"malformed register response: {e}") from e
+
+    if not isinstance(obj, dict):
+        raise IpcError(
+            f"malformed register response: expected JSON object, got {type(obj).__name__}"
+        )
 
     # Generic error envelope from the control_socket handler (not the
     # serde-derived enum variant). Example:
@@ -272,31 +286,48 @@ def _parse_register_response(body: bytes) -> EnrollmentResult:
         raise EnrollmentRejected(str(obj["error"]))
 
     variant = obj.get("type")
+    if variant in ("Enrolled", "AlreadyEnrolled"):
+        if obj.get("error") is not None or obj.get("reject_code") is not None:
+            raise IpcError(
+                f"contradictory {variant} register response carries error or reject_code"
+            )
     if variant == "Enrolled":
+        ik_fp = obj.get("ik_fingerprint", "")
+        if not isinstance(ik_fp, str):
+            raise IpcError("register response field 'ik_fingerprint' must be a string")
         return EnrollmentResult(
-            agent_instance_id=str(obj["agent_instance_id"]),
-            client_id=str(obj["client_id"]),
-            ik_fingerprint=str(obj.get("ik_fingerprint", "")),
-            session_id=str(obj["session_id"]),
+            agent_instance_id=_require_non_empty_str(obj, "agent_instance_id"),
+            client_id=_require_non_empty_str(obj, "client_id"),
+            ik_fingerprint=ik_fp,
+            session_id=_require_non_empty_str(obj, "session_id"),
             already_enrolled=False,
             trust_level=None,
         )
     if variant == "AlreadyEnrolled":
+        ik_fp = obj.get("ik_fingerprint", "")
+        if not isinstance(ik_fp, str):
+            raise IpcError("register response field 'ik_fingerprint' must be a string")
         trust_level = obj.get("trust_level")
+        if trust_level is not None and not isinstance(trust_level, str):
+            raise IpcError("register response field 'trust_level' must be a string or null")
         return EnrollmentResult(
-            agent_instance_id=str(obj["agent_instance_id"]),
-            client_id=str(obj["client_id"]),
-            ik_fingerprint=str(obj.get("ik_fingerprint", "")),
-            session_id=str(obj["session_id"]),
+            agent_instance_id=_require_non_empty_str(obj, "agent_instance_id"),
+            client_id=_require_non_empty_str(obj, "client_id"),
+            ik_fingerprint=ik_fp,
+            session_id=_require_non_empty_str(obj, "session_id"),
             already_enrolled=True,
-            trust_level=(
-                str(trust_level) if trust_level is not None else None
-            ),
+            trust_level=trust_level,
         )
     if variant == "Degraded":
+        reason = obj.get("reason", "policy push failed")
+        if not isinstance(reason, str):
+            raise IpcError("register response field 'reason' must be a string")
+        aid = obj.get("agent_instance_id", "")
+        if aid is not None and not isinstance(aid, str):
+            raise IpcError("register response field 'agent_instance_id' must be a string or null")
         raise EnrollmentRejected(
-            str(obj.get("reason", "policy push failed")),
-            agent_instance_id=str(obj.get("agent_instance_id", "")) or None,
+            reason,
+            agent_instance_id=aid or None,
         )
     raise IpcError(
         f"unknown RegisterAgentResult variant: {variant!r} "

@@ -7,6 +7,10 @@ class HawcxError(Exception):
     """Base class for all HAAP SDK errors."""
 
 
+class InvalidIdentifierError(HawcxError, ValueError):
+    """Invalid identifier or path segment (subclasses both HawcxError and ValueError)."""
+
+
 class IpcError(HawcxError):
     """IPC transport errors (connection refused, framing, oversized message)."""
 
@@ -49,6 +53,14 @@ class EgressError(HawcxError):
 class EgressConfigError(EgressError):
     """Cannot use the egress transport: httpx extra missing, or no broker
     socket resolved. Never a silent fallback to the direct network."""
+
+
+class EgressConfigTypeError(EgressConfigError, TypeError):
+    """Invalid egress configuration argument type (subclasses EgressConfigError and TypeError)."""
+
+
+class EgressConfigValueError(EgressConfigError, ValueError):
+    """Invalid egress configuration argument value (subclasses EgressConfigError and ValueError)."""
 
 
 class EgressProtocolError(EgressError):

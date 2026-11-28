@@ -11,10 +11,10 @@ Architecture
   Hawcx gateway can enforce Cedar policy:
   ``context.user_principal_id == resource.owner_user_id``.
 - ``principal_allowlist`` is sourced from operator-controlled config
-  (``HAAP_ALLOWED_PRINCIPALS``). The LLM is told which user ID to use in
-  the task description; even if the model were to hallucinate a different ID,
-  the SDK rejects any principal not already on the allowlist before a single
-  IPC byte is written.
+  (``HAAP_ALLOWED_PRINCIPALS``). Each per-user crew binds ``user_principal_id``
+  on the host when constructing the tools (``default_user_principal_id`` /
+  ``.for_user(...)``) — the LLM is never asked or permitted to supply a user
+  principal in tool-call arguments (HAAP CS v7.21.4 §9.1).
 
 Prerequisites
 -------------
@@ -64,7 +64,6 @@ import sys
 from crewai import Agent, Crew, Process, Task
 from hawcx_crewai import make_document_tool, make_search_tool
 from hawcx_haap import HawcxAgent
-
 
 # ── Operator config ──────────────────────────────────────────────────────────
 # All values here come from the operator environment, never from LLM output
@@ -116,21 +115,25 @@ def build_research_crew(
 ) -> Crew:
     """Build a two-agent research crew scoped to a single end-user.
 
-    Both tools receive ``user_principal_id`` from the task description so
-    every HAAP token minted during this crew's run carries
-    ``scope_json.user_principal_id``. The gateway's Cedar policy can then
-    restrict results to data that belongs to that user.
+    Both tools bind ``user_principal_id`` on the host at construction time
+    (never via LLM tool-call arguments per CS v7.21.4 §9.1).
 
     ``user_principal_id`` must already be in the ``principal_allowlist``
     passed when constructing ``haap_agent`` — the SDK enforces this
     synchronously at ``invoke_for`` call time.
     """
-    # hawcx_crewai provides the CrewAI BaseTool adapter. The factory
-    # helpers preserve the pre-v0.1.0a11 ergonomic surface; new code can
-    # instead construct ``HawcxTool`` directly for finer control over
-    # provider class, tool_id (§47.4 binding), and endpoint.
-    search_tool = make_search_tool(haap_agent, rs_base_url=RS_BASE_URL)
-    doc_tool = make_document_tool(haap_agent, rs_base_url=RS_BASE_URL)
+    # hawcx_crewai provides the CrewAI BaseTool adapter. Bind the end-user
+    # principal on the host so the model cannot supply or override it.
+    search_tool = make_search_tool(
+        haap_agent,
+        rs_base_url=RS_BASE_URL,
+        default_user_principal_id=user_principal_id,
+    )
+    doc_tool = make_document_tool(
+        haap_agent,
+        rs_base_url=RS_BASE_URL,
+        default_user_principal_id=user_principal_id,
+    )
 
     researcher = Agent(
         role="Research Analyst",
@@ -153,14 +156,12 @@ def build_research_crew(
         verbose=True,
     )
 
-    # The user principal ID is embedded in the task description so the LLM
-    # forwards the correct value to every tool call. The SDK's allowlist is
-    # the enforcement boundary — the task description is just the instruction.
+    # The user principal ID is already bound on `search_tool` and `doc_tool`
+    # on the host; the LLM never supplies `user_principal_id` in tool args.
     research_task = Task(
         description=(
-            f"Research the following question on behalf of user '{user_principal_id}':\n\n"
+            f"Research the following question:\n\n"
             f"{research_question}\n\n"
-            f"Pass user_principal_id='{user_principal_id}' to every tool call. "
             "Use hawcx_search to find relevant documents, then hawcx_get_document "
             "to retrieve the most promising ones. Cite every document ID you use."
         ),
